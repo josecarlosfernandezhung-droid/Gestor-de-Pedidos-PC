@@ -1437,6 +1437,78 @@ function Leer-CuerpoJson($request) {
     return $null
 }
 
+# ---------------- Gestor de Almacenes: sincronizacion por WiFi local ----------------
+# La app "Gestor de Almacenes" usa ESTE servidor como punto de encuentro (sin internet):
+# cada telefono sube sus movimientos (un archivo por dispositivo) y baja los de los
+# demas, y aqui se guarda el respaldo por secciones (productos, almacenes, etc.).
+# Todo queda en la carpeta "almacen_sync" junto a este script.
+$almacenSyncDir = Join-Path $scriptDir "almacen_sync"
+$almacenSyncMovDir = Join-Path $almacenSyncDir "mov"
+$almacenRespaldoPath = Join-Path $almacenSyncDir "respaldo.json"
+$almacenUtf8 = New-Object System.Text.UTF8Encoding($false)
+
+function Almacen-Sha([string]$texto) {
+    $md5 = [System.Security.Cryptography.MD5]::Create()
+    try { $h = $md5.ComputeHash($almacenUtf8.GetBytes($texto)) } finally { $md5.Dispose() }
+    return ([BitConverter]::ToString($h) -replace '-', '').ToLower()
+}
+
+function Almacen-Leer([string]$ruta) {
+    if (-not (Test-Path $ruta)) { return $null }
+    return [System.IO.File]::ReadAllText($ruta, $almacenUtf8)
+}
+
+function Almacen-Escribir([string]$ruta, [string]$texto) {
+    $dir = Split-Path $ruta -Parent
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    $tmp = $ruta + ".tmp"
+    [System.IO.File]::WriteAllText($tmp, $texto, $almacenUtf8)
+    if (Test-Path $ruta) { Remove-Item $ruta -Force }
+    Move-Item $tmp $ruta -Force
+}
+
+function Almacen-NombreValido([string]$n) {
+    $n = ([string]$n).Trim().ToLower()
+    if ($n -match '^[a-z0-9][a-z0-9\-]{0,59}\.json$') { return $n }
+    return $null
+}
+
+function Leer-CuerpoTexto($request) {
+    $reader = New-Object System.IO.StreamReader($request.InputStream, [System.Text.Encoding]::UTF8)
+    try { return $reader.ReadToEnd() } finally { $reader.Close() }
+}
+
+function Almacen-ListaMovJson {
+    $partes = New-Object System.Collections.ArrayList
+    if (Test-Path $almacenSyncMovDir) {
+        foreach ($f in @(Get-ChildItem -Path $almacenSyncMovDir -Filter "*.json" -File -ErrorAction SilentlyContinue)) {
+            $txt = Almacen-Leer $f.FullName
+            if ($null -eq $txt) { continue }
+            [void]$partes.Add('{"name":"' + $f.Name + '","sha":"' + (Almacen-Sha $txt) + '"}')
+        }
+    }
+    return "[" + ($partes -join ",") + "]"
+}
+
+# ---------------- Anti-duplicados PC -> movil ----------------
+# Cada envio desde el panel (pedido armado para un vendedor / productos agregados a un pedido)
+# lleva una "claveEnvio". Si llega la misma clave otra vez (doble toque, reintento por un corte
+# de red) se devuelve la respuesta anterior y NO se crea ni se agrega nada de nuevo.
+$global:clavesEnvio = @{}
+function Clave-EnvioBuscar([string]$clave) {
+    if ([string]::IsNullOrWhiteSpace($clave)) { return $null }
+    $limite = (Get-Date).AddMinutes(-20)
+    foreach ($k in @($global:clavesEnvio.Keys)) {
+        if ($global:clavesEnvio[$k].t -lt $limite) { $global:clavesEnvio.Remove($k) }
+    }
+    if ($global:clavesEnvio.ContainsKey($clave)) { return [string]$global:clavesEnvio[$clave].resp }
+    return $null
+}
+function Clave-EnvioGuardar([string]$clave, [string]$resp) {
+    if ([string]::IsNullOrWhiteSpace($clave)) { return }
+    $global:clavesEnvio[$clave] = @{ t = (Get-Date); resp = $resp }
+}
+
 function Imprimir-Texto([string]$texto) {
     $bytes = [System.Text.Encoding]::ASCII.GetBytes($texto)
     return [RawPrinterHelper]::EnviarBytes($nombreImpresora, $bytes)
@@ -2724,11 +2796,44 @@ $htmlPC = @'
       } catch(e) { alert('No se pudo enviar el aviso (revisa la conexion).'); }
     }
 
+    // ---- Fotos sin parpadeo: solo se pide /foto/<sku>.jpg si el producto TIENE foto ----
+    let skusConFoto = null;              // Set con los SKU que tienen foto en la PC (null = aun no se sabe)
+    const fotosFallidas = new Set();     // SKU cuya foto fallo una vez: no se vuelve a pedir
+    try { const g = JSON.parse(localStorage.getItem('skusConFotoPC') || 'null'); if (Array.isArray(g)) skusConFoto = new Set(g.map(String)); } catch (e) {}
+    async function cargarSkusConFoto() {
+      try {
+        const r = await fetch('/api/fotos/skus');
+        const d = await r.json();
+        if (Array.isArray(d)) {
+          skusConFoto = new Set(d.map(String));
+          try { localStorage.setItem('skusConFotoPC', JSON.stringify(d)); } catch (e) {}
+        }
+      } catch (e) {}
+    }
+    function tieneFoto(sku) {
+      if (!sku) return false;
+      sku = String(sku);
+      if (fotosFallidas.has(sku)) return false;
+      return skusConFoto ? skusConFoto.has(sku) : true;
+    }
+    function fotoFallo(img, sku) { fotosFallidas.add(String(sku)); if (img && img.remove) img.remove(); }
+    // Cambia el contenido solo si de verdad es distinto: evita que la lista se "repinte" sola cada pocos segundos.
+    function ponerHtmlSiCambio(el, html) {
+      const hijo = el.firstElementChild;
+      if (html !== '' && hijo && hijo.__marcaHtml === html && el.__htmlPrev === html) return false;
+      el.innerHTML = html;
+      el.__htmlPrev = html;
+      if (el.firstElementChild) el.firstElementChild.__marcaHtml = html;
+      return true;
+    }
+    cargarSkusConFoto();
+    setInterval(cargarSkusConFoto, 60000);
+
     function renderCard(p) {
       const revisar = necesitaRevision(p);
       const estadoClass = revisar ? 'porrevisar' : (p.estado === 'cobrado' ? 'cobrado' : (p.estado === 'cancelado' ? 'cancelado' : 'pendiente'));
       const items = (p.items || []).map(it => {
-        const fotoIt = it.sku ? ('<img class="ped-miniatura" src="/foto/' + encodeURIComponent(it.sku) + '.jpg" loading="lazy" onerror="this.remove()" onclick=\'verFotoProductoNP(' + JSON.stringify(it.sku) + ',' + JSON.stringify(it.nombre || '') + ')\'>') : '';
+        const fotoIt = tieneFoto(it.sku) ? ('<img class="ped-miniatura" src="/foto/' + encodeURIComponent(it.sku) + '.jpg" onerror=\'fotoFallo(this,' + JSON.stringify(String(it.sku)) + ')\' onclick=\'verFotoProductoNP(' + JSON.stringify(it.sku) + ',' + JSON.stringify(it.nombre || '') + ')\'>') : '';
         return '<li>' + fotoIt + '<span>' + it.cantidad + ' x ' + it.nombre + ' — $' + (it.precio * it.cantidad).toFixed(2) + '</span></li>';
       }).join('');
 
@@ -2861,9 +2966,9 @@ $htmlPC = @'
 
         const grid = document.getElementById('grid');
         if (visibles.length === 0) {
-          grid.innerHTML = '<div class="vacio">No hay pedidos por mostrar.</div>';
+          ponerHtmlSiCambio(grid, '<div class="vacio">No hay pedidos por mostrar.</div>');
         } else {
-          grid.innerHTML = visibles.map(renderCard).join('');
+          ponerHtmlSiCambio(grid, visibles.map(renderCard).join(''));
         }
 
         const maxId = pedidos.reduce((m,p) => Math.max(m, p.id), 0);
@@ -3660,7 +3765,7 @@ $htmlPC = @'
     setInterval(revisarAsignadosVistos, 5000);
 
     async function cargarCatalogoNP() {
-      if (catalogoNP.length > 0) return;   // se carga una sola vez por sesion del panel
+      // Se vuelve a pedir cada vez que se abre el dialogo: asi el stock que se ve (y el filtro de "sin stock") esta al dia.
       try {
         const res = await fetch('/api/catalogo');
         catalogoNP = await res.json();
@@ -3690,8 +3795,13 @@ $htmlPC = @'
     // pedido pendiente que ya llego (pasando su id) -- ej. algo que el
     // cliente pidio despues y hay que sumarlo antes de cobrar.
     let agregarAPedidoId = null;
+    let claveBaseNP = '';   // identifica esta "apertura" del dialogo: sirve para que un envio repetido no se duplique
+    let enviandoNP = false;
+    function hashSimpleNP(t) { let h = 5381; for (let i = 0; i < t.length; i++) h = ((h << 5) + h + t.charCodeAt(i)) | 0; return (h >>> 0).toString(36); }
     function abrirNuevoPedido(pedidoIdExistente) {
       agregarAPedidoId = pedidoIdExistente || null;
+      claveBaseNP = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+      enviandoNP = false;
       document.getElementById('nuevoPedidoOverlay').style.display = 'flex';
       document.getElementById('npError').textContent = '';
       document.getElementById('npBuscador').value = '';
@@ -3721,11 +3831,17 @@ $htmlPC = @'
       const q = normalizar(document.getElementById('npBuscador').value.trim());
       const cont = document.getElementById('npResultados');
       if (!q) { cont.innerHTML = ''; return; }
-      const encontrados = catalogoNP.filter(p =>
+      // Si en Ajustes esta activado "Ocultar sin stock a vendedores", aqui tambien se ocultan
+      // (solo cuando el Excel trae columna de cantidad, igual que en el movil del vendedor).
+      const hayControlNP = catalogoNP.some(p => p.stock !== null && p.stock !== undefined);
+      const baseNP = (ocultarSinStock && hayControlNP)
+        ? catalogoNP.filter(p => !(p.stock === null || p.stock === undefined || p.stock <= 0))
+        : catalogoNP;
+      const encontrados = baseNP.filter(p =>
         normalizar(p.nombre).includes(q) || normalizar(p.sku || '').includes(q)
       ).slice(0, 25);
       cont.innerHTML = encontrados.map(p => {
-        const fotoTag = p.sku ? ('<img class="np-miniatura" src="/foto/' + encodeURIComponent(p.sku) + '.jpg" loading="lazy" onerror="this.remove()" onclick=\'verFotoProductoNP(' + JSON.stringify(p.sku) + ',' + JSON.stringify(p.nombre) + ')\'>') : '';
+        const fotoTag = tieneFoto(p.sku) ? ('<img class="np-miniatura" src="/foto/' + encodeURIComponent(p.sku) + '.jpg" onerror=\'fotoFallo(this,' + JSON.stringify(String(p.sku)) + ')\' onclick=\'verFotoProductoNP(' + JSON.stringify(p.sku) + ',' + JSON.stringify(p.nombre) + ')\'>') : '';
         return '<div class="np-resultado">' +
           fotoTag +
           '<div class="np-info"><b>' + p.nombre + '</b><span>' + (p.sku || '') + ' — $' + p.precio.toFixed(2) + '</span></div>' +
@@ -3762,6 +3878,27 @@ $htmlPC = @'
       renderCarritoNP();
     }
 
+    // Cantidad escrita a mano (ademas de los botones + y -). 0 o vacio quita el producto.
+    function fijarCantidadNP(sku, valor) {
+      const item = carritoNP.find(i => i.sku === sku);
+      if (!item) return;
+      let n = parseFloat(String(valor).replace(',', '.'));
+      if (!isFinite(n) || n <= 0) {
+        carritoNP = carritoNP.filter(i => i.sku !== sku);
+      } else {
+        n = Math.round(n * 100) / 100;
+        const prod = catalogoNP.find(c => c.sku === sku);
+        const errEl = document.getElementById('npError');
+        if (prod && prod.stock !== null && prod.stock !== undefined && n > prod.stock) {
+          n = prod.stock;
+          if (errEl) errEl.textContent = 'De "' + item.nombre + '" solo hay ' + prod.stock + ' disponibles.';
+        } else if (errEl) { errEl.textContent = ''; }
+        if (n <= 0) carritoNP = carritoNP.filter(i => i.sku !== sku);
+        else item.cantidad = n;
+      }
+      renderCarritoNP();
+    }
+
     function renderCarritoNP() {
       const cont = document.getElementById('npCarrito');
       if (carritoNP.length === 0) {
@@ -3772,7 +3909,9 @@ $htmlPC = @'
             '<div>' + i.nombre + '</div>' +
             '<div style="display:flex; align-items:center; gap:8px;">' +
               '<button onclick="cambiarCantidadNP(\'' + i.sku + '\', -1)">-</button>' +
-              '<span>' + i.cantidad + '</span>' +
+              '<input type="number" min="0" step="any" inputmode="decimal" value="' + i.cantidad + '" title="Escribe la cantidad" ' +
+                'style="width:62px; text-align:center; padding:4px 2px; border-radius:6px; border:1px solid #475569; background:#0f172a; color:#fff; font-size:14px;" ' +
+                'onfocus="this.select()" onkeydown="if(event.key===\'Enter\'){this.blur();}" onchange="fijarCantidadNP(\'' + i.sku + '\', this.value)">' +
               '<button onclick="cambiarCantidadNP(\'' + i.sku + '\', 1)">+</button>' +
             '</div>' +
           '</div>'
@@ -3783,12 +3922,22 @@ $htmlPC = @'
     }
 
     async function enviarPedidoAVendedor() {
+      if (enviandoNP) return;   // doble toque: el primer envio ya esta en camino
+      enviandoNP = true;
+      const btnNP = document.getElementById('npBtnEnviar');
+      if (btnNP) btnNP.disabled = true;
+      try { await enviarPedidoAVendedorInterno(); }
+      finally { enviandoNP = false; if (btnNP) btnNP.disabled = false; }
+    }
+
+    async function enviarPedidoAVendedorInterno() {
       const err = document.getElementById('npError');
       err.textContent = '';
       if (carritoNP.length === 0) { err.textContent = 'Agrega al menos un producto.'; return; }
       if (agregarAPedidoId) {
         try {
-          const res = await fetch('/api/pedidos/' + agregarAPedidoId + '/agregar', { method: 'POST', body: JSON.stringify({ items: carritoNP }) });
+          const claveAgr = claveBaseNP + '-' + hashSimpleNP(JSON.stringify(carritoNP.map(i => [i.sku, i.cantidad])));
+          const res = await fetch('/api/pedidos/' + agregarAPedidoId + '/agregar', { method: 'POST', body: JSON.stringify({ items: carritoNP, claveEnvio: claveAgr }) });
           const data = await res.json().catch(() => null);
           if (!res.ok) { err.textContent = (data && data.error) || 'No se pudo agregar.'; return; }
           mostrarBanner('Se agrego al pedido #' + agregarAPedidoId + '. Se le aviso al vendedor.');
@@ -3802,7 +3951,8 @@ $htmlPC = @'
       const vigMin = parseInt(document.getElementById('selVigenciaNP').value, 10) || 60;
       const paraTodos = destino === '__TODOS__';
       try {
-        const body = paraTodos ? { todos: true, items: carritoNP, minutosVigencia: vigMin } : { vendedor: destino, items: carritoNP, minutosVigencia: vigMin };
+        const claveAsig = claveBaseNP + '-' + hashSimpleNP(destino + '|' + vigMin + '|' + JSON.stringify(carritoNP.map(i => [i.sku, i.cantidad])));
+        const body = paraTodos ? { todos: true, items: carritoNP, minutosVigencia: vigMin, claveEnvio: claveAsig } : { vendedor: destino, items: carritoNP, minutosVigencia: vigMin, claveEnvio: claveAsig };
         const res = await fetch('/api/pedidos/asignar', { method: 'POST', body: JSON.stringify(body) });
         const data = await res.json().catch(() => null);
         if (!res.ok) { err.textContent = (data && data.error) || 'No se pudo enviar.'; return; }
@@ -5272,6 +5422,58 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
     }
     const urlsFotoLocalCache = {}; // sku -> object URL ya generada, para no releer IndexedDB en cada busqueda
 
+    // ---- Fotos sin parpadeo: solo se pide la imagen si el producto TIENE foto ----
+    // (en la PC o guardada en este telefono). Un producto sin foto ya no hace peticiones
+    // que fallan ni se "repinta" cada pocos segundos.
+    let skusConFoto = null;               // SKU con foto en la PC (null = aun no se sabe)
+    const skusFotoLocal = new Set();      // SKU con foto guardada en este telefono
+    const fotosFallidas = new Set();      // SKU cuya foto fallo una vez: no se vuelve a pedir
+    try { const g = JSON.parse(localStorage.getItem('skusConFotoPC') || 'null'); if (Array.isArray(g)) skusConFoto = new Set(g.map(String)); } catch (e) {}
+    async function cargarSkusConFoto() {
+      try {
+        const r = await fetch('/api/fotos/skus');
+        const d = await r.json();
+        if (Array.isArray(d)) {
+          skusConFoto = new Set(d.map(String));
+          try { localStorage.setItem('skusConFotoPC', JSON.stringify(d)); } catch (e) {}
+        }
+      } catch (e) {}
+    }
+    async function cargarSkusFotoLocal() {
+      try {
+        const db = await miFotosDB();
+        if (!db) return;
+        const claves = await new Promise((resolve) => {
+          try {
+            const req = db.transaction('fotos', 'readonly').objectStore('fotos').getAllKeys();
+            req.onsuccess = () => resolve(req.result || []);
+            req.onerror = () => resolve([]);
+          } catch (e) { resolve([]); }
+        });
+        claves.forEach(k => skusFotoLocal.add(String(k)));
+      } catch (e) {}
+    }
+    function tieneFoto(sku) {
+      if (!sku) return false;
+      sku = String(sku);
+      if (skusFotoLocal.has(sku)) return true;
+      if (fotosFallidas.has(sku)) return false;
+      return skusConFoto ? skusConFoto.has(sku) : true;
+    }
+    function fotoFallo(img, sku) { fotosFallidas.add(String(sku)); if (img && img.remove) img.remove(); }
+    // Cambia el contenido solo si de verdad es distinto (evita repintar la lista sin necesidad).
+    function ponerHtmlSiCambio(el, html) {
+      const hijo = el.firstElementChild;
+      if (html !== '' && hijo && hijo.__marcaHtml === html && el.__htmlPrev === html) return false;
+      el.innerHTML = html;
+      el.__htmlPrev = html;
+      if (el.firstElementChild) el.firstElementChild.__marcaHtml = html;
+      return true;
+    }
+    cargarSkusFotoLocal();
+    cargarSkusConFoto();
+    setInterval(cargarSkusConFoto, 60000);
+
     async function procesarZipFotosLocal(file) {
       const buffer = await file.arrayBuffer();
       const entradas = await leerEntradasZip(buffer);
@@ -5327,7 +5529,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
         : base;
       const encontrados = enModoCliente ? filtrados : filtrados.slice(0, 25);
 
-      cont.innerHTML = encontrados.map(p => {
+      const htmlRes = encontrados.map(p => {
         const enCarrito = carrito.find(i => i.sku === p.sku);
         const tieneStock = (p.stock !== null && p.stock !== undefined);
         const disponible = tieneStock ? (p.stock - (enCarrito ? enCarrito.cantidad : 0)) : null;
@@ -5336,7 +5538,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
         const stockTxt = (tieneStock && !autoservicioActivo)
           ? ('<div class="sku"' + (stockBajo ? ' style="color:#f87171; font-weight:bold;"' : '') + '>' + (stockBajo ? '&#9888; ' : '') + 'Disponible: ' + disponible + '</div>')
           : '';
-        const fotoTag = p.sku ? ('<img class="miniatura" data-sku="' + p.sku + '" src="/foto/' + encodeURIComponent(p.sku) + '.jpg" loading="lazy" onerror="this.remove()" onclick=\'verFotoProducto(' + JSON.stringify(p.sku) + ',' + JSON.stringify(p.nombre) + ')\'>') : '';
+        const fotoTag = tieneFoto(p.sku) ? ('<img class="miniatura" data-sku="' + p.sku + '" src="/foto/' + encodeURIComponent(p.sku) + '.jpg" onerror=\'fotoFallo(this,' + JSON.stringify(String(p.sku)) + ')\' onclick=\'verFotoProducto(' + JSON.stringify(p.sku) + ',' + JSON.stringify(p.nombre) + ')\'>') : '';
         return '<div class="resultado">' +
           fotoTag +
           '<div class="info">' + p.nombre + '<div class="sku">' + (p.sku || '') + '</div><div class="precio">$' + p.precio.toFixed(2) + '</div>' + stockTxt + '</div>' +
@@ -5344,7 +5546,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
         '</div>';
       }).join('');
       document.getElementById('recientes').innerHTML = '';
-      pintarFotosLocales(cont);
+      if (ponerHtmlSiCambio(cont, htmlRes)) pintarFotosLocales(cont);
     }
 
     // ---- Agregados hace poco: acceso rapido para repetir el mismo producto ----
@@ -5633,7 +5835,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
       try {
         const porAutoservicioAVendedor = autoservicioActivo && autoservicioDestino === 'vendedor';
         const urlEnvio = porAutoservicioAVendedor ? '/api/pedidos/asignar' : '/api/pedidos';
-        const bodyEnvio = porAutoservicioAVendedor ? { todos: true, items: carrito, cliente: (nombreInput.value || '').trim() } : payload;
+        const bodyEnvio = porAutoservicioAVendedor ? { todos: true, items: carrito, cliente: (nombreInput.value || '').trim(), claveEnvio: payload.clienteId } : payload;
         const res = await fetch(urlEnvio, { method:'POST', body: JSON.stringify(bodyEnvio) });
         const data = await res.json().catch(() => null);
         if (!res.ok) {
@@ -6257,7 +6459,10 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
         const data = await res.json();
         const nuevos = (data && data.pedidos) || [];
         if (nuevos.length === 0) return;
+        let hayNuevo = false;
         for (const a of nuevos) {
+          if (asignadosPendientes.some(x => x.id === a.id)) continue;   // ya lo tiene: no se repite la tarjeta ni el aviso
+          hayNuevo = true;
           asignadosPendientes.push({ id: a.id, items: a.items || [], hora: a.hora, todos: !!a.todos, visto: false, cliente: a.cliente || '' });
           const nProd = (a.items || []).length;
           const quePedido = a.cliente
@@ -6265,6 +6470,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
             : (a.todos ? 'La caja mando un pedido para todos (' : 'La caja te armo un pedido nuevo (');
           agregarNotificacionCampana(quePedido + nProd + (nProd === 1 ? ' producto' : ' productos') + ').');
         }
+        if (!hayNuevo) return;
         renderAsignados();
         beepAsignado();
         document.getElementById('bannerAsignado').style.display = 'block';
@@ -6419,6 +6625,8 @@ $htmlEtiquetas = @'
       <button onclick="marcarVisibles(0)">Quitar marcas</button>
       <button onclick="soloBajoStock()" title="Marca los que estan en su minimo de seguridad">Stock bajo</button>
     </div>
+    <label class="chk" style="margin-top:8px;"><input type="checkbox" id="oSinStock" onchange="cambioSinStock()"> Ocultar productos sin stock</label>
+    <div class="nota" id="notaSinStock" style="margin-top:0;"></div>
     <div id="lista"><div class="vacio">Cargando catálogo...</div></div>
     <div class="nota" id="resumen"></div>
 
@@ -6475,6 +6683,13 @@ $htmlEtiquetas = @'
       <div><label style="font-size:12px; color:#94a3b8;">Ancho (mm)</label><input type="number" id="ancho" min="20" max="200" value="50" oninput="cambio(true)"></div>
       <div><label style="font-size:12px; color:#94a3b8;">Alto (mm)</label><input type="number" id="alto" min="12" max="200" value="30" oninput="cambio(true)"></div>
     </div>
+    <label style="font-size:12px; color:#94a3b8; display:block; margin-top:8px;">Orientación en el rollo (térmica)</label>
+    <select id="orient" onchange="cambio()">
+      <option value="h">Horizontal (normal)</option>
+      <option value="v90">Vertical (girada 90° a la derecha)</option>
+      <option value="v270">Vertical (girada 90° a la izquierda)</option>
+    </select>
+    <div class="nota">Vertical: el dibujo sale de lado, con el texto corriendo a lo largo del rollo. El "Ancho" es lo que mide a lo largo del papel y el "Alto" lo que mide a lo ancho del rollo (máx. 48 mm en papel de 58 mm).</div>
     <label style="font-size:12px; color:#94a3b8; display:block; margin-top:8px;">Papel</label>
     <select id="modo" onchange="cambio()">
       <option value="rollo">Rollo / etiquetadora (una etiqueta por página)</option>
@@ -6541,7 +6756,8 @@ $htmlEtiquetas = @'
   }
 
   // ---- Estado ----
-  var catalogo = [];
+  var catalogo = [];       // lo que se ve (ya filtrado por "sin stock" si esta marcado)
+  var catalogoTodo = [];   // catalogo completo tal como lo manda el servidor
   var sel = {};            // sku|nombre -> copias
   var bajos = {};          // sku -> true
   function clave(p) { return p.sku ? p.sku : ('n:' + p.nombre); }
@@ -6555,7 +6771,7 @@ $htmlEtiquetas = @'
       localStorage.setItem('etiquetasAjustes', JSON.stringify({
         negocio: $('negocio').value, oNeg: $('oNeg').checked, oNom: $('oNom').checked, oPre: $('oPre').checked,
         modoPrecio: $('modoPrecio').value, estilo: $('estilo').value, fuente: $('fuente').value, tamPrecio: $('tamPrecio').value, moneda: $('moneda').value, decimales: $('decimales').value, oBc: $('oBc').checked, oSk: $('oSk').checked, preset: $('preset').value,
-        ancho: $('ancho').value, alto: $('alto').value, modo: $('modo').value, escala: $('escala').value, feed: $('feed').value, corte: $('corte').checked
+        ancho: $('ancho').value, alto: $('alto').value, modo: $('modo').value, escala: $('escala').value, orient: $('orient').value, feed: $('feed').value, corte: $('corte').checked
       }));
     } catch (e) {}
   }
@@ -6567,7 +6783,7 @@ $htmlEtiquetas = @'
       ['oNeg', 'oNom', 'oPre', 'oBc', 'oSk'].forEach(function (id) { $(id).checked = !!a[id]; });
       ['modoPrecio', 'estilo', 'fuente', 'tamPrecio', 'moneda', 'decimales'].forEach(function (id) { if (a[id] != null && a[id] !== '') $(id).value = a[id]; });
       $('preset').value = a.preset || '50x30'; $('ancho').value = a.ancho || 50; $('alto').value = a.alto || 30;
-      $('modo').value = a.modo || 'rollo'; $('escala').value = a.escala || 100;
+      $('modo').value = a.modo || 'rollo'; $('escala').value = a.escala || 100; $('orient').value = a.orient || 'h';
       $('feed').value = (a.feed == null ? 3 : a.feed); $('corte').checked = !!a.corte;
     } catch (e) {}
   }
@@ -6591,6 +6807,27 @@ $htmlEtiquetas = @'
       : '@page { size: ' + w + 'mm ' + h + 'mm; margin: 0; }';
     guardarAjustes();
     pintarVista();
+  }
+
+  function hayControlStockEt() {
+    return catalogoTodo.some(function (p) { return p.stock !== null && p.stock !== undefined; });
+  }
+  function aplicarFiltroStock() {
+    var ocultar = $('oSinStock').checked && hayControlStockEt();
+    catalogo = ocultar
+      ? catalogoTodo.filter(function (p) { return !(p.stock === null || p.stock === undefined || p.stock <= 0); })
+      : catalogoTodo;
+    $('notaSinStock').textContent = ocultar
+      ? ((catalogoTodo.length - catalogo.length) + ' producto(s) sin stock ocultos.')
+      : (hayControlStockEt() ? '' : 'El Excel no trae columna de cantidad: no se puede saber qué está sin stock.');
+  }
+  function cambioSinStock() {
+    aplicarFiltroStock();
+    // Los que quedaron ocultos dejan de estar marcados (no se imprimen a escondidas).
+    var visibles = {};
+    catalogo.forEach(function (p) { visibles[clave(p)] = true; });
+    Object.keys(sel).forEach(function (k) { if (!visibles[k]) delete sel[k]; });
+    pintarLista(); pintarVista();
   }
 
   function pintarLista() {
@@ -6674,7 +6911,7 @@ $htmlEtiquetas = @'
       empresa: $('negocio').value, moneda: $('moneda').value, decimales: $('decimales').value,
       verEmpresa: $('oNeg').checked, verPrecio: $('oPre').checked, verBarras: $('oBc').checked, verCodigo: $('oSk').checked,
       modoPrecio: $('modoPrecio').value, tamPrecio: clamp(parseInt($('tamPrecio').value, 10) || 100, 50, 200),
-      estilo: $('estilo').value, fuente: $('fuente').value
+      estilo: $('estilo').value, fuente: $('fuente').value, orient: $('orient').value
     };
     return cfg;
   }
@@ -6819,8 +7056,12 @@ function rasterEtiqueta(it) {
     const D = DOTS_MM, wl = cfg.ancho, hl = cfg.alto;
     const est = estiloActual();
     const famBase = FUENTES[cfg.fuente] || FUENTES.arial;
-    const W = Math.max(8, Math.floor(Math.min(wl * D, wl <= 65 ? 384 : 576) / 8) * 8);
-    const H = Math.round(hl * D);
+    // Vertical: la etiqueta se dibuja como se lee (ancho x alto) y al final se gira 90 grados,
+    // asi sale de lado en el rollo. Lo que mide a lo ancho del papel es entonces el "alto".
+    const rot = cfg.orient === 'v90' || cfg.orient === 'v270';
+    const maxPapel = (rot ? hl : wl) <= 65 ? 384 : 576;
+    const W = rot ? Math.max(8, Math.round(wl * D)) : Math.max(8, Math.floor(Math.min(wl * D, maxPapel) / 8) * 8);
+    const H = rot ? Math.max(8, Math.floor(Math.min(hl * D, maxPapel) / 8) * 8) : Math.round(hl * D);
     const cv = document.createElement('canvas');
     cv.width = W; cv.height = H;
     const g = cv.getContext('2d', { willReadFrequently: true });
@@ -6948,17 +7189,29 @@ function rasterEtiqueta(it) {
       lineas.forEach(l => { g.fillText(l, cx, ty); ty += fs * 1.1; });
     }
 
+    // Si es vertical, se gira el dibujo 90 grados antes de pasarlo a puntos
+    let cvF = cv, gF = g, WF = W, HF = H;
+    if (rot) {
+      cvF = document.createElement('canvas'); cvF.width = H; cvF.height = W;
+      gF = cvF.getContext('2d', { willReadFrequently: true });
+      gF.fillStyle = '#fff'; gF.fillRect(0, 0, H, W);
+      if (cfg.orient === 'v90') { gF.translate(H, 0); gF.rotate(Math.PI / 2); }
+      else { gF.translate(0, W); gF.rotate(-Math.PI / 2); }
+      gF.drawImage(cv, 0, 0);
+      WF = H; HF = W;
+    }
+
     // A 1 bit (1 = negro)
-    const img = g.getImageData(0, 0, W, H).data;
-    const bpr = W / 8;
-    const bits = new Uint8Array(bpr * H);
-    for (let py = 0; py < H; py++) {
-      for (let px = 0; px < W; px++) {
-        const i = (py * W + px) * 4;
+    const img = gF.getImageData(0, 0, WF, HF).data;
+    const bpr = WF / 8;
+    const bits = new Uint8Array(bpr * HF);
+    for (let py = 0; py < HF; py++) {
+      for (let px = 0; px < WF; px++) {
+        const i = (py * WF + px) * 4;
         if (img[i] * 0.299 + img[i + 1] * 0.587 + img[i + 2] * 0.114 < 150) bits[py * bpr + (px >> 3)] |= 0x80 >> (px & 7);
       }
     }
-    return { W, H, bpr, bits, cv };
+    return { W: WF, H: HF, bpr, bits, cv: cvF };
   }
 
   function pintarRaster() {
@@ -6971,7 +7224,7 @@ function rasterEtiqueta(it) {
       var r = rasterEtiqueta(lista[0]);
       cv.width = r.W; cv.height = r.H; cv.getContext('2d').drawImage(r.cv, 0, 0);
       cv.style.display = 'block';
-      nota.textContent = 'Así sale en la térmica (primer producto marcado, ' + cfg.ancho + ' x ' + cfg.alto + ' mm).';
+      nota.textContent = 'Así sale en la térmica (primer producto marcado, ' + cfg.ancho + ' x ' + cfg.alto + ' mm' + (cfg.orient === 'h' ? ', horizontal' : ', vertical') + ').';
     } catch (e) { cv.style.display = 'none'; nota.textContent = 'No se pudo dibujar la vista previa.'; }
   }
 
@@ -7031,9 +7284,15 @@ function rasterEtiqueta(it) {
     cargarAjustes();
     document.body.className = ($('modo').value === 'hoja') ? 'modo-hoja' : 'modo-rollo';
     try {
-      var r = await fetch('/api/catalogo'); catalogo = await r.json();
-      if (!Array.isArray(catalogo)) catalogo = [];
-    } catch (e) { catalogo = []; }
+      var r = await fetch('/api/catalogo'); catalogoTodo = await r.json();
+      if (!Array.isArray(catalogoTodo)) catalogoTodo = [];
+    } catch (e) { catalogoTodo = []; }
+    // Por defecto sigue el ajuste del panel "Ocultar sin stock a vendedores".
+    try {
+      var rc = await fetch('/api/config'); var cc = await rc.json();
+      $('oSinStock').checked = !!(cc && cc.ocultarSinStock);
+    } catch (e) {}
+    aplicarFiltroStock();
     try {
       var r2 = await fetch('/api/reabastecer'); var d2 = await r2.json();
       (d2.items || []).forEach(function (i) { if (i.sku) bajos[i.sku] = true; });
@@ -7326,7 +7585,10 @@ while ($listener.IsListening) {
 
     Revisar-CambioCatalogo
 
-    Write-Host "[$((Get-Date).ToString('HH:mm:ss'))] $method $path  <- $origen"
+    # Las consultas de sincronizacion del Gestor de Almacenes (cada ~10 s por telefono) no se anotan en pantalla para no llenar la consola.
+    if (-not ($method -eq "GET" -and ($path.StartsWith("/api/almacen/") -or $path -eq "/api/fotos/skus"))) {
+        Write-Host "[$((Get-Date).ToString('HH:mm:ss'))] $method $path  <- $origen"
+    }
 
     try {
         $permReq = Permiso-De-Ruta $method $path
@@ -7434,6 +7696,53 @@ while ($listener.IsListening) {
                     ForEach-Object { [pscustomobject]@{ sku = $_.sku; nombre = $_.nombre; stock = $_.stock } })
             }
             Enviar-Respuesta -Context $context -Body (@{ umbral = $umbral; productos = $bajos } | ConvertTo-Json -Depth 5) -ContentType "application/json; charset=utf-8"
+
+        } elseif ($method -eq "GET" -and $path -eq "/api/almacen/ping") {
+            $ci = $global:catalogoInfo
+            Enviar-Json $context @{ ok = $true; version = 1; ip = $global:ipLan; puerto = $port; catalogo = @{ cargado = [bool]$ci.cargado; cantidad = [int]$ci.cantidad; ultimaCarga = $ci.ultimaCarga; error = $ci.error } }
+
+        } elseif ($method -eq "GET" -and $path -eq "/api/almacen/mov") {
+            Enviar-Respuesta -Context $context -Body (Almacen-ListaMovJson) -ContentType "application/json; charset=utf-8"
+
+        } elseif ($path -eq "/api/almacen/mov/archivo" -and ($method -eq "GET" -or $method -eq "POST")) {
+            $nomMov = Almacen-NombreValido ([string]$request.QueryString["name"])
+            if (-not $nomMov) {
+                Enviar-Json $context @{ ok = $false; error = "Nombre de archivo no valido." } 400
+            } elseif ($method -eq "GET") {
+                $txtMov = Almacen-Leer (Join-Path $almacenSyncMovDir $nomMov)
+                if ($null -eq $txtMov) { Enviar-Json $context @{ ok = $false; error = "No existe." } 404 }
+                else { Enviar-Respuesta -Context $context -Body $txtMov -ContentType "application/json; charset=utf-8" }
+            } else {
+                $cuerpoMov = ([string](Leer-CuerpoTexto $request)).Trim()
+                if ($cuerpoMov.Length -lt 2 -or -not $cuerpoMov.StartsWith("{") -or $cuerpoMov.Length -gt 30000000) {
+                    Enviar-Json $context @{ ok = $false; error = "Contenido no valido." } 400
+                } else {
+                    Almacen-Escribir (Join-Path $almacenSyncMovDir $nomMov) $cuerpoMov
+                    Enviar-Json $context @{ ok = $true; sha = (Almacen-Sha $cuerpoMov) }
+                }
+            }
+
+        } elseif ($method -eq "GET" -and $path -eq "/api/almacen/respaldo") {
+            $txtResp = Almacen-Leer $almacenRespaldoPath
+            $cuerpoResp = if ($null -eq $txtResp) { '{"sha":null,"contenido":null}' } else { '{"sha":"' + (Almacen-Sha $txtResp) + '","contenido":' + $txtResp + '}' }
+            Enviar-Respuesta -Context $context -Body $cuerpoResp -ContentType "application/json; charset=utf-8"
+
+        } elseif ($method -eq "POST" -and $path -eq "/api/almacen/respaldo") {
+            $cuerpoResp = ([string](Leer-CuerpoTexto $request)).Trim()
+            if ($cuerpoResp.Length -lt 2 -or -not $cuerpoResp.StartsWith("{") -or $cuerpoResp.Length -gt 30000000) {
+                Enviar-Json $context @{ ok = $false; error = "Contenido no valido." } 400
+            } else {
+                $actualResp = Almacen-Leer $almacenRespaldoPath
+                $shaActualResp = if ($null -ne $actualResp) { Almacen-Sha $actualResp } else { "" }
+                $baseResp = [string]$request.QueryString["base"]
+                # Control de concurrencia: si otro telefono guardo despues de que este leyo, se rechaza y el telefono reintenta.
+                if ($baseResp -ne $shaActualResp) {
+                    Enviar-Json $context @{ ok = $false; conflicto = $true; sha = $shaActualResp } 409
+                } else {
+                    Almacen-Escribir $almacenRespaldoPath $cuerpoResp
+                    Enviar-Json $context @{ ok = $true; sha = (Almacen-Sha $cuerpoResp) }
+                }
+            }
 
         } elseif ($method -eq "GET" -and $path -eq "/api/catalogo") {
             $json = if ($global:catalogo.Count -eq 0) { "[]" } else {
@@ -7571,6 +7880,18 @@ while ($listener.IsListening) {
             } catch {
                 Enviar-Respuesta -Context $context -Body (@{ ok = $false; error = "$_" } | ConvertTo-Json) -ContentType "application/json; charset=utf-8" -StatusCode 500
             }
+
+        } elseif ($method -eq "GET" -and $path -eq "/api/fotos/skus") {
+            # Lista de SKU que SI tienen foto: los paneles solo piden /foto/<sku>.jpg de esos,
+            # asi un producto sin imagen no provoca peticiones fallidas ni parpadeos.
+            $listaSkusFoto = New-Object System.Collections.ArrayList
+            $carpetaFotosLista = Join-Path $scriptDir "fotos_catalogo"
+            if (Test-Path $carpetaFotosLista) {
+                foreach ($ffLista in @(Get-ChildItem -Path $carpetaFotosLista -Filter "*.jpg" -File -ErrorAction SilentlyContinue)) {
+                    [void]$listaSkusFoto.Add([System.IO.Path]::GetFileNameWithoutExtension($ffLista.Name))
+                }
+            }
+            Enviar-Respuesta -Context $context -Body (ConvertTo-Json -InputObject @($listaSkusFoto) -Compress) -ContentType "application/json; charset=utf-8"
 
         } elseif ($method -eq "GET" -and $path -match "^/foto/grande/([^/]+)\.jpg$") {
             $skuFoto = [System.Uri]::UnescapeDataString($matches[1])
@@ -7757,6 +8078,7 @@ while ($listener.IsListening) {
             $paraTodos = [bool]($data -and $data.todos)
             $itemsAsignados = @($data.items)
             $clienteOrigen = if ($data -and $data.cliente) { ([string]$data.cliente).Trim() } else { "" }
+            $claveEnvioAsig = if ($data -and $data.claveEnvio) { "asig|" + [string]$data.claveEnvio } else { "" }
             $minVigAsig = 60
             try { $mvA = [int]$data.minutosVigencia; if ($mvA -ge 5 -and $mvA -le 1440) { $minVigAsig = $mvA } } catch {}
             $vigenciaAsig = (Get-Date).AddMinutes($minVigAsig).ToString("yyyy-MM-dd HH:mm:ss")
@@ -7764,6 +8086,9 @@ while ($listener.IsListening) {
                 Enviar-Respuesta -Context $context -Body (@{ ok = $false; error = "Falta elegir el vendedor." } | ConvertTo-Json) -ContentType "application/json; charset=utf-8" -StatusCode 400
             } elseif ($itemsAsignados.Count -eq 0) {
                 Enviar-Respuesta -Context $context -Body (@{ ok = $false; error = "Agrega al menos un producto." } | ConvertTo-Json) -ContentType "application/json; charset=utf-8" -StatusCode 400
+            } elseif ($respPreviaAsig = (Clave-EnvioBuscar $claveEnvioAsig)) {
+                # Mismo envio repetido: se devuelve el pedido que ya se creo, sin crear otro.
+                Enviar-Respuesta -Context $context -Body $respPreviaAsig -ContentType "application/json; charset=utf-8"
             } else {
                 $asignado = [ordered]@{
                     id            = $global:nextIdAsignado
@@ -7785,6 +8110,8 @@ while ($listener.IsListening) {
                 $global:nextIdAsignado++
                 [void]$global:pedidosAsignados.Add([pscustomobject]$asignado)
                 Guardar-Asignados
+                $respAsigJson = (@{ ok = $true; id = $asignado.id; repetido = $true } | ConvertTo-Json -Compress)
+                Clave-EnvioGuardar $claveEnvioAsig $respAsigJson
                 Enviar-Respuesta -Context $context -Body (@{ ok = $true; id = $asignado.id } | ConvertTo-Json) -ContentType "application/json; charset=utf-8"
             }
 
@@ -8574,6 +8901,7 @@ while ($listener.IsListening) {
             $data = $null
             if ($bodyText -and $bodyText.Trim().Length -gt 0) { $data = $bodyText | ConvertFrom-Json }
             $itemsNuevos = @($data.items)
+            $claveEnvioAgr = if ($data -and $data.claveEnvio) { "agr|$id|" + [string]$data.claveEnvio } else { "" }
             $pedido = $global:pedidos | Where-Object { [int]$_.id -eq $id }
             if (-not $esLocalAgregar) {
                 Enviar-Respuesta -Context $context -Body (@{ ok = $false; error = "Solo se puede agregar productos desde la PC." } | ConvertTo-Json) -ContentType "application/json; charset=utf-8" -StatusCode 403
@@ -8585,6 +8913,9 @@ while ($listener.IsListening) {
                 Enviar-Respuesta -Context $context -Body (@{ ok = $false; error = "No se puede agregar productos a un pedido con pago Combinado; editalo desde el movil del vendedor." } | ConvertTo-Json) -ContentType "application/json; charset=utf-8" -StatusCode 409
             } elseif ($itemsNuevos.Count -eq 0) {
                 Enviar-Respuesta -Context $context -Body (@{ ok = $false; error = "Agrega al menos un producto." } | ConvertTo-Json) -ContentType "application/json; charset=utf-8" -StatusCode 400
+            } elseif ($respPreviaAgr = (Clave-EnvioBuscar $claveEnvioAgr)) {
+                # Mismos productos ya agregados con este mismo envio: no se suman dos veces.
+                Enviar-Respuesta -Context $context -Body $respPreviaAgr -ContentType "application/json; charset=utf-8"
             } else {
                 # --- Validar stock antes de agregar (igual que al crear un pedido) ---
                 $erroresStockAg = New-Object System.Collections.ArrayList
@@ -8634,6 +8965,7 @@ while ($listener.IsListening) {
                     $msjAlertaAg = "La caja MODIFICO tu pedido #$id" + ": agrego " + ($descripcionAgregado -join ", ") + ". Nuevo total a cobrar: $" + (Formato-Monto $pedido.totalCobrado) + ". Revisalo antes de cobrar."
                     Agregar-AlertaVendedor ([string]$pedido.vendedor) $msjAlertaAg $id "pedido"
 
+                    Clave-EnvioGuardar $claveEnvioAgr (@{ ok = $true; repetido = $true } | ConvertTo-Json -Compress)
                     Enviar-Respuesta -Context $context -Body (@{ ok = $true } | ConvertTo-Json) -ContentType "application/json; charset=utf-8"
                 }
             }
