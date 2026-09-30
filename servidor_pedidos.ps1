@@ -242,7 +242,17 @@ $global:swJs = @'
 // producto (/foto/...), para que sigan viendose si el telefono pierde la
 // conexion con la PC despues de haberlas visto una vez.
 const CACHE_FOTOS = 'fotos-catalogo-v1';
-self.addEventListener('install', () => self.skipWaiting());
+// La app del vendedor (y lo que necesita para abrir) se guarda en el telefono:
+// si la PC esta apagada, se abre la ultima copia. Solo se usa la copia cuando
+// NO hay red; si la PC responde (aunque sea con licencia vencida) manda la PC.
+const CACHE_APP = 'app-vendedor-v1';
+const ARCHIVOS_APP = ['/vendedor', '/xlsx.js', '/manifest-vendedor.json', '/icon-192.png', '/icon-512.png'];
+self.addEventListener('install', (event) => {
+  self.skipWaiting();
+  event.waitUntil(caches.open(CACHE_APP).then((cache) => Promise.all(ARCHIVOS_APP.map(async (u) => {
+    try { const r = await fetch(u, { cache: 'no-store' }); if (r && r.ok) await cache.put(u, r); } catch (e) {}
+  }))));
+});
 self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()));
 // Al tocar un aviso local se abre (o se trae al frente) la app del vendedor.
 self.addEventListener('notificationclick', (event) => {
@@ -263,6 +273,22 @@ self.addEventListener('fetch', (event) => {
         return resp;
       } catch (e) {
         const cached = await cache.match(event.request);
+        if (cached) return cached;
+        throw e;
+      }
+    })());
+    return;
+  }
+  if (event.request.method === 'GET' && ARCHIVOS_APP.includes(url.pathname) &&
+      !(url.pathname === '/vendedor' && url.searchParams.get('cliente') === '1')) {
+    event.respondWith((async () => {
+      const cache = await caches.open(CACHE_APP);
+      try {
+        const resp = await fetch(event.request);
+        if (resp && resp.ok) cache.put(url.pathname, resp.clone());
+        return resp;
+      } catch (e) {
+        const cached = await cache.match(url.pathname);
         if (cached) return cached;
         throw e;
       }
@@ -4426,7 +4452,9 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
       const info = document.getElementById('estadoCatalogo');
       try {
         const res = await fetch('/api/catalogo');
-        catalogo = await res.json();
+        const datosCat = await res.json();
+        if (!res.ok || !Array.isArray(datosCat)) throw new Error('catalogo');
+        catalogo = datosCat;
         try {
           const resCfg = await fetch('/api/config');
           if (resCfg.ok) {
@@ -4440,6 +4468,8 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
             autoservicioDestino = cfg.autoservicioDestino === 'vendedor' ? 'vendedor' : 'pc';
           }
         } catch(e) {}
+        guardarCatalogoLocal();
+        aplicarColaAlStock();
         info.classList.remove('error');
         document.getElementById('btnMenu').classList.remove('alerta');
         if (ocultandoSinStock()) {
@@ -4452,8 +4482,45 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
       } catch(e) {
         info.classList.add('error');
         document.getElementById('btnMenu').classList.add('alerta');   // punto rojo: hay un problema en Ajustes
-        info.textContent = 'No se pudo cargar el catalogo. Revisa la conexion con la PC.';
+        if (autoservicioActivo) { info.textContent = 'No se pudo cargar el catalogo. Revisa la conexion con la PC.'; return; }
+        // MODO SIN PC: se usa el ultimo catalogo guardado en este telefono
+        const guardado = leerCatalogoLocal();
+        if (guardado) {
+          catalogo = guardado.catalogo;
+          ocultarSinStock = !!guardado.ocultarSinStock;
+          tasaDolarActual = guardado.tasaDolarActual || 0;
+          umbralStockBajoActual = guardado.umbralStockBajoActual || 0;
+          permitirDescuentosActual = !!guardado.permitirDescuentosActual;
+          aplicarColaAlStock();
+          const f = new Date(guardado.t);
+          info.textContent = 'SIN PC: usando el catalogo guardado el ' + f.toLocaleDateString() + ' ' + f.toLocaleTimeString().slice(0, 5) + ' (' + catalogo.length + ' productos). Los pedidos se guardan y se envian solos al volver.';
+          buscar();
+        } else {
+          info.textContent = 'No se pudo cargar el catalogo y aun no hay uno guardado en este telefono. Conectate a la PC una vez.';
+        }
       }
+    }
+    // Copia del catalogo en el telefono (para vender sin la PC) + descuento del stock
+    // de los pedidos guardados que todavia no se han enviado (asi no se vende de mas).
+    const CLAVE_CATALOGO_LOCAL = 'catalogoLocalV1';
+    function guardarCatalogoLocal() {
+      try {
+        localStorage.setItem(CLAVE_CATALOGO_LOCAL, JSON.stringify({ t: Date.now(), catalogo: catalogo, ocultarSinStock: ocultarSinStock,
+          tasaDolarActual: tasaDolarActual, umbralStockBajoActual: umbralStockBajoActual, permitirDescuentosActual: permitirDescuentosActual }));
+      } catch (e) {}
+    }
+    function leerCatalogoLocal() {
+      try {
+        const g = JSON.parse(localStorage.getItem(CLAVE_CATALOGO_LOCAL) || 'null');
+        return (g && Array.isArray(g.catalogo) && g.catalogo.length) ? g : null;
+      } catch (e) { return null; }
+    }
+    function aplicarColaAlStock() {
+      try {
+        const usado = {};
+        leerCola().forEach(c => ((c.payload && c.payload.items) || []).forEach(it => { usado[it.sku] = (usado[it.sku] || 0) + Number(it.cantidad || 0); }));
+        catalogo.forEach(p => { if (usado[p.sku] && p.stock !== null && p.stock !== undefined) p.stock = Math.max(0, p.stock - usado[p.sku]); });
+      } catch (e) {}
     }
     cargarCatalogo();
     setInterval(cargarCatalogo, 15000);
@@ -6750,9 +6817,10 @@ $global:htmlSinLicencia = @'
 <p style="color:#bbb">El sistema est&aacute; bloqueado. Contacta al proveedor para renovar la licencia.</p></div></body></html>
 '@
 $global:licGuardJs = @'
-<script>(function(){var of=window.fetch;function bloquear(){if(document.getElementById('tt-lic-block'))return;var d=document.createElement('div');d.id='tt-lic-block';d.style.cssText='position:fixed;left:0;top:0;right:0;bottom:0;z-index:2147483647;background:#111;color:#fff;font-family:Arial,sans-serif;text-align:center;display:flex;align-items:center;justify-content:center;padding:24px';d.innerHTML='<div><div style="font-size:56px">&#128274;</div><h2>Licencia vencida</h2><p style="color:#bbb">Contacta al proveedor para renovarla.</p></div>';(document.body||document.documentElement).appendChild(d);}
+<script>(function(){var of=window.fetch;function bloquear(){try{localStorage.setItem('tt_lic_bloq','1')}catch(e){}if(document.getElementById('tt-lic-block'))return;var d=document.createElement('div');d.id='tt-lic-block';d.style.cssText='position:fixed;left:0;top:0;right:0;bottom:0;z-index:2147483647;background:#111;color:#fff;font-family:Arial,sans-serif;text-align:center;display:flex;align-items:center;justify-content:center;padding:24px';d.innerHTML='<div><div style="font-size:56px">&#128274;</div><h2>Licencia vencida</h2><p style="color:#bbb">Contacta al proveedor para renovarla.</p></div>';(document.body||document.documentElement).appendChild(d);}
 window.fetch=function(){return of.apply(this,arguments).then(function(r){if(r&&r.status===402)bloquear();return r;});};
-function aviso(){of('/api/licencia',{cache:'no-store'}).then(function(r){if(r.status===402){bloquear();return null;}return r.json();}).then(function(j){if(!j||!j.ok)return;var b=document.getElementById('tt-lic-warn');if(j.dias<=5){if(!b){b=document.createElement('div');b.id='tt-lic-warn';b.style.cssText='position:fixed;left:0;right:0;bottom:0;z-index:2147483000;background:#b45309;color:#fff;font:13px Arial;text-align:center;padding:6px';(document.body||document.documentElement).appendChild(b);}b.textContent='La licencia vence el '+j.vence+' (quedan '+j.dias+' dias)';}else if(b){b.remove();}}).catch(function(){});}
+function aviso(){of('/api/licencia',{cache:'no-store'}).then(function(r){if(r.status===402){bloquear();return null;}return r.json();}).then(function(j){if(!j||!j.ok)return;try{localStorage.removeItem('tt_lic_bloq')}catch(e){}var x=document.getElementById('tt-lic-block');if(x)x.remove();var b=document.getElementById('tt-lic-warn');if(j.dias<=5){if(!b){b=document.createElement('div');b.id='tt-lic-warn';b.style.cssText='position:fixed;left:0;right:0;bottom:0;z-index:2147483000;background:#b45309;color:#fff;font:13px Arial;text-align:center;padding:6px';(document.body||document.documentElement).appendChild(b);}b.textContent='La licencia vence el '+j.vence+' (quedan '+j.dias+' dias)';}else if(b){b.remove();}}).catch(function(){});}
+try{if(localStorage.getItem('tt_lic_bloq')==='1')window.addEventListener('DOMContentLoaded',bloquear)}catch(e){}
 setInterval(aviso,300000);window.addEventListener('load',aviso);})();</script>
 '@
 
@@ -6877,6 +6945,22 @@ while ($listener.IsListening) {
     $path = $request.Url.AbsolutePath
     $method = $request.HttpMethod
     $origen = $request.RemoteEndPoint
+    # ---- CORS: solo para la app APK del vendedor (su origen es http://localhost) ----
+    try {
+        $orig = [string]$request.Headers["Origin"]
+        if ($orig -eq "http://localhost" -or $orig -eq "https://localhost" -or $orig -eq "capacitor://localhost") {
+            $context.Response.Headers["Access-Control-Allow-Origin"] = $orig
+            $context.Response.Headers["Vary"] = "Origin"
+            $context.Response.Headers["Access-Control-Allow-Headers"] = "Content-Type, X-Vendedor"
+            $context.Response.Headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+            $context.Response.Headers["Access-Control-Expose-Headers"] = "X-Nombre-Archivo"
+            $context.Response.Headers["Access-Control-Allow-Private-Network"] = "true"
+        }
+    } catch {}
+    if ($method -eq "OPTIONS") {
+        try { $context.Response.StatusCode = 204; $context.Response.ContentLength64 = 0; $context.Response.OutputStream.Close() } catch {}
+        continue
+    }
     if (-not [TotoLic.Gate]::IsOpen()) {
         try {
             if ($method -ne "GET" -or $path.StartsWith("/api/")) {
