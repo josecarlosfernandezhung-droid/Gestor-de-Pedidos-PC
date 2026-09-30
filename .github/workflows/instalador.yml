@@ -1,0 +1,23 @@
+name: Construir instalador PC
+on:
+  workflow_dispatch:
+jobs:
+  instalador:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Construir el .exe
+        shell: powershell
+        run: ./construir.ps1
+      - name: Instalar Inno Setup
+        shell: powershell
+        run: choco install innosetup -y --no-progress
+      - name: Construir el instalador
+        shell: powershell
+        run: |
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" instalador.iss
+          if ($LASTEXITCODE -ne 0) { throw 'Fallo Inno Setup.' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Instalar-ServidorPedidos
+          path: instalador/Instalar-ServidorPedidos.exe
