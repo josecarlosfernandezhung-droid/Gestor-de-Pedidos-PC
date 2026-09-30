@@ -1,0 +1,38 @@
+name: Construir APK Vendedor
+on:
+  workflow_dispatch:
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: 17 }
+      - name: Preparar la app del vendedor
+        run: |
+          python3 build_www.py
+          npm init -y
+          npm install @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6
+          cat > capacitor.config.json <<'JSON'
+          {"appId":"com.totools.vendedor","appName":"Toto Vendedor","webDir":"www",
+           "server":{"androidScheme":"http","cleartext":true},
+           "android":{"allowMixedContent":true}}
+          JSON
+          npx cap add android
+          sed -i 's/<application/<application android:usesCleartextTraffic="true"/' android/app/src/main/AndroidManifest.xml
+          npx cap sync android
+      - name: Compilar y firmar
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon
+          BT=$(ls -d $ANDROID_HOME/build-tools/* | sort -V | tail -1)
+          APK=$(find app/build/outputs/apk/release -name '*.apk' | head -1)
+          $BT/zipalign -p -f 4 "$APK" ../alineado.apk
+          $BT/apksigner sign --ks ../toto-vendedor.jks --ks-pass pass:tototools2026 --key-pass pass:tototools2026 --out ../Toto-Vendedor.apk ../alineado.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Toto-Vendedor-apk
+          path: Toto-Vendedor.apk
