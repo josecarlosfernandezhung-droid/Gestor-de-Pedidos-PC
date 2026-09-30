@@ -23,6 +23,35 @@ jobs:
           npx cap add android
           sed -i 's/<application/<application android:usesCleartextTraffic="true"/' android/app/src/main/AndroidManifest.xml
           npx cap sync android
+          python3 -m pip install --quiet pillow
+          python3 - <<'PY'
+          from PIL import Image
+          import os
+          res = 'android/app/src/main/res'
+          src = Image.open('icono_512.png').convert('RGBA')
+          # icono clasico (Android < 8) y redondo
+          for carpeta, px in (('mdpi',48),('hdpi',72),('xhdpi',96),('xxhdpi',144),('xxxhdpi',192)):
+              d = os.path.join(res, 'mipmap-' + carpeta); os.makedirs(d, exist_ok=True)
+              im = src.resize((px, px), Image.LANCZOS)
+              im.save(os.path.join(d, 'ic_launcher.png'))
+              im.save(os.path.join(d, 'ic_launcher_round.png'))
+          # icono adaptable (Android 8+): capa frontal con la P en la zona segura + fondo azul
+          fg = Image.new('RGBA', (512, 512), (0, 0, 0, 0))
+          letra = src.crop((72, 72, 440, 440)).resize((338, 338), Image.LANCZOS)
+          fg.paste(letra, (87, 87))
+          for carpeta, px in (('mdpi',108),('hdpi',162),('xhdpi',216),('xxhdpi',324),('xxxhdpi',432)):
+              d = os.path.join(res, 'mipmap-' + carpeta)
+              fg.resize((px, px), Image.LANCZOS).save(os.path.join(d, 'ic_launcher_foreground.png'))
+          os.makedirs(os.path.join(res, 'mipmap-anydpi-v26'), exist_ok=True)
+          for nombre in ('ic_launcher.xml', 'ic_launcher_round.xml'):
+              open(os.path.join(res, 'mipmap-anydpi-v26', nombre), 'w').write(
+                  '<?xml version="1.0" encoding="utf-8"?>\n<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">\n'
+                  '  <background android:drawable="@color/ic_launcher_background"/>\n'
+                  '  <foreground android:drawable="@mipmap/ic_launcher_foreground"/>\n</adaptive-icon>\n')
+          os.makedirs(os.path.join(res, 'values'), exist_ok=True)
+          open(os.path.join(res, 'values', 'ic_launcher_background.xml'), 'w').write(
+              '<?xml version="1.0" encoding="utf-8"?>\n<resources>\n    <color name="ic_launcher_background">#1E293B</color>\n</resources>\n')
+          PY
       - name: Compilar y firmar
         run: |
           cd android
