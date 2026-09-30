@@ -4005,8 +4005,11 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
 
     // ---- Vendedor ----
     const nombreInput = document.getElementById('nombreVendedor');
-    nombreInput.value = localStorage.getItem('vendedorNombre') || '';
-    nombreInput.addEventListener('input', () => { localStorage.setItem('vendedorNombre', nombreInput.value); pintarVendedorHeader(); });
+    // En autoservicio (enlace/QR) el nombre del cliente se guarda aparte, para
+    // no heredar el nombre de un vendedor que use ese mismo telefono.
+    const claveNombreLocal = autoservicioActivo ? 'clienteNombre' : 'vendedorNombre';
+    nombreInput.value = localStorage.getItem(claveNombreLocal) || '';
+    nombreInput.addEventListener('input', () => { localStorage.setItem(claveNombreLocal, nombreInput.value); pintarVendedorHeader(); });
     const pinInput = document.getElementById('pinVendedor');
     pinInput.value = localStorage.getItem('vendedorPin') || '';
     let pinVendedorAlEnfocar = pinInput.value;
@@ -4264,6 +4267,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
       loginOcupado = false;
       loginEl.style.display = 'flex';
       document.getElementById('loginOlvido').style.display = 'none';
+      if (autoservicioActivo) { prepararLoginCliente(); mostrarPasoNombre(); return; }
       cargarListaUsuariosLogin();
       if (nombre) { loginNombre = nombre; mostrarPasoPin(); } else { mostrarPasoNombre(); }
     }
@@ -4313,10 +4317,29 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
     }
     // Paso 1: el nombre (elegido de la lista de vendedores que creo la PC, o
     // escrito a mano). Si no esta registrado, no se puede entrar.
+    // Cliente (autoservicio): la misma pantalla pide SOLO el nombre. No se
+    // consulta a la PC ni se pide PIN; el nombre queda guardado en este telefono.
+    let enviarTrasNombreCliente = false;
+    function prepararLoginCliente() {
+      document.querySelector('#loginTarjeta .login-titulo').textContent = 'Tu nombre';
+      document.querySelector('#loginPasoNombre .login-label').textContent = 'Nombre';
+      const inp = document.getElementById('loginNombreInput');
+      inp.removeAttribute('list');
+      inp.placeholder = 'Escribe tu nombre';
+      document.querySelector('#loginPasoNombre .login-ayuda').textContent = 'Escribe tu nombre para tu pedido';
+    }
+    function entrarComoCliente(nombre) {
+      nombreInput.value = nombre.slice(0, 30);
+      localStorage.setItem('clienteNombre', nombreInput.value);
+      cerrarLogin();
+      pintarVendedorHeader();
+      if (enviarTrasNombreCliente) { enviarTrasNombreCliente = false; enviarPedido(); }
+    }
     async function loginContinuar() {
       const nombre = document.getElementById('loginNombreInput').value.trim();
       if (!nombre) { setLoginError('Escribe tu nombre.'); return; }
       setLoginError('');
+      if (autoservicioActivo) { entrarComoCliente(nombre); return; }
       let d = null;
       try { d = await consultarPinVendedor(nombre, ''); } catch (e) {}
       if (!d) {
@@ -4375,12 +4398,8 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
     iniciarSesionVendedor();
 
     if (autoservicioActivo) {
-      if (!(nombreInput.value || '').trim()) {
-        const nombreCliente = (prompt('Escribe tu nombre para tu pedido:') || '').trim();
-        nombreInput.value = nombreCliente || 'Cliente';
-        localStorage.setItem('vendedorNombre', nombreInput.value);
-        pintarVendedorHeader();
-      }
+      pintarVendedorHeader();
+      if (!(nombreInput.value || '').trim()) abrirLogin();
     }
     restaurarMetodoPagoPreferido();
 
@@ -5126,8 +5145,8 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
       if (activo && activo.classList && activo.classList.contains('qty-input')) activo.blur();
       if (carrito.length === 0) { alert('Agrega al menos un producto.'); return; }
       if (!(nombreInput.value || '').trim()) {
-        if (autoservicioActivo) { nombreInput.value = 'Cliente'; }
-        else { abrirLogin(); return; }
+        if (autoservicioActivo) { enviarTrasNombreCliente = true; }
+        abrirLogin(); return;
       }
       const estadoChk = document.querySelector('input[name=estadoPago]:checked').value;
       if (estadoChk === 'cobrado') {
