@@ -2,7 +2,7 @@
 $ErrorActionPreference = 'Stop'
 $dir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $dir
-foreach ($f in 'clave_publica.txt','servidor_pedidos.ps1','xlsx_full_min.js','Launcher.cs','app.manifest') {
+foreach ($f in 'clave_publica.txt','servidor_pedidos.ps1','xlsx_full_min.js','Launcher.cs','app.manifest','icono.ico') {
     if (-not (Test-Path (Join-Path $dir $f))) { throw "Falta el archivo: $f" }
 }
 $pub = [Convert]::FromBase64String((Get-Content (Join-Path $dir 'clave_publica.txt') -Raw).Trim())
@@ -49,7 +49,7 @@ $sma = Get-ChildItem "$env:windir\Microsoft.NET\assembly\GAC_MSIL\System.Managem
 if (-not $sma) { throw 'No se encontro System.Management.Automation (PowerShell 5.1).' }
 New-Item -ItemType Directory -Force -Path (Join-Path $dir 'dist') | Out-Null
 $out = Join-Path $dir 'dist\ServidorPedidos.exe'
-& $csc /nologo /target:exe /platform:anycpu /optimize+ "/out:$out" "/win32manifest:app.manifest" "/r:$sma" /r:System.Core.dll /r:System.Windows.Forms.dll "/resource:payload.bin,payload" Launcher.cs Secrets.g.cs
+& $csc /nologo /target:exe /platform:anycpu /optimize+ "/out:$out" "/win32manifest:app.manifest" "/win32icon:icono.ico" "/r:$sma" /r:System.Core.dll /r:System.Windows.Forms.dll "/resource:payload.bin,payload" Launcher.cs Secrets.g.cs
 $ok = ($LASTEXITCODE -eq 0)
 Remove-Item (Join-Path $dir 'payload.bin'), (Join-Path $dir 'Secrets.g.cs') -Force -ErrorAction SilentlyContinue
 if (-not $ok) { throw 'Fallo la compilacion.' }
