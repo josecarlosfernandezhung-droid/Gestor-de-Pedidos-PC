@@ -2,6 +2,59 @@
 $ErrorActionPreference = 'Stop'
 $dir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $dir
+# --- Icono: si icono.ico no existe o no es un .ico real (p.ej. un JPG/PNG renombrado), se genera desde el PNG/JPG ---
+function Test-Ico([string]$p) {
+    if (-not (Test-Path $p)) { return $false }
+    $b = [IO.File]::ReadAllBytes($p)
+    return ($b.Length -gt 22 -and $b[0] -eq 0 -and $b[1] -eq 0 -and $b[2] -eq 1 -and $b[3] -eq 0)
+}
+function New-Ico([string]$src, [string]$dst) {
+    Add-Type -AssemblyName System.Drawing
+    $img = [Drawing.Image]::FromFile($src)
+    $sizes = 16, 24, 32, 48, 64, 128, 256
+    $entries = @()
+    foreach ($sz in $sizes) {
+        $bmp = New-Object Drawing.Bitmap $sz, $sz, ([Drawing.Imaging.PixelFormat]::Format32bppArgb)
+        $g = [Drawing.Graphics]::FromImage($bmp)
+        $g.Clear([Drawing.Color]::Transparent)
+        $g.InterpolationMode = 'HighQualityBicubic'; $g.SmoothingMode = 'HighQuality'; $g.PixelOffsetMode = 'HighQuality'
+        $g.DrawImage($img, 0, 0, $sz, $sz); $g.Dispose()
+        # DIB 32 bpp (BGRA, filas de abajo hacia arriba) + mascara AND vacia
+        $ms = New-Object IO.MemoryStream
+        $bw = New-Object IO.BinaryWriter $ms
+        $bw.Write([int]40); $bw.Write([int]$sz); $bw.Write([int]($sz * 2))
+        $bw.Write([int16]1); $bw.Write([int16]32); $bw.Write([int]0)
+        $bw.Write([int]($sz * $sz * 4)); $bw.Write([int]0); $bw.Write([int]0); $bw.Write([int]0); $bw.Write([int]0)
+        for ($y = $sz - 1; $y -ge 0; $y--) { for ($x = 0; $x -lt $sz; $x++) {
+            $c = $bmp.GetPixel($x, $y); $bw.Write([byte]$c.B); $bw.Write([byte]$c.G); $bw.Write([byte]$c.R); $bw.Write([byte]$c.A) } }
+        $maskRow = [int]([Math]::Ceiling($sz / 32.0) * 4)
+        $bw.Write((New-Object byte[] ($maskRow * $sz)))
+        $bw.Flush(); $entries += , @($sz, $ms.ToArray()); $bmp.Dispose()
+    }
+    $img.Dispose()
+    $out = New-Object IO.MemoryStream
+    $w = New-Object IO.BinaryWriter $out
+    $w.Write([int16]0); $w.Write([int16]1); $w.Write([int16]$entries.Count)
+    $offset = 6 + 16 * $entries.Count
+    foreach ($e in $entries) {
+        $sz = $e[0]; $data = $e[1]
+        $dim = if ($sz -ge 256) { 0 } else { $sz }
+        $w.Write([byte]$dim); $w.Write([byte]$dim); $w.Write([byte]0); $w.Write([byte]0)
+        $w.Write([int16]1); $w.Write([int16]32); $w.Write([int]$data.Length); $w.Write([int]$offset)
+        $offset += $data.Length
+    }
+    foreach ($e in $entries) { $w.Write([byte[]]$e[1]) }
+    $w.Flush()
+    [IO.File]::WriteAllBytes($dst, $out.ToArray())
+}
+$icoPath = Join-Path $dir 'icono.ico'
+if (-not (Test-Ico $icoPath)) {
+    $srcImg = @('icono_pc.png', 'icono.png') | ForEach-Object { Join-Path $dir $_ } | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if (-not $srcImg) { throw 'icono.ico no es valido y no hay icono_pc.png / icono.png para generarlo.' }
+    Write-Host "Generando icono.ico desde $srcImg"
+    New-Ico $srcImg $icoPath
+}
+
 foreach ($f in 'clave_publica.txt','servidor_pedidos.ps1','xlsx_full_min.js','Launcher.cs','app.manifest','icono.ico') {
     if (-not (Test-Path (Join-Path $dir $f))) { throw "Falta el archivo: $f" }
 }
