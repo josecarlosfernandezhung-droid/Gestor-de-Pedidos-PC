@@ -98,6 +98,13 @@
    - Avisos push locales al vendedor: precios, stock, pedidos anulados.
    - Permisos por vendedor desde el Panel (permisos_vendedores.json).
 
+ NOVEDADES (v15):
+   - Etiquetas: boton "Nuevos del Excel" marca los productos que aparecieron en el ultimo Excel.
+   - Movil (Ajustes): "Descargar lo que va quedando (stock actual)" baja un Excel con las cantidades de ahora.
+   - Modo punto de venta en el movil: lo activa el vendedor con la clave de administrador que se pone en la PC
+     (menu, "PIN de vendedores"). Ventas (caja), devoluciones, descuentos y reporte de efectivo / transferencia.
+   - Mensajes cortos opcionales caja <-> vendedor (nota en el pedido o mensaje suelto). Permiso "mensajes".
+
  COMO USARLO:
    1. Deja "xlsx_full_min.js", "iniciar.bat" y este script en la
       misma carpeta.
@@ -511,6 +518,297 @@ ANr1xYzDfoc71ATv39zrfzxrC88DQIK9f5+/380OKvJveTci4Pv5/o/b817+VgDAEMiv4f/eP399
 +3f+EiHh76+v5/vbNna/HQBIV/LP/dvzlx9C2t36jrb+n9u2Nr9FALCakT+SBvTf99F6Y1rBr3bW
 +9fzG3uon8mj/qO1bfv/HoYSCZ+FCusAAAAASUVORK5CYII=
 '@
+$iconPc192Base64 = @'
+iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAMAAABlApw1AAAA/1BMVEUdKDji6vMAAAAgKTvt9fwR
+Givd5e4sNUPBydFRWWVye4XU3OScpK68xM1ETFo7Q1DL09ujq7UdJjWzusMeJzaDi5UAAFUeJzaR
+mqOrs7sAVVVkbHgdJzYdJjUZKTZpcXx7hI5IUV1bY28eJzaKk5wAPz8nMT4AAH8jLUAAAD8iJjEe
+HjwgJjUFDh4gJjYgKDcfHx8AKlUAf38gKDcgKDckJEgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAABG6tT/AAAAQHRSTlP+/wD+//////////////////+z/9L/A2///wP/L1ET////
+/43/BP8C/wQRCir/TGYIBgKXzwcAAAAAAAAAAAAAsz1i1AAADN5JREFUeNrVXQmXorgWDmQTkFUs
+tdyXsqqrl5n3Zt7//2svCyhLUEEMkDmna9rW8n65S+5KgFm1Pj/Ej+/VejaLxIqBrhWL7zvOZquV
+IOL9vZJMUPH6G/9jtT4yoiFfQPOC6bfG0Wy14RhqAeDvXjHiKwjnLzfDxD4lKav+xWUkID6uv6sg
+ADX5m1kMtO/6LdzxbKOGAFTCw8jvEfUJ2wSEt/sA3swffwHYJ/qvGjH7aX7e58AqhrBn+5/aERiv
+73CAcej4sOxrgpn7GnjcmB/VAH6Ym6hnwlOCE//KIwC5/V/FvaQ/dxLBPzlVBtn9n3VK5QOnmvzb
+LIvgCuDDnPVVfPIAOIL3MoAf5rq/gp/nAMwiABf5X4Oe628WzvqC4MKBzVDol+7RKtWDBMDnjxgO
+BoBwLL4/swDezOOA6BcWK0qECEj6/wyJ/JwpEgA+N/Hg6Ifg+8KB9/6eALfOvMj8b8qBDRjc4hhW
+CQfemQaDAS4YpSK0AgNdv5j5AYNlAA8OGPGMA8MzQRc9YFEy+DDXQ2UAPws+wLsZDRdAxJX4Jxis
+BAEmQ2A4brQCAHOrAbdBnWQ/WwEQMQDRkwCuec7C70jzoC/cGxhvwPedgFqxcKOVBlPtQliBVe1f
+vLcaLc+nEAggbYJYg/X9rEZhjVCjZRgkcMPpwWcoAPxqCcAMpJ704wBcRIxmSwIZjbcMREu2L2L/
+1eeA0XwRAcOY2BTjNkTpCgDoAXDhhTP3GISczRoSAEIMZIT+VZCaMiMG9T2hNgAIYULGmOKnhSgG
+HQEQEMgW6/dkWgMglGFBsW43plUABnIsnM3bwqEBIAgtMXwSQL1PtQuAM8HGT+57xwDI8whqYWgf
+AEHbpxF0CYDbU0ujFLUPgCEgtJ3zAD4PQLqc3FcQPvSjiuy2mfdtDICR7ExONg9eqG8tpwuHY3kM
+wRTDbgHwLQ9OFr3Ej/wntMbkQTYgDz/jlj4LQHiXlgi2kn4meShhTE+PQUATDPWcxSoABJGTL6gv
+GwdM5+iRIA4dBIKOXAnmk4GvhPzCJjII1ugBBG3pcRMAaPEbXzIO8meOCxjM7yszef4weIIDNrV2
+84U7CoKRG+6YMhRUCx/IPSYQtNADwFUBQEYuhzKyYQEC9oO7CAy/03iAEJI5EIKCPEB8vneEk5bO
+gnZcCYR2oKDLcIF6ocaP+kLSLObOmPm9j/q9AlDUSWaNdujlgUGLAEZllxdvb34Yhb0C4JaTPhAv
+b34k6I8SM3k4KbYTYhvdVgLYGw4oYxSID+gW6APuC4AKhYR4ijRrMWx4DkyUGbfbhkgtdh2JkK/O
+2zIRIjcAhH0BgHZVlECn2i8lMqrpBYBFVWzCjwJSCcDtiRUizDcGFZvJDCmqyFgQdvj1AwCLIdGI
+ViHw5u5keqoA0IuDDNkLhiCgmKoS5yy84WGbZZRFKfFHYbcAuDUHY4aA7CUPkjgTZk0z84u8cpCm
+xaG+H5fw0wifOHUy0YCBv9xti/UwFqQ5qHR69ACAtKDS6ZFYrAUPOMkUFEMcGvTvHLgcpsLxJGiO
+aSj6DAjbXlj27Ej+w/OuARA0xml2CFtMyNEkQNe0Q4EFRddUT0Tjojv0w6uQj4xcXrHgbGLqoH55
+o5z+zDu/fhc8twt7JD5a/lV+p0pcoL8cQDJXJ/PvtJwp6jYiK9Ffil2YkbmaoHOZ/sy/d5HYKtK/
+L1vYrAiV+45ItQ+rAwAzgTkj7yvqAsRLKcShIi5AXocAuP3POgvUUbwPJQggnqvoD7rLTovzN5dT
+V+dykfAu1PQbWgLKCgDFEwhPqiJHtGWO3VSNbt8ZAFFqh9ciHR5XR74oXIaoyxJNCUDqdV6qYndy
+oBX1Y8LbVrrgAHN4Ci0/eNmgmE+MkR4GFH0hFnn5uZ374rFWk56VpZ4KUwEAC2PP+Cvv5ZMmDNAS
+y5RFiHAnH+YTeaMmrb3E2GtiQA4AC6GKYdYtA9R1UrEEQLg/sJj1adJajXRpcB6Agn6vYTeRr40B
+GQB591MoAAwaAXiqSA8bAiAl+pkCLJopwBYD7SKUC3+v1Yv69BNNxckCAIX+3i4f3ej400u/BKCg
+H2C/kfgYB730CwA8hda0+FQMYjzN9AtXgtcvSgpc/wQjCIVQN/08GFfUXxooMJN+Z9nC/EDdX+Aa
+Svq3Nenn4w8nijsYgXSV9Fs15Z8FNXOKOxlEDUYK+r2aE0AoOPm4m4eRwXGJ7xArcyhq2kV779iC
+uKtnqZUf08deeLSLi9c5JidGPQYdTgCXvzibQyE5cjOTlE7ghnPboml7Lx/l68cUc/4AcPZeuvb7
+6//7lELZVi1HjDH2LID7ME3Os2xZOXFyDZfZaWJw6ezGmG4nLIjZUYy7fqxgKQdEaDLH/fVFLzPd
++cFuak8IlyqmEGPBBtgl/cUOLHLGABc2HuQZAO1A5ra4PXVt2iEExQFGLN+3pnzt7EO+hRqkkDAQ
+cwXMqLJgIGVDN/pbPsDIaTq+GJ9sRYZZncP8AJIJA0x3jA2y2Zez4dwJG7Aih0V29oS3IYvtJWkT
+H9t7fxqkXdUSAly6V0lyxPyB7vNAFcKT6S682P402II+QyWolaSCVJIWBrq4duGB6qZfNV7PzgFr
+Gi4m7ijTOmAFmWkgOaySRnEnR0gSVwZjq1kTlEUMfg4IA4R5r3daNIJLxoEEgrA924skUXuEkHxJ
+s0sUKiMAhyZzQKJKjKx0oglkBpqEOzrl7St8bAWDg0sEUzCgGg1oRQRJLjR4SeEU+8HUFyo/DdLa
+hhiqH0tJ4hD4kYzhNgh1RThQ9gPdAgB5mpq3IWLKiF0cuCskDU86KYHQZHlO3UNmpZg2jDUBuNEC
+7dCMkySGJJmx4sSObMoNz14cYRdJGksrBTyhI+Vk36sOgOoiUgaAhWTdBU+kASVzj2uDOMISc7TP
+bYguADcjYOeqhyxOEwnINGHByF7waT8MueFheHwxrgiufSF6RAjeLIJdlTg1pFm8ifMG4CGcirFL
+L1zwTdcJAN5OIWYB2IkhpU4mk4sctvPCsDLnaGLIZt1EJnUAEBH8DQQZEcJ+OluVnV8Sc6MeLwYK
+d04ASCuzWpr+4O0inkNz2VJBIAt6SGFy18eJIyXq8xDIvJgGAHdToBkASU8HO8Q8VJ6bTORKNhj8
+XuoCcDcHneUALxgIj7TstnoYBikAZlntQN8Yk/swAF7zFh7pV5ltGQCYe0lIX+NrDQDyCHNE90QZ
+QGKayAghrZ27tQDsUkNKjCoACGluPX4cAE/6ImlIpTeRA3Au51OJloOsBoDEj3PL01eoQwA1rJAw
+uowuHxS9JwaA9hQAocXCjahjn52BAvCJJKugBGg/DACJNxGIQdxsq5wagNE/ADJ37fD8lp99xMdg
+ADA3aBGOQ4vnPjEdo3sitOjejBYB0N08dEP+kEsGYXkTAHOubdA7AGAuCnuGa/OGxtSlKAIgl2wX
+6NU5wNb4kr+dUEzTck4egIzTPE3Z3XoAeAcUEQj4aB8fZkUpgCDTEj5ZtvT8znYByHwEEalPIodt
+06bAfRrQpI/u1FceqMMBX07OWL43v3RHOyI1JwEIydqesdbnLT4OQLpwzLbzJMSSS/qEBzk8hWhI
+EdK9+bVDShnPiOFPkSQSJkpkSC1e3WntybUvEyHuR4RJ7k0kD/0kG730AZ3vu6kSPwcAJxU/UTTo
+pjRZBwATIRTI+WEcolzuHXTWZlBHiXkRgUWUfLutisetPLvqP3P3Xkh5zqRVPOlietTfkaRo2bbQ
+13/qsSurwOmSrsD1rxkAaWqOn2LoNSP/TR7bHNx5xjot8ItcZ23an1WNQP07XJY7++bKz5PBiah4
+i+eGtddiD68A6l/D9MhFA9lvsiXLnCloX4PhDNS/BgjeXqV3Y7jf2kvr/ApfGa7B6y+SgiBpNXvF
+L18BMwKvXy/r7os/Qbe3aT67MUcTDPcuLL74PTT/iQcMYMMvkxrqbV7yPi9gDlmGVuYbv1AtqrjK
+p/cMiMSVdm+DZYG4oVXcijjMG8lg/J1e67gaKgPeJIC3YRqiSNz5DsyB3qyZ3KspAci7TYd1qVp6
+U3d6vW80NCsaJTcspxcsD+1yyniTv+L6U1oiOCAFyF9xzRCsByREqkvG+3zNu0KBS9e8m+bHYK5Z
+ztKfAcBeXA+F/jdTBYC9/GsIavwnS38OAJOiVQyBrkupmm3/v78YmVUAGLSPo+bIoOKbql7+Z5On
+vwCAr3Wse5Di4ZdhvC6RWwLwZv6c9VMTIDhucuJfwQH2ls0sho9s06sYkvxReDjpcWWW6VcA4PZU
+QMg8NE4bgEyCNfelkvx3BbEqAOKd/1tHoPatp09rgFr0QfTXRrX71QBMoeqb9THu1KaKr46j9cas
+Ir8aAOMC/8jfq/Ux6szTjqPjevUz3U/1+j+U07KKKuHHnAAAAABJRU5ErkJggg==
+'@
+$iconPc512Base64 = @'
+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
+'@
+$global:iconPc192Bytes = [Convert]::FromBase64String(($iconPc192Base64 -replace '\s',''))
+$global:iconPc512Bytes = [Convert]::FromBase64String(($iconPc512Base64 -replace '\s',''))
 $global:icon192Bytes = [Convert]::FromBase64String(($icon192Base64 -replace '\s',''))
 $global:icon512Bytes = [Convert]::FromBase64String(($icon512Base64 -replace '\s',''))
 
@@ -537,11 +835,12 @@ $global:manifestPC = @'
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
+  "display_override": ["window-controls-overlay", "standalone"],
   "background_color": "#0f172a",
   "theme_color": "#0f172a",
   "icons": [
-    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
-    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" }
+    { "src": "/icon-pc-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icon-pc-512.png", "sizes": "512x512", "type": "image/png" }
   ]
 }
 '@
@@ -1538,7 +1837,8 @@ $global:catalogoPermisos = @(
     @{ k = 'ajustes';       t = 'Entrar a Ajustes';                d = 'Abre el menu de Ajustes (catalogo, fotos, PIN).' },
     @{ k = 'modoCliente';   t = 'Usar modo cliente';               d = 'Puede mostrarle el catalogo al cliente.' },
     @{ k = 'asignados';     t = 'Recibir pedidos de la caja';      d = 'Le llegan los pedidos que arma la PC.' },
-    @{ k = 'notificaciones'; t = 'Recibir notificaciones';         d = 'Avisos de precios, stock, anulaciones y permisos.' }
+    @{ k = 'notificaciones'; t = 'Recibir notificaciones';         d = 'Avisos de precios, stock, anulaciones y permisos.' },
+    @{ k = 'mensajes';       t = 'Enviar mensajes a la caja';      d = 'Puede escribir una nota en sus pedidos o mandar mensajes cortos a la caja.' }
 )
 
 function Permisos-Completos {
@@ -1598,6 +1898,7 @@ function Permiso-De-Ruta([string]$method, [string]$path) {
         if ($path -match "^/api/pedidos/\d+/cancelar$") { return "cancelar" }
         if ($path -match "^/api/pedidos/\d+/metodo$") { return "editar" }
         if ($path -match "^/api/pedidos/\d+/imprimir$") { return "imprimir" }
+        if ($path -eq "/api/mensajes") { return "mensajes" }
     } elseif ($method -eq "GET") {
         if ($path -eq "/api/pedidos") { return "misPedidos" }
         if ($path -eq "/api/pedidos/asignados") { return "asignados" }
@@ -1610,7 +1911,7 @@ function Permiso-De-Ruta([string]$method, [string]$path) {
 # (/api/alertas). "tipo" permite que el movil muestre el aviso adecuado.
 function Agregar-AlertaVendedor([string]$vendedor, [string]$mensaje, $pedidoId = $null, [string]$tipo = "aviso") {
     if ([string]::IsNullOrWhiteSpace($vendedor)) { return }
-    $criticos = @('pedido', 'anulado', 'permisos')
+    $criticos = @('pedido', 'anulado', 'permisos', 'mensaje')
     if (($criticos -notcontains $tipo) -and (-not (Tiene-Permiso $vendedor 'notificaciones'))) { return }
     $al = [pscustomobject]@{
         id       = $global:nextIdAlerta
@@ -1972,6 +2273,515 @@ function Generar-TextoDevolucion($d) {
 }
 
 # ------------------------------------------------------------------
+# Productos NUEVOS del ultimo Excel (para imprimir sus etiquetas)
+# ------------------------------------------------------------------
+# Cada vez que se carga el catalogo se comparan sus productos con los que ya
+# se habian visto antes (skus_conocidos.json). Los que no estaban se guardan
+# en productos_nuevos.json y la pagina de etiquetas los marca con un toque
+# ("Nuevos del Excel"). Si un Excel no trae nada nuevo, la lista anterior se
+# conserva (asi no se pierde por volver a cargar el mismo archivo).
+# La primera vez solo se "aprende" el catalogo: no se marca nada como nuevo.
+$skusConocidosPath = Join-Path $scriptDir "skus_conocidos.json"
+$productosNuevosPath = Join-Path $scriptDir "productos_nuevos.json"
+$global:skusConocidos = @{}
+$global:skusConocidosListos = $false
+$global:productosNuevos = [pscustomobject]@{ fecha = ""; skus = @() }
+
+function Clave-Producto-Nuevo($p) {
+    if (-not [string]::IsNullOrWhiteSpace([string]$p.sku)) { return [string]$p.sku }
+    return ("n:" + [string]$p.nombre)
+}
+
+function Cargar-ProductosNuevos {
+    try {
+        if (Test-Path $skusConocidosPath) {
+            $raw = Get-Content $skusConocidosPath -Raw -Encoding UTF8
+            if ($raw -and $raw.Trim().Length -gt 0) {
+                foreach ($s in @($raw | ConvertFrom-Json)) { if ($s) { $global:skusConocidos[[string]$s] = $true } }
+                $global:skusConocidosListos = ($global:skusConocidos.Count -gt 0)
+            }
+        }
+    } catch { Write-Host "Aviso: no se pudo leer skus_conocidos.json anterior." }
+    try {
+        if (Test-Path $productosNuevosPath) {
+            $raw2 = Get-Content $productosNuevosPath -Raw -Encoding UTF8
+            if ($raw2 -and $raw2.Trim().Length -gt 0) {
+                $o = $raw2 | ConvertFrom-Json
+                $listaN = New-Object System.Collections.ArrayList
+                foreach ($s2 in @($o.skus)) { if ($s2) { [void]$listaN.Add([string]$s2) } }
+                $global:productosNuevos = [pscustomobject]@{ fecha = [string]$o.fecha; skus = @($listaN) }
+            }
+        }
+    } catch { Write-Host "Aviso: no se pudo leer productos_nuevos.json anterior." }
+}
+
+Cargar-ProductosNuevos
+
+function Registrar-ProductosNuevos($nuevoLista) {
+    try {
+        if (@($nuevoLista).Count -eq 0) { return }   # un catalogo vacio (archivo a medio guardar) no cuenta
+        $nuevosAhora = New-Object System.Collections.ArrayList
+        foreach ($n in $nuevoLista) {
+            $kn = Clave-Producto-Nuevo $n
+            if (-not $global:skusConocidos.ContainsKey($kn)) {
+                [void]$nuevosAhora.Add($kn)
+                $global:skusConocidos[$kn] = $true
+            }
+        }
+        $primeraVez = (-not $global:skusConocidosListos)
+        if ((-not $primeraVez) -and $nuevosAhora.Count -gt 0) {
+            $global:productosNuevos = [pscustomobject]@{ fecha = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss"); skus = @($nuevosAhora) }
+            Escribir-ArchivoConReintento -ruta $productosNuevosPath -contenido (ConvertTo-Json -InputObject $global:productosNuevos -Depth 4) | Out-Null
+            Write-Host "Productos nuevos detectados en el Excel: $($nuevosAhora.Count)"
+        }
+        $global:skusConocidosListos = $true
+        if ($primeraVez -or $nuevosAhora.Count -gt 0) {
+            Escribir-ArchivoConReintento -ruta $skusConocidosPath -contenido (ConvertTo-Json -InputObject @($global:skusConocidos.Keys) -Depth 2 -Compress) | Out-Null
+        }
+    } catch { Write-Host "Aviso: no se pudieron registrar los productos nuevos ($_)." }
+}
+
+# ------------------------------------------------------------------
+# MODO PUNTO DE VENTA del movil
+# ------------------------------------------------------------------
+# El administrador pone una "clave de administrador" desde la PC (menu, PIN de
+# vendedores). Con esa clave, en Ajustes del movil de un vendedor se activa el
+# modo punto de venta: historial de ventas, devoluciones, descuentos y reporte
+# de efectivo / transferencia. Todo sigue pasando por este servidor, asi que
+# la PC ve las mismas ventas y el mismo stock en tiempo real.
+# La clave se guarda solo como hash (pos_clave.json). Cada movil activado recibe
+# un token propio (tambien guardado como hash); si se cambia o se quita la
+# clave, todos los tokens se borran y los moviles pierden el modo.
+$posClavePath = Join-Path $scriptDir "pos_clave.json"
+$global:posClaveHash = ""
+$global:posTokens = @{}
+$global:posIntentos = @{}
+
+function Pos-Hash([string]$texto) {
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { $h = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes("toto-pos|" + $texto)) } finally { $sha.Dispose() }
+    return ([BitConverter]::ToString($h) -replace '-', '').ToLower()
+}
+
+function Cargar-Pos {
+    if (Test-Path $posClavePath) {
+        try {
+            $raw = Get-Content $posClavePath -Raw -Encoding UTF8
+            if ($raw -and $raw.Trim().Length -gt 0) {
+                $o = $raw | ConvertFrom-Json
+                if ($o.hash) { $global:posClaveHash = [string]$o.hash }
+                foreach ($t in @($o.tokens)) {
+                    if ($t -and $t.h) { $global:posTokens[[string]$t.h] = [string]$t.v }
+                }
+            }
+        } catch { Write-Host "Aviso: no se pudo leer pos_clave.json anterior." }
+    }
+}
+
+function Guardar-Pos {
+    $lista = New-Object System.Collections.ArrayList
+    foreach ($k in @($global:posTokens.Keys)) { [void]$lista.Add([pscustomobject]@{ h = [string]$k; v = [string]$global:posTokens[$k] }) }
+    $obj = [pscustomobject]@{ hash = [string]$global:posClaveHash; tokens = @($lista) }
+    Escribir-ArchivoConReintento -ruta $posClavePath -contenido (ConvertTo-Json -InputObject $obj -Depth 4) | Out-Null
+}
+
+Cargar-Pos
+
+function Pos-VendedorDe($request) {
+    $v = ""
+    try { $v = [uri]::UnescapeDataString([string]$request.Headers["X-Vendedor"]) } catch { $v = "" }
+    return $v.Trim()
+}
+
+# true si la peticion trae un token de punto de venta valido para ESE vendedor.
+function Pos-Token-Valido($request, [string]$vendedor) {
+    $tok = ""
+    try { $tok = [string]$request.Headers["X-Pos-Token"] } catch { $tok = "" }
+    if ([string]::IsNullOrWhiteSpace($tok) -or [string]::IsNullOrWhiteSpace($vendedor)) { return $false }
+    $h = Pos-Hash $tok
+    if (-not $global:posTokens.ContainsKey($h)) { return $false }
+    return ([string]$global:posTokens[$h]) -eq $vendedor.Trim().ToLowerInvariant()
+}
+
+# Despues de 5 claves erroneas seguidas, esa IP espera 60 segundos.
+function Pos-Bloqueado([string]$ip) {
+    if ($global:posIntentos.ContainsKey($ip)) {
+        $e = $global:posIntentos[$ip]
+        if ($e.hasta -and ((Get-Date) -lt $e.hasta)) { return [int][math]::Ceiling(($e.hasta - (Get-Date)).TotalSeconds) }
+    }
+    return 0
+}
+
+function Pos-Fallo([string]$ip) {
+    if (-not $global:posIntentos.ContainsKey($ip)) { $global:posIntentos[$ip] = @{ n = 0; hasta = $null } }
+    $e = $global:posIntentos[$ip]
+    $e.n = [int]$e.n + 1
+    if ($e.n -ge 5) { $e.hasta = (Get-Date).AddSeconds(60); $e.n = 0 }
+}
+
+function Clave-Linea($it) {
+    if (-not [string]::IsNullOrWhiteSpace([string]$it.sku)) { return [string]$it.sku }
+    return [string]$it.nombre
+}
+
+# Cuanto se ha devuelto ya de cada venta: clave "idPedido|horaPedido" -> (producto -> cantidad).
+function Indice-Devoluciones {
+    $idx = @{}
+    foreach ($x in @($global:devoluciones)) {
+        if (-not $x.pedidoId) { continue }
+        $hx = if ($x.pedidoHora) { [string]$x.pedidoHora } else { "" }
+        $kp = ([string]$x.pedidoId) + "|" + $hx
+        if (-not $idx.ContainsKey($kp)) { $idx[$kp] = @{} }
+        foreach ($xi in @($x.items)) {
+            $kl = Clave-Linea $xi
+            if (-not $idx[$kp].ContainsKey($kl)) { $idx[$kp][$kl] = 0.0 }
+            $idx[$kp][$kl] = [double]$idx[$kp][$kl] + [double]$xi.cantidad
+        }
+    }
+    return $idx
+}
+
+function Mapa-Devuelto($idx, [string]$idPed, [string]$horaPed) {
+    $res = @{}
+    $claves = @(($idPed + "|" + $horaPed))
+    if ($horaPed) { $claves += ($idPed + "|") }   # devoluciones antiguas (hechas desde la PC) sin hora de pedido
+    foreach ($kp in $claves) {
+        if ($idx.ContainsKey($kp)) {
+            foreach ($kl in @($idx[$kp].Keys)) {
+                if (-not $res.ContainsKey($kl)) { $res[$kl] = 0.0 }
+                $res[$kl] = [double]$res[$kl] + [double]$idx[$kp][$kl]
+            }
+        }
+    }
+    return $res
+}
+
+# Los archivos de la carpeta "historial" no se reescriben despues de cerrar el dia: se leen una vez y se
+# recuerdan en memoria (clave = ruta + tamano), asi consultar el historial cada pocos segundos no castiga el disco.
+$global:histCache = @{}
+function Leer-HistorialCache($archivo) {
+    $clave = $archivo.FullName + "|" + $archivo.Length
+    if ($global:histCache.ContainsKey($clave)) { return $global:histCache[$clave] }
+    $lista = @()
+    try {
+        $raw = Get-Content $archivo.FullName -Raw -Encoding UTF8
+        if ($raw -and $raw.Trim().Length -gt 0) { $lista = @($raw | ConvertFrom-Json) }
+    } catch { $lista = @() }
+    if ($global:histCache.Count -gt 120) { $global:histCache = @{} }
+    $global:histCache[$clave] = $lista
+    return $lista
+}
+
+# Pedidos cobrados desde una fecha. Solo abre los archivos del historial que
+# pueden tener ventas de ese rango (el nombre del archivo lleva la fecha de cierre).
+function Pos-PedidosCobradosDesde([datetime]$desde) {
+    $carpeta = Join-Path $scriptDir "historial"
+    $todos = New-Object System.Collections.Generic.List[object]
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    if (Test-Path $carpeta) {
+        foreach ($f in @(Get-ChildItem -Path $carpeta -Filter "pedidos_*.json" -ErrorAction SilentlyContinue)) {
+            if ($f.Name -match '^pedidos_(\d{4}-\d{2}-\d{2})_') {
+                $fd = [datetime]::MinValue
+                if ([datetime]::TryParseExact($Matches[1], "yyyy-MM-dd", $inv, [System.Globalization.DateTimeStyles]::None, [ref]$fd)) {
+                    if ($fd -lt $desde.Date) { continue }
+                }
+            }
+            foreach ($p in @(Leer-HistorialCache $f)) { if ($p) { $todos.Add($p) } }
+        }
+    }
+    foreach ($p in @($global:pedidos)) { $todos.Add($p) }
+    return @($todos | Where-Object {
+        $ok = $false
+        try { $ok = ($_.estado -eq "cobrado") -and $_.hora -and (([datetime]::ParseExact([string]$_.hora, "yyyy-MM-dd HH:mm:ss", $inv)) -ge $desde) } catch { $ok = $false }
+        $ok
+    })
+}
+
+# Busca una venta por folio y hora, tanto entre las de hoy como entre las archivadas.
+function Buscar-PedidoCualquiera([int]$id, [string]$hora) {
+    foreach ($p in @($global:pedidos)) {
+        if (([int]$p.id -eq $id) -and ((-not $hora) -or ([string]$p.hora -eq $hora))) { return $p }
+    }
+    $carpeta = Join-Path $scriptDir "historial"
+    if (Test-Path $carpeta) {
+        foreach ($f in @(Get-ChildItem -Path $carpeta -Filter "pedidos_*.json" -ErrorAction SilentlyContinue)) {
+            foreach ($x in @(Leer-HistorialCache $f)) {
+                if ($x -and ([int]$x.id -eq $id) -and ((-not $hora) -or ([string]$x.hora -eq $hora))) { return $x }
+            }
+        }
+    }
+    return $null
+}
+
+# Historial de ventas cobradas + reporte de caja (efectivo / transferencia) del rango.
+# $quien = "" (todos los vendedores) o el nombre del vendedor en minusculas.
+# La parte en transferencia ya viene con el x2 (es el dinero que de verdad entro).
+function Calcular-PosVentas([int]$dias, [string]$quien) {
+    $desde = (Get-Date).Date.AddDays( - ($dias - 1))
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $todos = @(Pos-PedidosCobradosDesde $desde)
+    if ($quien) { $todos = @($todos | Where-Object { ([string]$_.vendedor).Trim().ToLowerInvariant() -eq $quien }) }
+    $todos = @($todos | Sort-Object { [string]$_.hora } -Descending)
+    $idxDev = Indice-Devoluciones
+
+    $devs = New-Object System.Collections.ArrayList
+    foreach ($x in @($global:devoluciones)) {
+        $okFecha = $false
+        try { $okFecha = (([datetime]::ParseExact([string]$x.hora, "yyyy-MM-dd HH:mm:ss", $inv)) -ge $desde) } catch { $okFecha = $false }
+        if (-not $okFecha) { continue }
+        if ($quien -and (([string]$x.atendio).Trim().ToLowerInvariant() -ne $quien)) { continue }
+        [void]$devs.Add($x)
+    }
+
+    $efIn = 0.0; $trIn = 0.0; $otIn = 0.0; $baseTot = 0.0; $descTot = 0.0
+    $porVend = @{}
+    $lista = New-Object System.Collections.ArrayList
+    foreach ($p in $todos) {
+        $m = if ($p.metodoPago) { [string]$p.metodoPago } else { "Efectivo" }
+        $tp = 0.0; try { $tp = [double]$p.totalProductos } catch { $tp = 0.0 }
+        $tc = $tp
+        try { if ($p.totalCobrado) { $tc = [double]$p.totalCobrado } } catch {}
+        $e = 0.0; $t = 0.0; $o = 0.0
+        if ($m -eq "Transferencia") { $t = $tc }
+        elseif ($m -eq "Combinado") {
+            $pe = 0.0; try { $pe = [double]$p.pagoEfectivo } catch {}
+            $pt = 0.0; try { $pt = [double]$p.pagoTransferencia } catch {}
+            $e = $pe; $t = $pt * 2
+        }
+        elseif ($m -eq "Otro") { $o = $tc }
+        else { $e = $tc }
+        $efIn += $e; $trIn += $t; $otIn += $o; $baseTot += $tp
+
+        $descP = 0.0
+        foreach ($it in @($p.items)) {
+            try {
+                if (($it.PSObject.Properties.Name -contains 'precioLista') -and ($null -ne $it.precioLista)) {
+                    $dl = ([double]$it.precioLista - [double]$it.precio) * [double]$it.cantidad
+                    if ($dl -gt 0.0001) { $descP += $dl }
+                }
+            } catch {}
+        }
+        $descTot += $descP
+
+        $vn = if ($p.vendedor) { [string]$p.vendedor } else { "Sin nombre" }
+        $kv = $vn.Trim().ToLowerInvariant()
+        if (-not $porVend.ContainsKey($kv)) { $porVend[$kv] = [pscustomobject]@{ vendedor = $vn; ventas = 0; efectivo = 0.0; transferencia = 0.0; otro = 0.0 } }
+        $pv = $porVend[$kv]
+        $pv.ventas = [int]$pv.ventas + 1
+        $pv.efectivo = [double]$pv.efectivo + $e
+        $pv.transferencia = [double]$pv.transferencia + $t
+        $pv.otro = [double]$pv.otro + $o
+
+        if ($lista.Count -lt 200) {
+            $itemsSlim = New-Object System.Collections.ArrayList
+            foreach ($it2 in @($p.items)) {
+                [void]$itemsSlim.Add([pscustomobject]@{ sku = [string]$it2.sku; nombre = [string]$it2.nombre; cantidad = [double]$it2.cantidad; precio = [double]$it2.precio })
+            }
+            [void]$lista.Add([pscustomobject]@{
+                id = [int]$p.id
+                hora = [string]$p.hora
+                vendedor = $vn
+                metodoPago = $m
+                totalProductos = [math]::Round($tp, 2)
+                totalCobrado = [math]::Round($tc, 2)
+                pagoEfectivo = $p.pagoEfectivo
+                pagoTransferencia = $p.pagoTransferencia
+                descuento = [math]::Round($descP, 2)
+                items = @($itemsSlim)
+                devuelto = (Mapa-Devuelto $idxDev ([string]$p.id) ([string]$p.hora))
+            })
+        }
+    }
+
+    $devEf = 0.0; $devTr = 0.0
+    foreach ($x in $devs) {
+        if ($x.PSObject.Properties.Name -contains 'reembolsoEfectivo') {
+            $devEf += [double]$x.reembolsoEfectivo
+            $devTr += [double]$x.reembolsoTransferencia
+        } elseif ([string]$x.tipo -eq "devolucion") {
+            # Devolucion hecha desde la PC (antes de este modo): se toma el total y, si dice transferencia, x2.
+            $tt = 0.0; try { $tt = [double]$x.total } catch { $tt = 0.0 }
+            if (([string]$x.metodoReembolso).ToLower() -match "transf") { $devTr += $tt * 2 } else { $devEf += $tt }
+        }
+    }
+
+    $vendLista = @($porVend.Values | Sort-Object { [double]$_.efectivo + [double]$_.transferencia + [double]$_.otro } -Descending | ForEach-Object {
+        [pscustomobject]@{ vendedor = $_.vendedor; ventas = $_.ventas; efectivo = [math]::Round($_.efectivo, 2); transferencia = [math]::Round($_.transferencia, 2); otro = [math]::Round($_.otro, 2) }
+    })
+
+    $netoEf = $efIn - $devEf
+    $netoTr = $trIn - $devTr
+    return @{
+        ok = $true
+        reporte = [pscustomobject]@{
+            dias = $dias
+            ventas = $todos.Count
+            totalProductos = [math]::Round($baseTot, 2)
+            descuentos = [math]::Round($descTot, 2)
+            efectivoEntrada = [math]::Round($efIn, 2)
+            transferenciaEntrada = [math]::Round($trIn, 2)
+            otroEntrada = [math]::Round($otIn, 2)
+            devoluciones = $devs.Count
+            devolucionEfectivo = [math]::Round($devEf, 2)
+            devolucionTransferencia = [math]::Round($devTr, 2)
+            netoEfectivo = [math]::Round($netoEf, 2)
+            netoTransferencia = [math]::Round($netoTr, 2)
+            netoTotal = [math]::Round($netoEf + $netoTr + $otIn, 2)
+            porVendedor = $vendLista
+        }
+        pedidos = @($lista)
+        hayMas = ($todos.Count -gt 200)
+    }
+}
+
+# Devolucion hecha desde el movil en modo punto de venta. Comprueba contra la
+# venta original que no se devuelva mas de lo vendido, reintegra el stock (si se
+# pide), guarda el registro en devoluciones.json (el mismo de la PC) e imprime el
+# comprobante en la impresora de la caja. Devuelve @{ codigo; cuerpo }.
+function Registrar-DevolucionPos($d, [string]$vendedor) {
+    $idPed = 0; try { $idPed = [int]$d.pedidoId } catch { $idPed = 0 }
+    $horaPed = [string]$d.pedidoHora
+    $pedido = Buscar-PedidoCualquiera $idPed $horaPed
+    if ((-not $pedido) -or ([string]$pedido.estado -ne "cobrado")) {
+        return @{ codigo = 404; cuerpo = @{ ok = $false; error = "No se encontro esa venta cobrada." } }
+    }
+    $idxDev = Indice-Devoluciones
+    $yaDev = Mapa-Devuelto $idxDev ([string]$idPed) ([string]$pedido.hora)
+
+    $met = if ($pedido.metodoPago) { [string]$pedido.metodoPago } else { "Efectivo" }
+    $factorItems = if ($met -eq "Transferencia") { 2.0 } else { 1.0 }   # el cliente pago el precio x2 por unidad
+
+    $itemsDev = New-Object System.Collections.ArrayList
+    foreach ($it in @($d.items)) {
+        $cant = 0.0; try { $cant = [double]$it.cantidad } catch { $cant = 0.0 }
+        if ($cant -le 0) { continue }
+        $kl = Clave-Linea $it
+        $linea = $null
+        foreach ($cand in @($pedido.items)) { if ((Clave-Linea $cand) -eq $kl) { $linea = $cand; break } }
+        if (-not $linea) {
+            return @{ codigo = 400; cuerpo = @{ ok = $false; error = "Ese producto no esta en la venta." } }
+        }
+        $ya = if ($yaDev.ContainsKey($kl)) { [double]$yaDev[$kl] } else { 0.0 }
+        $yaPedido = 0.0
+        foreach ($prev in $itemsDev) { if ((Clave-Linea $prev) -eq $kl) { $yaPedido += [double]$prev.cantidad } }
+        $resta = [double]$linea.cantidad - $ya
+        if (($cant + $yaPedido) -gt ($resta + 0.0001)) {
+            return @{ codigo = 409; cuerpo = @{ ok = $false; error = ("De " + [string]$linea.nombre + " solo se pueden devolver " + (Formato-Cantidad $resta) + ".") } }
+        }
+        [void]$itemsDev.Add([pscustomobject]@{ sku = [string]$linea.sku; nombre = [string]$linea.nombre; cantidad = $cant; precio = [math]::Round(([double]$linea.precio * $factorItems), 2) })
+    }
+    if ($itemsDev.Count -eq 0) {
+        return @{ codigo = 400; cuerpo = @{ ok = $false; error = "Elige al menos un producto a devolver." } }
+    }
+
+    $totalDev = 0.0
+    foreach ($i in $itemsDev) { $totalDev += [double]$i.precio * [double]$i.cantidad }
+    $totalDev = [math]::Round($totalDev, 2)
+
+    # Cuanto se le devuelve al cliente y por donde (segun como pago la venta).
+    $baseDev = 0.0
+    foreach ($i in $itemsDev) { $baseDev += ([double]$i.precio / $factorItems) * [double]$i.cantidad }
+    $rEf = 0.0; $rTr = 0.0
+    if ($met -eq "Transferencia") { $rTr = $baseDev * 2 }
+    elseif ($met -eq "Combinado") {
+        $pe = 0.0; try { $pe = [double]$pedido.pagoEfectivo } catch {}
+        $pt = 0.0; try { $pt = [double]$pedido.pagoTransferencia } catch {}
+        if (($pe + $pt) -gt 0) { $rEf = $baseDev * ($pe / ($pe + $pt)); $rTr = $baseDev * ($pt / ($pe + $pt)) * 2 } else { $rEf = $baseDev }
+    }
+    else { $rEf = $baseDev }
+    $rEf = [math]::Round($rEf, 2); $rTr = [math]::Round($rTr, 2)
+    $partesMet = @()
+    if ($rEf -gt 0) { $partesMet += ("Efectivo $" + (Formato-Monto $rEf)) }
+    if ($rTr -gt 0) { $partesMet += ("Transferencia $" + (Formato-Monto $rTr)) }
+    $txtMet = ($partesMet -join " + ")
+
+    $reintegrar = $true
+    try { if ($d.PSObject.Properties.Name -contains 'reintegrarStock') { $reintegrar = [bool]$d.reintegrarStock } } catch { $reintegrar = $true }
+    if ($reintegrar) {
+        foreach ($it in $itemsDev) {
+            if ([string]::IsNullOrWhiteSpace($it.sku)) { continue }
+            $prodD = $global:catalogo | Where-Object { $_.sku -eq $it.sku } | Select-Object -First 1
+            if ($prodD -and $prodD.stockBase -ne $null) {
+                $prodD.vendido = [double]$prodD.vendido - [double]$it.cantidad
+                if ($prodD.vendido -lt 0) { $prodD.vendido = 0 }
+                $prodD.stock = [double]$prodD.stockBase - [double]$prodD.vendido
+                if ($prodD.stock -lt 0) { $prodD.stock = 0 }
+            }
+        }
+    }
+
+    $registro = [pscustomobject]@{
+        id                     = $global:nextIdDevolucion
+        tipo                   = "devolucion"
+        hora                   = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+        pedidoId               = [string]$idPed
+        pedidoHora             = [string]$pedido.hora
+        cliente                = ""
+        atendio                = $vendedor
+        motivo                 = ([string]$d.motivo).Trim()
+        items                  = @($itemsDev)
+        total                  = $totalDev
+        metodoReembolso        = $txtMet
+        entregado              = ""
+        diferencia             = $null
+        reintegrarStock        = $reintegrar
+        reembolsoEfectivo      = $rEf
+        reembolsoTransferencia = $rTr
+        origen                 = "movil"
+    }
+    $global:nextIdDevolucion++
+    [void]$global:devoluciones.Add($registro)
+    Guardar-Devoluciones
+
+    $impreso = $false
+    $errImp = ""
+    try { $impreso = [bool](Imprimir-Texto (Generar-TextoDevolucion $registro)) } catch { $errImp = "$($_.Exception.Message)" }
+    return @{ codigo = 200; cuerpo = @{ ok = $true; id = $registro.id; impreso = $impreso; errorImpresion = $errImp; reembolsoEfectivo = $rEf; reembolsoTransferencia = $rTr } }
+}
+
+# ------------------------------------------------------------------
+# Mensajes cortos movil <-> PC (solo entre la caja y los vendedores, nunca clientes)
+# ------------------------------------------------------------------
+# - Movil -> PC: una nota opcional que viaja con el pedido (campo "nota" del pedido) o un
+#   mensaje suelto sin productos. Los sueltos quedan en mensajes_pc.json hasta que el Panel
+#   de la PC los muestra (si estaba cerrado, los ve al abrirlo).
+# - PC -> movil: un mensaje suelto llega como aviso del movil (campana); si va con un pedido
+#   armado para el vendedor, la nota aparece dentro de ese pedido.
+$mensajesPcPath = Join-Path $scriptDir "mensajes_pc.json"
+$global:mensajesPc = New-Object System.Collections.ArrayList
+$global:nextIdMensaje = 1
+
+function Cargar-MensajesPc {
+    if (Test-Path $mensajesPcPath) {
+        try {
+            $raw = Get-Content $mensajesPcPath -Raw -Encoding UTF8
+            if ($raw -and $raw.Trim().Length -gt 0) {
+                foreach ($m in @($raw | ConvertFrom-Json)) {
+                    if (-not $m) { continue }
+                    [void]$global:mensajesPc.Add($m)
+                    if ([int]$m.id -ge $global:nextIdMensaje) { $global:nextIdMensaje = [int]$m.id + 1 }
+                }
+            }
+        } catch { Write-Host "Aviso: no se pudo leer mensajes_pc.json anterior." }
+    }
+}
+
+function Guardar-MensajesPc {
+    while ($global:mensajesPc.Count -gt 100) { $global:mensajesPc.RemoveAt(0) }
+    Escribir-ArchivoConReintento -ruta $mensajesPcPath -contenido (ConvertTo-Json -InputObject @($global:mensajesPc) -Depth 4) | Out-Null
+}
+
+Cargar-MensajesPc
+
+# Deja el texto en una sola linea y de hasta 200 caracteres.
+function Limpiar-TextoMensaje($t) {
+    $s = ([string]$t).Trim()
+    $s = $s -replace '[\r\n\t]+', ' '
+    if ($s.Length -gt 200) { $s = $s.Substring(0, 200) }
+    return $s
+}
+
+# ------------------------------------------------------------------
 # HTML: Panel Receptor (se abre en la PC)
 # ------------------------------------------------------------------
 $htmlPC = @'
@@ -1981,8 +2791,8 @@ $htmlPC = @'
 <meta charset="UTF-8">
 <title>Panel de Pedidos - Toto Tools</title>
 <link rel="manifest" href="/manifest-pc.json">
-<link rel="icon" href="/icon-192.png">
-<link rel="apple-touch-icon" href="/icon-192.png">
+<link rel="icon" href="/icon-pc-192.png">
+<link rel="apple-touch-icon" href="/icon-pc-192.png">
 <meta name="theme-color" content="#0f172a">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Panel Pedidos">
@@ -2150,6 +2960,11 @@ $htmlPC = @'
       <div id="pinError" style="color:#fca5a5; font-size:12px; margin-top:8px;"></div>
       <h3 style="font-size:13px; color:#94a3b8; margin:14px 0 6px; text-transform:uppercase; letter-spacing:0.5px;">Vendedores con PIN puesto</h3>
       <div id="listaConPin" style="font-size:13px; color:#e2e8f0;">Cargando...</div>
+      <h3 style="font-size:13px; color:#94a3b8; margin:14px 0 6px; text-transform:uppercase; letter-spacing:0.5px;">Modo punto de venta en el m&oacute;vil</h3>
+      <p style="font-size:12px; color:#94a3b8; margin-bottom:8px;">Con esta clave de administrador, un vendedor puede activar en su m&oacute;vil (Ajustes) el modo punto de venta: historial de ventas, devoluciones, descuentos y reporte de efectivo y transferencia. Si la cambias o la quitas, todos los m&oacute;viles pierden el modo.</p>
+      <input type="text" id="posClaveAdmin" class="np-input" placeholder="Clave de administrador (4 a 20 caracteres)" autocomplete="off">
+      <button class="btn" onclick="guardarClavePOS()">Guardar clave</button>
+      <div id="posClaveEstado" style="font-size:12px; color:#94a3b8; margin-top:6px;"></div>
       <button class="btn" style="background:#475569; margin-top:12px;" onclick="cerrarPines()">Cerrar</button>
     </div>
   </div>
@@ -2262,6 +3077,7 @@ $htmlPC = @'
       <h3 style="font-size:13px; color:#94a3b8; margin:12px 0 6px; text-transform:uppercase; letter-spacing:0.5px;">Pedido a armar</h3>
       <div id="npCarrito"><div class="np-vacio">Sin productos aun.</div></div>
       <div class="np-total">Total: $<span id="npTotal">0.00</span></div>
+      <div id="npNotaWrap"><input type="text" id="npNota" class="np-input" maxlength="200" placeholder="Mensaje para el vendedor (opcional; sin productos se env&iacute;a solo el mensaje)"></div>
       <button class="btn" id="npBtnEnviar" onclick="enviarPedidoAVendedor()" style="margin-top:6px;">Enviar al movil del vendedor</button>
       <button class="btn" style="background:#475569; margin-top:6px;" onclick="cerrarNuevoPedido()">Cancelar</button>
       <div id="npError" style="color:#fca5a5; font-size:12px; margin-top:8px;"></div>
@@ -2360,12 +3176,12 @@ $htmlPC = @'
       } catch(e) {}
     }
 
-    function mostrarBanner(texto) {
+    function mostrarBanner(texto, ms) {
       const b = document.getElementById('banner');
       if (bannerOcultarTimeout) { clearTimeout(bannerOcultarTimeout); bannerOcultarTimeout = null; }
       b.textContent = texto;
       b.style.display = 'block';
-      bannerOcultarTimeout = setTimeout(() => { b.style.display = 'none'; }, 3500);
+      bannerOcultarTimeout = setTimeout(() => { b.style.display = 'none'; }, ms || 3500);
     }
 
     // Igual que mostrarBanner, pero con un boton "Deshacer" adentro (mismo
@@ -2850,6 +3666,8 @@ $htmlPC = @'
         }).join('');
       }
 
+      const notaHtml = p.nota ? ('<div style="font-size:13px; color:#0f172a; background:#e0f2fe; border-radius:6px; padding:6px 8px; margin:6px 0;">&#128172; <b>Nota del vendedor:</b> ' + escaparHtml(p.nota) + '</div>') : '';
+
       const totalProductos = Number(p.totalProductos !== undefined ? p.totalProductos : p.total || 0);
       const totalCobrado = Number(p.totalCobrado !== undefined && p.totalCobrado !== null ? p.totalCobrado : totalProductos);
 
@@ -2916,6 +3734,7 @@ $htmlPC = @'
         '<h3>' + (p.vendedor || 'Vendedor') + '</h3>' +
         '<div class="hora">' + p.hora + ' — Folio #' + p.id + '</div>' +
         origenHtml +
+        notaHtml +
         '<ul>' + items + '</ul>' +
         totalHtml +
         extra +
@@ -3694,6 +4513,34 @@ $htmlPC = @'
       document.getElementById('pinVendedorNombre').value = '';
       document.getElementById('pinVendedorValor').value = '';
       cargarListaConPin();
+      cargarEstadoClavePOS();
+    }
+    let claveDefinidaPOS = false;
+    async function cargarEstadoClavePOS() {
+      const el = document.getElementById('posClaveEstado');
+      document.getElementById('posClaveAdmin').value = '';
+      try {
+        const r = await fetch('/api/pos/estado');
+        const d = await r.json();
+        claveDefinidaPOS = !!(d && d.claveDefinida);
+        el.textContent = claveDefinidaPOS
+          ? 'Hay una clave puesta. Escribe otra y guarda para cambiarla; guarda en blanco para quitarla.'
+          : 'Todav\u00eda no hay clave: nadie puede activar el modo punto de venta.';
+      } catch (e) { el.textContent = ''; }
+    }
+    async function guardarClavePOS() {
+      const el = document.getElementById('posClaveEstado');
+      const clave = document.getElementById('posClaveAdmin').value.trim();
+      if (clave && (clave.length < 4 || clave.length > 20)) { el.textContent = 'La clave debe tener de 4 a 20 caracteres.'; return; }
+      if (!clave && !claveDefinidaPOS) { el.textContent = 'Escribe la clave que quieres poner.'; return; }
+      if ((!clave || claveDefinidaPOS) && !confirm(clave ? 'Cambiar la clave hace que todos los moviles pierdan el modo punto de venta y lo tengan que activar otra vez. Continuar?' : 'Quitar la clave hace que todos los moviles pierdan el modo punto de venta. Continuar?')) return;
+      try {
+        const r = await fetch('/api/pos/clave', { method: 'POST', body: JSON.stringify({ clave }) });
+        const d = await r.json().catch(() => null);
+        if (!r.ok || !d || !d.ok) { el.textContent = (d && d.error) || 'No se pudo guardar.'; return; }
+        mostrarBanner(clave ? 'Clave de administrador guardada.' : 'Clave quitada: ya nadie tiene el modo punto de venta.');
+        cargarEstadoClavePOS();
+      } catch (e) { el.textContent = 'No se pudo conectar con el servidor.'; }
     }
     function cerrarPines() { document.getElementById('pinesOverlay').style.display = 'none'; }
     async function cargarListaConPin() {
@@ -3764,6 +4611,22 @@ $htmlPC = @'
     }
     setInterval(revisarAsignadosVistos, 5000);
 
+    // Mensajes cortos sueltos que mandan los vendedores desde el movil (los que van con un pedido salen en su tarjeta).
+    async function revisarMensajesPC() {
+      try {
+        const r = await fetch('/api/mensajes/pc');
+        const d = await r.json().catch(() => null);
+        const lista = (d && d.mensajes) || [];
+        if (!lista.length) return;
+        beep();
+        mostrarBanner(lista.map(m => '\u{1F4AC} ' + m.vendedor + ': ' + m.texto).join('   |   '), 30000);
+        const b = document.getElementById('banner');
+        b.onclick = () => { b.style.display = 'none'; };
+      } catch (e) {}
+    }
+    setInterval(revisarMensajesPC, 5000);
+    revisarMensajesPC();
+
     async function cargarCatalogoNP() {
       // Se vuelve a pedir cada vez que se abre el dialogo: asi el stock que se ve (y el filtro de "sin stock") esta al dia.
       try {
@@ -3810,6 +4673,8 @@ $htmlPC = @'
       document.getElementById('npBtnEnviar').textContent = agregarAPedidoId ? 'Agregar al pedido' : 'Enviar al movil del vendedor';
       document.getElementById('npDestinoWrap').style.display = agregarAPedidoId ? 'none' : 'block';
       document.getElementById('npVigenciaWrap').style.display = agregarAPedidoId ? 'none' : 'block';
+      document.getElementById('npNotaWrap').style.display = agregarAPedidoId ? 'none' : 'block';
+      document.getElementById('npNota').value = '';
       carritoNP = [];
       renderCarritoNP();
       cargarCatalogoNP();
@@ -3933,7 +4798,8 @@ $htmlPC = @'
     async function enviarPedidoAVendedorInterno() {
       const err = document.getElementById('npError');
       err.textContent = '';
-      if (carritoNP.length === 0) { err.textContent = 'Agrega al menos un producto.'; return; }
+      const notaNP = ((document.getElementById('npNota') || {}).value || '').trim();
+      if (carritoNP.length === 0 && !(notaNP && !agregarAPedidoId)) { err.textContent = agregarAPedidoId ? 'Agrega al menos un producto.' : 'Agrega al menos un producto o escribe un mensaje.'; return; }
       if (agregarAPedidoId) {
         try {
           const claveAgr = claveBaseNP + '-' + hashSimpleNP(JSON.stringify(carritoNP.map(i => [i.sku, i.cantidad])));
@@ -3950,9 +4816,20 @@ $htmlPC = @'
       if (!destino) { err.textContent = 'Elige a quien enviarlo.'; return; }
       const vigMin = parseInt(document.getElementById('selVigenciaNP').value, 10) || 60;
       const paraTodos = destino === '__TODOS__';
+      if (carritoNP.length === 0) {
+        // Sin productos: se envia solo el mensaje (le llega al movil como aviso).
+        try {
+          const resM = await fetch('/api/mensajes/enviar', { method: 'POST', body: JSON.stringify(paraTodos ? { todos: true, texto: notaNP } : { vendedor: destino, texto: notaNP }) });
+          const dM = await resM.json().catch(() => null);
+          if (!resM.ok || !dM || !dM.ok) { err.textContent = (dM && dM.error) || 'No se pudo enviar el mensaje.'; return; }
+          mostrarBanner(paraTodos ? 'Mensaje enviado a todos los vendedores' : ('Mensaje enviado a ' + destino));
+          cerrarNuevoPedido();
+        } catch (e) { err.textContent = 'No se pudo enviar (revisa la conexion).'; }
+        return;
+      }
       try {
         const claveAsig = claveBaseNP + '-' + hashSimpleNP(destino + '|' + vigMin + '|' + JSON.stringify(carritoNP.map(i => [i.sku, i.cantidad])));
-        const body = paraTodos ? { todos: true, items: carritoNP, minutosVigencia: vigMin, claveEnvio: claveAsig } : { vendedor: destino, items: carritoNP, minutosVigencia: vigMin, claveEnvio: claveAsig };
+        const body = paraTodos ? { todos: true, items: carritoNP, minutosVigencia: vigMin, claveEnvio: claveAsig, nota: notaNP } : { vendedor: destino, items: carritoNP, minutosVigencia: vigMin, claveEnvio: claveAsig, nota: notaNP };
         const res = await fetch('/api/pedidos/asignar', { method: 'POST', body: JSON.stringify(body) });
         const data = await res.json().catch(() => null);
         if (!res.ok) { err.textContent = (data && data.error) || 'No se pudo enviar.'; return; }
@@ -4094,6 +4971,11 @@ $htmlVendedor = @'
   .btn { background:#2563eb; color:#fff; border:none; padding:13px; border-radius:10px; font-weight:bold; font-size:15px; width:100%; cursor:pointer; }
   .btn:active { background:#1d4ed8; }
   .btn-secundario { background:#64748b; }
+  #posFiltros { display:none; gap:8px; margin-top:12px; }
+  #posFiltros select { flex:1; margin-bottom:0; }
+  body.modoPOS #posFiltros { display:flex; }
+  body.autoservicio #notaPedido, body.modoCliente #notaPedido, body.sin-mensajes #notaPedido { display:none !important; }
+  body.sin-verStock #btnDescargarStock { display:none !important; }
   #estadoCatalogo { font-size:13px; color:#16a34a; margin-bottom:8px; font-weight:600; }
   #estadoCatalogo.error { color:#991b1b; }
   .resultado { display:flex; justify-content:space-between; align-items:center; padding:11px 0; border-bottom:1px solid var(--borde-suave); }
@@ -4264,14 +5146,19 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
       </div>
       <div id="cambioTexto"></div>
     </div>
+    <input type="text" id="notaPedido" maxlength="200" placeholder="Nota para la caja (opcional)" oninput="actualizarBotonEnviar()">
     <button class="btn" id="btnEnviarPedido" onclick="enviarPedido()">Enviar pedido</button>
   </div>
 
   <div class="section" id="seccionMisPedidos">
     <button class="colapsable" onclick="toggleMisPedidos()">
-      <span>Mis pedidos de hoy<span class="resumen" id="resumenMisPedidos"></span></span>
+      <span><span id="tituloMisPedidos">Mis pedidos de hoy</span><span class="resumen" id="resumenMisPedidos"></span></span>
       <span id="flechaMisPedidos">&#9662;</span>
     </button>
+    <div id="posFiltros">
+      <select id="posRango" onchange="posUltimaFirma = null; cargarVentasPOS()"><option value="1">Hoy</option><option value="7">7 d&iacute;as</option><option value="30">30 d&iacute;as</option></select>
+      <select id="posQuien" onchange="posUltimaFirma = null; cargarVentasPOS()"><option value="todos">Todos</option><option value="yo">Solo yo</option></select>
+    </div>
     <div id="misPedidos" style="display:none; margin-top:12px;"><div style="color:#94a3b8; font-size:13px;">Sin pedidos todavia hoy.</div></div>
   </div>
 
@@ -4344,6 +5231,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
         <input type="file" id="archivoExcelMovil" accept=".xlsx,.xls" style="display:none">
         <div id="estadoSubidaExcel" style="font-size:12px; color:#64748b; margin-top:6px;"></div>
         <button class="btn btn-secundario" style="margin-top:8px;" onclick="descargarExcelCatalogo()">Descargar el Excel de la PC</button>
+        <button class="btn btn-secundario" id="btnDescargarStock" style="margin-top:8px;" onclick="descargarStockActual()">Descargar lo que va quedando (stock actual)</button>
         <div id="estadoDescargaExcel" style="font-size:12px; color:#64748b; margin-top:6px;"></div>
       </div>
 
@@ -4369,6 +5257,20 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
           <span id="msRed" onclick="abrirDiagnostico()" style="font-size:14px; color:#64748b;"></span>
         </div>
         <button class="btn btn-secundario" onclick="abrirDiagnostico()">Ver diagn&oacute;stico de la se&ntilde;al</button>
+      </div>
+
+      <div class="section" id="secPOS">
+        <h2>Modo punto de venta</h2>
+        <div id="posInactivoBox">
+          <p style="font-size:12px; color:#64748b; margin-bottom:8px;">Lo activa el administrador con su clave: este tel&eacute;fono cobra al enviar, permite descuentos y muestra el historial de ventas, las devoluciones y el reporte de efectivo y transferencia. Sigue sincronizado con la PC.</p>
+          <input type="password" id="posClaveInput" placeholder="Clave de administrador" autocomplete="off" onkeydown="if (event.key === 'Enter') activarModoPOS()">
+          <button class="btn btn-secundario" onclick="activarModoPOS()">Activar modo punto de venta</button>
+        </div>
+        <div id="posActivoBox" style="display:none;">
+          <p style="font-size:13px; color:#166534; font-weight:600; margin-bottom:8px;">Modo punto de venta ACTIVO en este tel&eacute;fono. Mira "Ventas (caja)" en la pantalla principal.</p>
+          <button class="btn btn-secundario" onclick="desactivarModoPOS()">Desactivar en este tel&eacute;fono</button>
+        </div>
+        <div id="posMensaje" style="font-size:12px; color:#991b1b; margin-top:6px;"></div>
       </div>
 
       <div class="section" id="secModoCliente">
@@ -4431,6 +5333,8 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
             init = Object.assign({}, init);
             const h = new Headers(init.headers || {});
             if (!h.has('X-Vendedor')) h.set('X-Vendedor', encodeURIComponent(n));
+            const tokPos = localStorage.getItem('posToken');
+            if (tokPos && !h.has('X-Pos-Token')) h.set('X-Pos-Token', tokPos);
             init.headers = h;
           }
         } catch (e) {}
@@ -4838,6 +5742,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
       cerrarLogin();
       pintarVendedorHeader();
       restaurarMetodoPagoPreferido();
+      try { posAplicarUI(true); } catch (e) {}
     }
     // Paso 1: el nombre (elegido de la lista de vendedores que creo la PC, o
     // escrito a mano). Si no esta registrado, no se puede entrar.
@@ -4915,6 +5820,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
       nombreInput.value = ''; localStorage.setItem('vendedorNombre', '');
       pinInput.value = ''; localStorage.setItem('vendedorPin', '');
       pinVendedorAlEnfocar = '';
+      try { posAplicarUI(true); } catch (e) {}
       cerrarMenu();
       abrirLogin();
     }
@@ -5059,15 +5965,55 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
         }
         const blob = await res.blob();
         const nombre = res.headers.get('X-Nombre-Archivo') || 'catalogo.xlsx';
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url; a.download = nombre;
-        document.body.appendChild(a); a.click(); a.remove();
-        setTimeout(() => URL.revokeObjectURL(url), 8000);
-        estado.textContent = 'Descargado: ' + nombre;
+        const como = await guardarArchivoEnMovil(blob, nombre);
+        estado.textContent = como === 'compartido'
+          ? 'Listo: elige donde guardar o con que abrir "' + nombre + '".'
+          : 'Descargado: ' + nombre;
       } catch (e) {
-        estado.textContent = 'No se pudo descargar (revisa la conexion con la PC).';
+        if (e && e.message === 'sin-soporte') {
+          estado.textContent = 'Este telefono no deja guardar el archivo desde la app. Abre ' + location.origin + '/vendedor en Chrome y descargalo ahi (o actualiza la app).';
+        } else if (e && (e.name === 'AbortError' || /cancel/i.test(String(e.message || '')))) {
+          estado.textContent = 'Cancelado.';
+        } else {
+          estado.textContent = 'No se pudo descargar (' + ((e && e.message) || 'revisa la conexion con la PC') + ').';
+        }
       }
+    }
+
+    // En la app instalada (APK) el WebView NO descarga archivos con <a download>: por eso antes
+    // "no pasaba nada". Aqui se guarda el archivo con el plugin nativo y se abre el menu de
+    // compartir de Android (guardar en Archivos / Drive, abrir con Excel, enviar por WhatsApp).
+    // En Chrome / PWA se usa la descarga normal.
+    function blobABase64(blob) {
+      return new Promise((resolve, reject) => {
+        const fr = new FileReader();
+        fr.onload = () => resolve(String(fr.result).split(',')[1] || '');
+        fr.onerror = () => reject(fr.error || new Error('no se pudo leer el archivo'));
+        fr.readAsDataURL(blob);
+      });
+    }
+    async function guardarArchivoEnMovil(blob, nombre) {
+      const cap = window.Capacitor;
+      const plug = (cap && cap.Plugins) || {};
+      const enApp = !!(cap && (typeof cap.isNativePlatform === 'function' ? cap.isNativePlatform() : cap.platform === 'android'));
+      if (plug.Filesystem && plug.Share) {
+        const datos = await blobABase64(blob);
+        const r = await plug.Filesystem.writeFile({ path: nombre, data: datos, directory: 'CACHE', recursive: true });
+        await plug.Share.share({ title: nombre, url: r.uri, dialogTitle: 'Guardar o abrir el Excel' });
+        return 'compartido';
+      }
+      const archivo = new File([blob], nombre, { type: blob.type || 'application/octet-stream' });
+      if (navigator.canShare && navigator.canShare({ files: [archivo] })) {
+        await navigator.share({ files: [archivo], title: nombre });
+        return 'compartido';
+      }
+      if (enApp) throw new Error('sin-soporte');   // APK vieja sin los plugins: se avisa en vez de no hacer nada
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = nombre;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 8000);
+      return 'descargado';
     }
 
     async function onArchivoExcelSeleccionado(ev) {
@@ -5599,7 +6545,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
         document.getElementById('accionesPostEnvio').style.display = 'none';
       }
       if (existente) existente.cantidad++;
-      else carrito.push({ sku:p.sku, nombre:p.nombre, precio:p.precio, cantidad:1, stock:(p.stock === undefined ? null : p.stock) });
+      else carrito.push({ sku:p.sku, nombre:p.nombre, precio:p.precio, precioLista:p.precio, cantidad:1, stock:(p.stock === undefined ? null : p.stock) });
       renderCarrito();
       registrarReciente(p.sku);
       // Al agregar, se limpia y se encoge el buscador: queda listo para el siguiente producto.
@@ -5643,7 +6589,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
     // catalogo no se toca; solo cambia lo que se cobra en ESTE pedido.
     function fijarPrecio(sku, valor) {
       const item = carrito.find(i => i.sku === sku);
-      if (!item || !permitirDescuentosActual || autoservicioActivo) return;
+      if (!item || !descuentosDisponibles() || autoservicioActivo) return;
       let n = parseFloat(String(valor).replace(',', '.'));
       if (isNaN(n) || n < 0) { renderCarrito(); return; }   // campo invalido: vuelve al valor anterior
       item.precio = Math.round(n * 100) / 100;
@@ -5667,7 +6613,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
         cont.innerHTML = carrito.map(i => {
           const precioMostrado = i.precio * factor;
           const notaTransf = factor === 2 ? ' (transferencia)' : '';
-          const precioHtml = (autoservicioActivo || !permitirDescuentosActual || !puede('descuentos'))
+          const precioHtml = (autoservicioActivo || !descuentosDisponibles() || !puede('descuentos'))
             ? ('$' + precioMostrado.toFixed(2) + ' c/u' + notaTransf)
             : ('$<input type="number" class="qty-input" style="width:64px;" inputmode="decimal" min="0" step="any" value="' + i.precio.toFixed(2) + '" onfocus="this.select()" onchange="fijarPrecio(\'' + i.sku + '\', this.value)"> c/u' + (factor === 2 ? ' (x2 en transferencia)' : '') + ' — toca para aplicar descuento');
           return '<div class="carrito-item">' +
@@ -5693,6 +6639,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
         elUSD.style.display = 'none';
       }
       calcularCambio();
+      try { actualizarBotonEnviar(); } catch (e) {}
     }
     renderCarrito();
 
@@ -5760,7 +6707,11 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
       // Si el vendedor esta escribiendo una cantidad, se confirma antes de enviar.
       const activo = document.activeElement;
       if (activo && activo.classList && activo.classList.contains('qty-input')) activo.blur();
-      if (carrito.length === 0) { alert('Agrega al menos un producto.'); return; }
+      if (carrito.length === 0) {
+        const notaSola = document.getElementById('notaPedido');
+        if (!autoservicioActivo && notaSola && notaSola.value.trim() && puede('mensajes')) { return enviarMensajeSolo(); }
+        alert('Agrega al menos un producto.'); return;
+      }
       if (!(nombreInput.value || '').trim()) {
         if (autoservicioActivo) { enviarTrasNombreCliente = true; }
         abrirLogin(); return;
@@ -5829,7 +6780,8 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
         cambio: estado === 'cobrado' ? Number((recibido - totalCobrar).toFixed(2)) : null,
         pagoEfectivo: pagoEfectivo,
         pagoTransferencia: pagoTransferencia,
-        origenAsignados: origenesAsignadosCarrito
+        origenAsignados: origenesAsignadosCarrito,
+        nota: autoservicioActivo ? '' : ((document.getElementById('notaPedido').value || '').trim())
       };
 
       try {
@@ -5852,12 +6804,12 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
         }
         carrito = [];
         origenesAsignadosCarrito = [];
+        try { document.getElementById('notaPedido').value = ''; } catch (e) {}
         renderCarrito();
         document.getElementById('buscador').value = '';
         document.getElementById('resultados').innerHTML = '';
         document.getElementById('montoRecibido').value = '';
-        document.querySelector('input[name=estadoPago][value=pendiente]').checked = true;
-        toggleCobro();
+        aplicarEstadoPagoPorDefecto();
         cargarCatalogo();
         if (autoservicioActivo) { return; }
         // Se abre "Mis pedidos de hoy" con el pedido recien enviado desplegado, para
@@ -5874,6 +6826,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
           mostrarMensaje('Sin conexion: no se pudo enviar el pedido. Revisa tu WiFi e intenta de nuevo.', false);
         } else {
           agregarACola(payload);
+          try { document.getElementById('notaPedido').value = ''; } catch (e) {}
           mostrarMensaje('Sin conexion: el pedido se guardo en el telefono y se enviara solo cuando vuelva la red.', true);
         }
         carrito = [];
@@ -5882,11 +6835,11 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
         enviandoPedido = false;
         btnEnviar.disabled = false;
         btnEnviar.textContent = textoOriginalBtn;
+        try { actualizarBotonEnviar(); } catch (e) {}
         document.getElementById('buscador').value = '';
         document.getElementById('resultados').innerHTML = '';
         document.getElementById('montoRecibido').value = '';
-        document.querySelector('input[name=estadoPago][value=pendiente]').checked = true;
-        toggleCobro();
+        aplicarEstadoPagoPorDefecto();
         if (autoservicioActivo) buscar();
       }
     }
@@ -6017,6 +6970,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
     }
 
     async function cargarMisPedidos(auto) {
+      if (posActivo()) { return cargarVentasPOS(auto); }
       const cont = document.getElementById('misPedidos');
       const nombre = (nombreInput.value || '').trim();
       if (!nombre) {
@@ -6140,6 +7094,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
       return '<div class="mp-card" data-sig="' + firmaMP(p) + '">' +
         '<div class="mp-top"><span>Folio #' + p.id + ' — ' + horaCorta + '</span><span class="mp-estado ' + p.estado + '">' + p.estado.toUpperCase() + '</span></div>' +
         '<div class="mp-total" id="mp-total-' + p.id + '">' + totalTxt + '</div>' +
+        (p.nota ? '<div style="font-size:12px; color:#0369a1; margin-bottom:6px;">Tu nota: ' + escaparHtml(p.nota) + '</div>' : '') +
         itemsHtml +
         '<div class="mp-acciones">' + acciones + '</div>' +
       '</div>';
@@ -6240,7 +7195,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
     // ---- Permisos que la PC le da a este vendedor (que puede hacer y a donde entrar) ----
     window.__permisos = {};
     let permisosFirma = '';
-    const CLAVES_PERMISOS = ['crearPedidos', 'cobrar', 'cancelar', 'editar', 'imprimir', 'descuentos', 'verStock', 'misPedidos', 'ajustes', 'modoCliente', 'asignados', 'notificaciones'];
+    const CLAVES_PERMISOS = ['crearPedidos', 'cobrar', 'cancelar', 'editar', 'imprimir', 'descuentos', 'verStock', 'misPedidos', 'ajustes', 'modoCliente', 'asignados', 'notificaciones', 'mensajes'];
     function puede(k) { return !window.__permisos || window.__permisos[k] !== false; }
     function aplicarPermisos(p) {
       window.__permisos = p || {};
@@ -6389,6 +7344,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
         return '<div class="asig-card">' +
           '<div class="mp-top"><span>' + etiquetaOrigen + horaCorta + '</span></div>' +
           '<div class="mp-items" style="display:block;">' + lineas + '</div>' +
+          (a.nota ? '<div style="font-size:13px; color:#0369a1; margin:4px 0;">Nota de la caja: ' + escaparHtml(a.nota) + '</div>' : '') +
           '<div class="mp-total">Total: $' + total.toFixed(2) + '</div>' +
           '<div class="mp-acciones">' + btnVisto + btnAgregar +
           '</div>' +
@@ -6463,7 +7419,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
         for (const a of nuevos) {
           if (asignadosPendientes.some(x => x.id === a.id)) continue;   // ya lo tiene: no se repite la tarjeta ni el aviso
           hayNuevo = true;
-          asignadosPendientes.push({ id: a.id, items: a.items || [], hora: a.hora, todos: !!a.todos, visto: false, cliente: a.cliente || '' });
+          asignadosPendientes.push({ id: a.id, items: a.items || [], hora: a.hora, todos: !!a.todos, visto: false, cliente: a.cliente || '', nota: a.nota || '' });
           const nProd = (a.items || []).length;
           const quePedido = a.cliente
             ? ('El cliente "' + a.cliente + '" mando un pedido (')
@@ -6531,7 +7487,369 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
       st.textContent = r === 'granted' ? 'Avisos del teléfono activados.' : 'Los avisos están bloqueados: actívalos en los ajustes del navegador para este sitio.';
       if (r === 'granted') mostrarNotificacionSistema('Toto Tools', 'Avisos activados en este teléfono.');
     }
-    const TITULOS_ALERTA = { pedido: 'Pedido modificado por la caja', precio: 'Cambio de precio', stock: 'Cambio de stock', anulado: 'Pedido anulado', permisos: 'Tus permisos cambiaron' };
+    // ================= DESCARGAR LO QUE VA QUEDANDO (stock actual) =================
+    // Baja un Excel con el catalogo y la cantidad que queda de cada producto (ya descontadas
+    // las ventas). Usa los mismos encabezados que el Excel de la PC, asi se puede volver a
+    // cargar como catalogo. Funciona tambien sin conexion (usa el catalogo guardado en el telefono).
+    async function descargarStockActual() {
+      const estado = document.getElementById('estadoDescargaExcel');
+      try {
+        if (!catalogo || !catalogo.length) { estado.textContent = 'Todavia no hay catalogo cargado en este telefono.'; return; }
+        if (typeof XLSX === 'undefined') { estado.textContent = 'No se pudo preparar el Excel (falta la libreria). Recarga la pagina.'; return; }
+        estado.textContent = 'Preparando archivo...';
+        let m = {};
+        try { const rc = await fetch('/api/catalogo/config'); const c = await rc.json(); m = (c && c.mapeo) || {}; } catch (e) {}
+        const hSku = m.sku || 'SKU', hNom = m.nombre || 'Nombre', hPre = m.precio || 'Precio', hStk = m.stock || 'Cantidad';
+        const filas = catalogo.map(p => {
+          const f = {};
+          f[hSku] = p.sku || '';
+          f[hNom] = p.nombre;
+          f[hPre] = p.precio;
+          f[hStk] = (p.stock === null || p.stock === undefined) ? '' : p.stock;
+          return f;
+        });
+        const ws = XLSX.utils.json_to_sheet(filas, { header: [hSku, hNom, hPre, hStk] });
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, 'Stock actual');
+        const datos = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+        const blob = new Blob([datos], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+        const d = new Date();
+        const nombre = 'stock_actual_' + hoyStr() + '_' + String(d.getHours()).padStart(2, '0') + String(d.getMinutes()).padStart(2, '0') + '.xlsx';
+        const como = await guardarArchivoEnMovil(blob, nombre);
+        estado.textContent = como === 'compartido'
+          ? 'Listo: elige donde guardar o con que abrir "' + nombre + '".'
+          : 'Descargado: ' + nombre;
+      } catch (e) {
+        if (e && e.message === 'sin-soporte') {
+          estado.textContent = 'Este telefono no deja guardar el archivo desde la app. Abre ' + location.origin + '/vendedor en Chrome y descargalo ahi (o actualiza la app).';
+        } else if (e && (e.name === 'AbortError' || /cancel/i.test(String(e.message || '')))) {
+          estado.textContent = 'Cancelado.';
+        } else {
+          estado.textContent = 'No se pudo preparar el archivo (' + ((e && e.message) || 'error') + ').';
+        }
+      }
+    }
+
+    // ================= MODO PUNTO DE VENTA (lo activa el administrador con su clave) =================
+    // Con el modo activo, este telefono: cobra por defecto al enviar, permite descuentos por producto,
+    // y "Ventas (caja)" muestra el historial, el reporte de efectivo / transferencia y las devoluciones.
+    // Todo sigue pasando por la PC, asi que las dos pantallas ven lo mismo.
+    var posUltimaFirma = null;
+    var posPedidosPorClave = {};
+
+    function posToken() { return localStorage.getItem('posToken') || ''; }
+    function posActivo() {
+      const n = (nombreInput.value || '').trim().toLowerCase();
+      return !autoservicioActivo && !!posToken() && !!n && localStorage.getItem('posVendedor') === n;
+    }
+    function posLimpiarLocal() { localStorage.removeItem('posToken'); localStorage.removeItem('posVendedor'); }
+    function descuentosDisponibles() { return permitirDescuentosActual || posActivo(); }
+    function dineroPOS(n) { return '$' + (Number(n) || 0).toFixed(2); }
+
+    function aplicarEstadoPagoPorDefecto() {
+      const quiere = (posActivo() && puede('cobrar')) ? 'cobrado' : 'pendiente';
+      const r = document.querySelector('input[name=estadoPago][value=' + quiere + ']');
+      if (r) { r.checked = true; toggleCobro(); }
+    }
+
+    function posAplicarUI(reiniciarEstado) {
+      const on = posActivo();
+      document.body.classList.toggle('modoPOS', on);
+      document.getElementById('posInactivoBox').style.display = on ? 'none' : 'block';
+      document.getElementById('posActivoBox').style.display = on ? 'block' : 'none';
+      document.getElementById('tituloMisPedidos').textContent = on ? 'Ventas (caja)' : 'Mis pedidos de hoy';
+      posUltimaFirma = null;
+      abrirMisPedidos(document.getElementById('misPedidos').style.display !== 'none');
+      if (reiniciarEstado) aplicarEstadoPagoPorDefecto();
+      try { renderCarrito(); } catch (e) {}
+    }
+
+    async function activarModoPOS() {
+      const msg = document.getElementById('posMensaje');
+      const clave = (document.getElementById('posClaveInput').value || '').trim();
+      const nombre = (nombreInput.value || '').trim();
+      if (!nombre) { msg.textContent = 'Entra primero como vendedor.'; return; }
+      if (!clave) { msg.textContent = 'Escribe la clave de administrador.'; return; }
+      msg.textContent = 'Comprobando...';
+      try {
+        const res = await fetch('/api/pos/activar', { method: 'POST', body: JSON.stringify({ vendedor: nombre, pin: miPin(), clave: clave }) });
+        const d = await res.json().catch(() => null);
+        if (!res.ok || !d || !d.ok) {
+          msg.textContent = (d && d.error) || 'No se pudo activar.';
+          if (d && d.requierePin) abrirLogin(nombre);
+          return;
+        }
+        localStorage.setItem('posToken', d.token);
+        localStorage.setItem('posVendedor', nombre.toLowerCase());
+        document.getElementById('posClaveInput').value = '';
+        msg.textContent = '';
+        cerrarMenu();
+        posAplicarUI(true);
+        abrirMisPedidos(true);
+      } catch (e) {
+        msg.textContent = 'Sin conexion con la PC: hace falta conexion para activarlo.';
+      }
+    }
+
+    function desactivarModoPOS() {
+      posLimpiarLocal();
+      posAplicarUI(true);
+      document.getElementById('posMensaje').textContent = 'Modo punto de venta desactivado.';
+      cargarMisPedidos();
+    }
+
+    // Si el administrador cambia o quita la clave en la PC, este telefono pierde el modo.
+    async function posVerificar() {
+      const on = posActivo();
+      if (on !== document.body.classList.contains('modoPOS')) posAplicarUI(true);
+      if (!on) return;
+      try {
+        const r = await fetch('/api/pos/estado');
+        const d = await r.json().catch(() => null);
+        if (d && d.ok && !d.activo) {
+          posLimpiarLocal();
+          posAplicarUI(true);
+          cargarMisPedidos();
+          mostrarMensaje('El administrador desactivo el modo punto de venta en este telefono.', false);
+        }
+      } catch (e) {}   // sin conexion: se conserva el modo
+    }
+
+    async function cargarVentasPOS(auto) {
+      const cont = document.getElementById('misPedidos');
+      if (auto === true && cont.style.display === 'none') return;   // cerrado: no se gasta red ni se carga la PC
+      const dias = document.getElementById('posRango').value || '1';
+      const quien = document.getElementById('posQuien').value || 'todos';
+      const claveCache = 'posVentasCache_' + (nombreInput.value || '').trim().toLowerCase() + '_' + dias + '_' + quien;
+      try {
+        const res = await fetch('/api/pos/ventas?dias=' + encodeURIComponent(dias) + '&quien=' + encodeURIComponent(quien));
+        const d = await res.json().catch(() => null);
+        if (res.status === 403 && d && d.posInactivo) {
+          posLimpiarLocal();
+          posAplicarUI(true);
+          mostrarMensaje('El modo punto de venta ya no esta activo en este telefono.', false);
+          return cargarMisPedidos();
+        }
+        if (!res.ok || !d || !d.ok) throw new Error((d && d.error) || 'error');
+        // Pedidos propios que siguen pendientes de cobro (la caja o el vendedor los cobra con los botones de siempre).
+        let pend = [];
+        try {
+          const rp = await fetch('/api/pedidos');
+          const todos = await rp.json();
+          const yo = (nombreInput.value || '').trim().toLowerCase();
+          pend = (Array.isArray(todos) ? todos : []).filter(p => p.estado === 'pendiente' && (p.vendedor || '').trim().toLowerCase() === yo && (p.hora || '').startsWith(hoyStr())).sort((a, b) => b.id - a.id);
+        } catch (e3) {}
+        try { localStorage.setItem(claveCache, JSON.stringify({ t: Date.now(), d: d, pend: pend })); } catch (e) {}
+        pintarVentasPOS(d, 0, auto, pend);
+      } catch (e) {
+        // Sin conexion con la PC: se muestra lo ultimo que se vio de este mismo periodo.
+        posUltimaFirma = null;
+        let cache = null;
+        try { cache = JSON.parse(localStorage.getItem(claveCache) || 'null'); } catch (e2) {}
+        if (cache && cache.d) pintarVentasPOS(cache.d, cache.t, false, cache.pend || []);
+        else cont.innerHTML = '<div style="color:#991b1b; font-size:13px;">No se pudo cargar el historial (revisa la conexion con la PC).</div>';
+      }
+    }
+
+    function pintarVentasPOS(d, cacheDe, auto, pend) {
+      pend = pend || [];
+      const cont = document.getElementById('misPedidos');
+      const r = d.reporte || {};
+      const pedidos = d.pedidos || [];
+      document.getElementById('resumenMisPedidos').textContent = ' | ' + (r.ventas || 0) + (r.ventas === 1 ? ' venta' : ' ventas') + ' | neto ' + dineroPOS(r.netoTotal);
+      const firma = JSON.stringify([r, pedidos.map(p => [p.id, p.hora, p.totalCobrado, p.devuelto]), cacheDe || 0, pend.map(firmaMP)]);
+      if (auto === true && firma === posUltimaFirma) return;
+      posUltimaFirma = firma;
+      posPedidosPorClave = {};
+      const fila = (t, v, fuerte) => '<div' + (fuerte ? ' style="font-weight:700;"' : '') + '><span>' + t + '</span><span>' + v + '</span></div>';
+      const aviso = cacheDe
+        ? '<div style="color:#92400e; background:#fffbeb; border:1px solid #fde68a; border-radius:8px; padding:8px; font-size:12px; margin-bottom:8px;">Sin conexion con la PC ahora mismo: se muestra lo ultimo que se vio (' + new Date(cacheDe).toLocaleTimeString().slice(0, 5) + '). Puede estar desactualizado.</div>'
+        : '';
+      let porVend = '';
+      if ((r.porVendedor || []).length > 1) {
+        porVend = '<div class="mp-items" style="margin-top:8px;">' +
+          r.porVendedor.map(v => fila(escaparHtml(v.vendedor) + ' (' + v.ventas + ')', 'Ef ' + dineroPOS(v.efectivo) + ' | Tr ' + dineroPOS(v.transferencia))).join('') + '</div>';
+      }
+      const rep = '<div class="mp-card">' +
+        '<div class="mp-top"><span>Reporte de caja</span><span>' + (r.ventas || 0) + (r.ventas === 1 ? ' venta' : ' ventas') + '</span></div>' +
+        '<div class="mp-items">' +
+          fila('Entro en efectivo', dineroPOS(r.efectivoEntrada)) +
+          fila('Entro por transferencia', dineroPOS(r.transferenciaEntrada)) +
+          (r.otroEntrada > 0 ? fila('Otros metodos', dineroPOS(r.otroEntrada)) : '') +
+          (r.devoluciones > 0
+            ? fila('Devuelto en efectivo (' + r.devoluciones + ')', '-' + dineroPOS(r.devolucionEfectivo)) + fila('Devuelto por transferencia', '-' + dineroPOS(r.devolucionTransferencia))
+            : '') +
+          fila('Neto en efectivo', dineroPOS(r.netoEfectivo), true) +
+          fila('Neto por transferencia', dineroPOS(r.netoTransferencia), true) +
+          (r.descuentos > 0 ? fila('Descuentos dados', dineroPOS(r.descuentos)) : '') +
+        '</div>' + porVend + '</div>';
+      const lista = pedidos.length
+        ? pedidos.map(renderVentaPOS).join('')
+        : '<div style="color:#94a3b8; font-size:13px;">Sin ventas cobradas en este periodo.</div>';
+      const mas = d.hayMas ? '<div style="color:#64748b; font-size:12px; margin-top:6px;">Se muestran las 200 ventas mas recientes (el reporte cuenta todas).</div>' : '';
+      const pendHtml = pend.length
+        ? '<div style="font-size:12px; font-weight:700; color:#92400e; margin:2px 0 6px;">Pendientes de cobro (' + pend.length + ')</div>' + pend.map(renderMiPedido).join('')
+        : '';
+      cont.innerHTML = aviso + pendHtml + rep + lista + mas;
+    }
+
+    function renderVentaPOS(p) {
+      const key = p.id + '_' + String(p.hora || '').replace(/\D/g, '');
+      posPedidosPorClave[key] = p;
+      const abierto = expandidosMP.has(key);
+      const devuelto = p.devuelto || {};
+      let hayDev = false;
+      let quedaPorDevolver = false;
+      const lineas = (p.items || []).map(it => {
+        const dv = Number(devuelto[it.sku || it.nombre] || 0);
+        if (dv > 0) hayDev = true;
+        if (Number(it.cantidad) - dv > 0.0001) quedaPorDevolver = true;
+        return '<div><span>' + it.cantidad + ' x ' + escaparHtml(it.nombre) + (dv > 0 ? ' (devuelto ' + dv + ')' : '') + '</span><span>$' + (it.precio * it.cantidad).toFixed(2) + '</span></div>';
+      }).join('');
+      let met = p.metodoPago || 'Efectivo';
+      if (met === 'Combinado') met = 'Efectivo ' + dineroPOS(p.pagoEfectivo) + ' + Transferencia ' + dineroPOS((Number(p.pagoTransferencia) || 0) * 2);
+      const esHoy = String(p.hora || '').slice(0, 10) === hoyStr();
+      const fecha = esHoy ? String(p.hora || '').slice(11, 16) : String(p.hora || '').slice(5, 16);
+      const horaTxt = esHoy ? fecha : fecha.replace('-', '/');
+      let acciones = '';
+      if (esHoy) acciones += '<button class="mp-btn-imprimir" onclick="imprimirMP(' + p.id + ')">Reimprimir</button>';
+      if (quedaPorDevolver) acciones += '<button class="mp-btn-editar" onclick="devolverPOS(\'' + key + '\')">Devolver</button>';
+      const itemsHtml =
+        '<button class="mp-btn-items" id="mp-btnitems-' + key + '" onclick="toggleItemsMP(\'' + key + '\')">' +
+          (abierto ? 'Ocultar productos &#9652;' : 'Ver productos &#9662;') + '</button>' +
+        '<div class="mp-items" id="mp-items-' + key + '" style="display:' + (abierto ? 'block' : 'none') + ';">' + lineas +
+          (p.descuento > 0 ? '<div><span>Descuento aplicado</span><span>-$' + Number(p.descuento).toFixed(2) + '</span></div>' : '') +
+        '</div>';
+      return '<div class="mp-card">' +
+        '<div class="mp-top"><span>Folio #' + p.id + ' - ' + horaTxt + '</span><span class="mp-estado cobrado">' + (hayDev ? (quedaPorDevolver ? 'DEVOL. PARCIAL' : 'DEVUELTO') : 'COBRADO') + '</span></div>' +
+        '<div class="mp-total">' + dineroPOS(p.totalCobrado) + ' - ' + escaparHtml(met) + ' - ' + escaparHtml(p.vendedor || '') + '</div>' +
+        itemsHtml +
+        (acciones ? '<div class="mp-acciones">' + acciones + '</div>' : '') +
+      '</div>';
+    }
+
+    // Lo que se le devuelve al cliente (vista previa; el servidor lo calcula igual): la venta en
+    // transferencia se cobro x2, y una venta combinada se reparte en la misma proporcion que se pago.
+    function calcReembolsoPOS(p, elegidos) {
+      let base = 0;
+      elegidos.forEach(e => {
+        const it = (p.items || []).find(i => (i.sku || i.nombre) === (e.sku || e.nombre));
+        base += (it ? Number(it.precio) : 0) * e.cantidad;
+      });
+      const m = p.metodoPago || 'Efectivo';
+      let ef = 0, tr = 0;
+      if (m === 'Transferencia') { tr = base * 2; }
+      else if (m === 'Combinado') {
+        const pe = Number(p.pagoEfectivo) || 0, pt = Number(p.pagoTransferencia) || 0;
+        if (pe + pt > 0) { ef = base * pe / (pe + pt); tr = base * pt / (pe + pt) * 2; } else { ef = base; }
+      } else { ef = base; }
+      return { ef: Math.round(ef * 100) / 100, tr: Math.round(tr * 100) / 100 };
+    }
+
+    function pedirCantidadDevPOS(x) {
+      const e = prompt('Cuantas unidades devuelve de "' + x.it.nombre + '"? (maximo ' + x.max + ', 0 = ninguna):', String(x.max));
+      if (e === null) return null;
+      const n = parseFloat(String(e).replace(',', '.'));
+      if (isNaN(n) || n < 0) { alert('Escribe una cantidad valida.'); return null; }
+      if (n > x.max + 0.0001) { alert('De este producto solo se pueden devolver ' + x.max + '.'); return null; }
+      return Math.round(n * 100) / 100;
+    }
+
+    async function devolverPOS(key) {
+      const p = posPedidosPorClave[key];
+      if (!p) return;
+      const devuelto = p.devuelto || {};
+      const lineas = (p.items || [])
+        .map(it => ({ it: it, max: Math.round((Number(it.cantidad) - Number(devuelto[it.sku || it.nombre] || 0)) * 100) / 100 }))
+        .filter(x => x.max > 0.0001);
+      if (!lineas.length) { alert('De esta venta ya se devolvio todo.'); return; }
+      let elegidos = [];
+      if (lineas.length === 1) {
+        const n = pedirCantidadDevPOS(lineas[0]);
+        if (n === null) return;
+        if (n > 0) elegidos.push({ sku: lineas[0].it.sku, nombre: lineas[0].it.nombre, cantidad: n });
+      } else if (confirm('Venta #' + p.id + ': devolver TODO lo que falta por devolver?\n\nAceptar = todo\nCancelar = elegir producto por producto')) {
+        elegidos = lineas.map(x => ({ sku: x.it.sku, nombre: x.it.nombre, cantidad: x.max }));
+      } else {
+        for (const x of lineas) {
+          const n = pedirCantidadDevPOS(x);
+          if (n === null) return;
+          if (n > 0) elegidos.push({ sku: x.it.sku, nombre: x.it.nombre, cantidad: n });
+        }
+      }
+      if (!elegidos.length) { alert('No elegiste ningun producto para devolver.'); return; }
+      const motivo = prompt('Motivo de la devolucion (puedes dejarlo vacio):', '');
+      if (motivo === null) return;
+      const reintegrar = confirm('Regresar estos productos al inventario?\n\nAceptar = si (estan en buen estado)\nCancelar = no (danados, no se vuelven a vender)');
+      const rb = calcReembolsoPOS(p, elegidos);
+      const partes = [];
+      if (rb.ef > 0) partes.push('efectivo ' + dineroPOS(rb.ef));
+      if (rb.tr > 0) partes.push('transferencia ' + dineroPOS(rb.tr));
+      if (!confirm('Se devuelve al cliente: ' + (partes.join(' + ') || dineroPOS(0)) + (reintegrar ? '' : ' (sin regresar al inventario)') + '.\n\nConfirmas la devolucion?')) return;
+      try {
+        const res = await fetch('/api/pos/devolucion', { method: 'POST', body: JSON.stringify({ pedidoId: p.id, pedidoHora: p.hora, items: elegidos, motivo: String(motivo).trim(), reintegrarStock: reintegrar, pin: miPin() }) });
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data || !data.ok) {
+          alert((data && data.error) || 'No se pudo registrar la devolucion.');
+          if (data && data.requierePin) abrirLogin((nombreInput.value || '').trim());
+          if (data && data.posInactivo) { posLimpiarLocal(); posAplicarUI(true); }
+        } else {
+          const pa = [];
+          if (data.reembolsoEfectivo > 0) pa.push('efectivo ' + dineroPOS(data.reembolsoEfectivo));
+          if (data.reembolsoTransferencia > 0) pa.push('transferencia ' + dineroPOS(data.reembolsoTransferencia));
+          alert('Devolucion registrada. Devuelve: ' + (pa.join(' + ') || dineroPOS(0)) + '.' +
+            (data.impreso ? '' : '\n(No se pudo imprimir el comprobante en la PC' + (data.errorImpresion ? ': ' + data.errorImpresion : '') + ')'));
+        }
+        cargarMisPedidos();
+        cargarCatalogo();
+      } catch (e) {
+        alert('Sin conexion con la PC: la devolucion NO se registro. Vuelve a intentarlo cuando haya conexion.');
+      }
+    }
+
+    posAplicarUI(true);
+    posVerificar();
+    setInterval(posVerificar, 30000);
+
+
+    // ================= MENSAJES CORTOS A LA CAJA =================
+    // La nota opcional viaja con el pedido. Sin productos en el pedido, el mismo boton de enviar
+    // manda solo el mensaje. No existe para clientes (autoservicio).
+    function actualizarBotonEnviar() {
+      const btn = document.getElementById('btnEnviarPedido');
+      const nota = document.getElementById('notaPedido');
+      if (!btn || btn.disabled) return;
+      const soloMensaje = carrito.length === 0 && !!nota && nota.value.trim() !== '' && !autoservicioActivo && puede('mensajes');
+      btn.textContent = soloMensaje ? 'Enviar mensaje a la caja' : 'Enviar pedido';
+    }
+
+    async function enviarMensajeSolo() {
+      const campo = document.getElementById('notaPedido');
+      const texto = (campo.value || '').trim();
+      const btn = document.getElementById('btnEnviarPedido');
+      if (!texto) return;
+      if (!(nombreInput.value || '').trim()) { abrirLogin(); return; }
+      btn.disabled = true;
+      btn.textContent = 'Enviando...';
+      try {
+        const res = await fetch('/api/mensajes', { method: 'POST', body: JSON.stringify({ vendedor: (nombreInput.value || '').trim(), pin: miPin(), texto: texto }) });
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data || !data.ok) {
+          mostrarMensaje((data && data.error) || 'No se pudo enviar el mensaje.', false);
+          if (data && data.requierePin) abrirLogin((nombreInput.value || '').trim());
+        } else {
+          campo.value = '';
+          mostrarMensaje('Mensaje enviado a la caja.', true);
+        }
+      } catch (e) {
+        mostrarMensaje('Sin conexion con la PC: el mensaje NO se envio (sigue escrito, intentalo de nuevo).', false);
+      } finally {
+        btn.disabled = false;
+        actualizarBotonEnviar();
+      }
+    }
+
+    const TITULOS_ALERTA = { pedido: 'Pedido modificado por la caja', precio: 'Cambio de precio', stock: 'Cambio de stock', anulado: 'Pedido anulado', permisos: 'Tus permisos cambiaron', mensaje: 'Mensaje de la caja' };
 
     async function revisarAlertas() {
       const nombre = (nombreInput.value || '').trim();
@@ -6624,6 +7942,7 @@ $htmlEtiquetas = @'
       <button onclick="marcarVisibles(1)">Marcar visibles</button>
       <button onclick="marcarVisibles(0)">Quitar marcas</button>
       <button onclick="soloBajoStock()" title="Marca los que estan en su minimo de seguridad">Stock bajo</button>
+      <button onclick="soloNuevos()" title="Marca los productos que aparecieron por primera vez en el ultimo Excel cargado">Nuevos del Excel</button>
     </div>
     <label class="chk" style="margin-top:8px;"><input type="checkbox" id="oSinStock" onchange="cambioSinStock()"> Ocultar productos sin stock</label>
     <div class="nota" id="notaSinStock" style="margin-top:0;"></div>
@@ -6854,6 +8173,16 @@ $htmlEtiquetas = @'
     sel = {};
     catalogo.forEach(function (p) { if (p.sku && bajos[p.sku]) sel[clave(p)] = 1; });
     pintarLista(); pintarVista();
+  }
+  var nuevosSet = {}, nuevosFecha = '';
+  function soloNuevos() {
+    var total = Object.keys(nuevosSet).length;
+    if (!total) { alert('El ultimo Excel no trajo productos nuevos (o todavia no se ha cargado ninguno despues de activar esta funcion).'); return; }
+    sel = {};
+    var n = 0;
+    catalogo.forEach(function (p) { if (nuevosSet[clave(p)]) { sel[clave(p)] = 1; n++; } });
+    pintarLista(); pintarVista();
+    if (n < total) alert('Se marcaron ' + n + ' de ' + total + ' productos nuevos; el resto esta oculto por "Ocultar productos sin stock".');
   }
   function resumen() {
     var ks = Object.keys(sel), total = 0;
@@ -7297,6 +8626,11 @@ function rasterEtiqueta(it) {
       var r2 = await fetch('/api/reabastecer'); var d2 = await r2.json();
       (d2.items || []).forEach(function (i) { if (i.sku) bajos[i.sku] = true; });
     } catch (e) {}
+    try {
+      var r3 = await fetch('/api/catalogo/nuevos'); var d3 = await r3.json();
+      nuevosFecha = d3.fecha || '';
+      (d3.skus || []).forEach(function (k) { nuevosSet[k] = true; });
+    } catch (e) {}
     cambio();
     pintarLista();
   }
@@ -7534,9 +8868,29 @@ Write-Host "=================================================="
 Write-Host "Deja esta ventana abierta. Para detener: Ctrl+C"
 Write-Host ""
 
-try {
-    Start-Process "http://localhost:$port/"
-} catch {
+# Se abre como VENTANA DE APLICACION (sin pestanas ni barra de direcciones, con su propio
+# boton en la barra de tareas) usando Edge o Chrome en modo "--app". Si no hay ninguno,
+# se abre el navegador de siempre.
+function Abrir-PanelComoApp {
+    $urlPanel = "http://localhost:$port/"
+    $candidatos = @(
+        (Join-Path ${env:ProgramFiles(x86)} "Microsoft\Edge\Application\msedge.exe"),
+        (Join-Path $env:ProgramFiles "Microsoft\Edge\Application\msedge.exe"),
+        (Join-Path $env:ProgramFiles "Google\Chrome\Application\chrome.exe"),
+        (Join-Path ${env:ProgramFiles(x86)} "Google\Chrome\Application\chrome.exe"),
+        (Join-Path $env:LOCALAPPDATA "Google\Chrome\Application\chrome.exe")
+    )
+    foreach ($exe in $candidatos) {
+        if ($exe -and (Test-Path $exe)) {
+            try {
+                Start-Process -FilePath $exe -ArgumentList @("--app=$urlPanel", "--window-size=1280,800", "--no-first-run")
+                return $true
+            } catch {}
+        }
+    }
+    try { Start-Process $urlPanel; return $true } catch { return $false }
+}
+if (-not (Abrir-PanelComoApp)) {
     Write-Host "Aviso: no se pudo abrir el navegador automaticamente. Abre http://localhost:$port/ manualmente."
 }
 
@@ -7558,7 +8912,7 @@ while ($listener.IsListening) {
         if ($orig -eq "http://localhost" -or $orig -eq "https://localhost" -or $orig -eq "capacitor://localhost") {
             $context.Response.Headers["Access-Control-Allow-Origin"] = $orig
             $context.Response.Headers["Vary"] = "Origin"
-            $context.Response.Headers["Access-Control-Allow-Headers"] = "Content-Type, X-Vendedor"
+            $context.Response.Headers["Access-Control-Allow-Headers"] = "Content-Type, X-Vendedor, X-Pos-Token"
             $context.Response.Headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
             $context.Response.Headers["Access-Control-Expose-Headers"] = "X-Nombre-Archivo"
             $context.Response.Headers["Access-Control-Allow-Private-Network"] = "true"
@@ -7636,8 +8990,14 @@ while ($listener.IsListening) {
         } elseif ($method -eq "GET" -and $path -eq "/sw.js") {
             Enviar-Respuesta -Context $context -Body $global:swJs -ContentType "application/javascript; charset=utf-8"
 
-        } elseif ($method -eq "GET" -and ($path -eq "/icon-192.png" -or $path -eq "/icon-512.png")) {
-            $bytesIcono = if ($path -eq "/icon-192.png") { $global:icon192Bytes } else { $global:icon512Bytes }
+        } elseif ($method -eq "GET" -and ($path -eq "/icon-192.png" -or $path -eq "/icon-512.png" -or $path -eq "/icon-pc-192.png" -or $path -eq "/icon-pc-512.png")) {
+            # /icon-* = carrito (app del movil); /icon-pc-* = martillo (app de la PC)
+            $bytesIcono = switch ($path) {
+                "/icon-192.png"    { $global:icon192Bytes }
+                "/icon-512.png"    { $global:icon512Bytes }
+                "/icon-pc-192.png" { $global:iconPc192Bytes }
+                default            { $global:iconPc512Bytes }
+            }
             $context.Response.StatusCode = 200
             $context.Response.ContentType = "image/png"
             $context.Response.ContentLength64 = $bytesIcono.Length
@@ -7866,6 +9226,7 @@ while ($listener.IsListening) {
                 }
 
                 Avisar-CambiosCatalogo $anteriorPorSku $nuevo
+                Registrar-ProductosNuevos $nuevo
                 $global:catalogo = $nuevo
                 $global:catalogoInfo.cargado = $true
                 $global:catalogoInfo.ultimaCarga = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
@@ -8078,6 +9439,9 @@ while ($listener.IsListening) {
             $paraTodos = [bool]($data -and $data.todos)
             $itemsAsignados = @($data.items)
             $clienteOrigen = if ($data -and $data.cliente) { ([string]$data.cliente).Trim() } else { "" }
+            # La nota solo la puede poner la propia PC (un cliente no puede mandar mensajes a los vendedores).
+            $notaAsig = ""
+            if ($data -and $data.nota -and [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)) { $notaAsig = Limpiar-TextoMensaje $data.nota }
             $claveEnvioAsig = if ($data -and $data.claveEnvio) { "asig|" + [string]$data.claveEnvio } else { "" }
             $minVigAsig = 60
             try { $mvA = [int]$data.minutosVigencia; if ($mvA -ge 5 -and $mvA -le 1440) { $minVigAsig = $mvA } } catch {}
@@ -8106,6 +9470,7 @@ while ($listener.IsListening) {
                     retirado      = $false
                     horaRetirado  = $null
                     vence         = $vigenciaAsig
+                    nota          = $notaAsig
                 }
                 $global:nextIdAsignado++
                 [void]$global:pedidosAsignados.Add([pscustomobject]$asignado)
@@ -8383,6 +9748,11 @@ while ($listener.IsListening) {
                 # vendedores discuten quien iba a atender a un cliente).
                 $origenAsignados = if ($data.origenAsignados) { @($data.origenAsignados) } else { @() }
 
+                # Nota opcional del vendedor para la caja: solo de vendedores creados en la PC (nunca de clientes).
+                $notaPedido = ""
+                if ((-not $esAutoCli) -and $data.nota -and $data.vendedor -and $global:pinesVendedores.ContainsKey(([string]$data.vendedor).Trim().ToLowerInvariant()) -and (Tiene-Permiso ([string]$data.vendedor) 'mensajes')) {
+                    $notaPedido = Limpiar-TextoMensaje $data.nota
+                }
                 $pedido = [ordered]@{
                     id                 = $global:nextId
                     clienteId          = $clienteIdRecibido
@@ -8401,6 +9771,7 @@ while ($listener.IsListening) {
                     revisado           = $false
                     horaCobro          = $(if ([string]$data.estado -eq "cobrado") { (Get-Date).ToString("yyyy-MM-dd HH:mm:ss") } else { "" })
                     origenAsignados    = $origenAsignados
+                    nota               = $notaPedido
                 }
                 $global:nextId++
                 [void]$global:pedidos.Add([pscustomobject]$pedido)
@@ -8578,6 +9949,147 @@ while ($listener.IsListening) {
 
         } elseif ($method -eq "GET" -and $path -eq "/etiquetas") {
             Enviar-Respuesta -Context $context -Body (Inyectar-Guardian $htmlEtiquetas)
+
+        } elseif ($method -eq "GET" -and $path -eq "/api/catalogo/nuevos") {
+            # Productos que aparecieron por primera vez en el ultimo Excel cargado (para sus etiquetas).
+            Enviar-Json $context @{ ok = $true; fecha = [string]$global:productosNuevos.fecha; skus = @($global:productosNuevos.skus) } 200 4
+
+        } elseif ($method -eq "GET" -and $path -eq "/api/pos/estado") {
+            # El movil pregunta si el administrador ya puso la clave y si este movil sigue con el modo activado.
+            $vPosE = Pos-VendedorDe $request
+            Enviar-Json $context @{ ok = $true; claveDefinida = (-not [string]::IsNullOrEmpty($global:posClaveHash)); activo = (Pos-Token-Valido $request $vPosE) }
+
+        } elseif ($method -eq "POST" -and $path -eq "/api/pos/clave") {
+            # Solo desde la PC: pone, cambia o quita la clave de administrador del modo punto de venta.
+            # Al cambiarla o quitarla, todos los moviles pierden el modo y deben volver a activarlo.
+            $dPosC = Leer-CuerpoJson $request
+            $localPosC = [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)
+            $clavePosN = if ($dPosC -and $dPosC.clave) { ([string]$dPosC.clave).Trim() } else { "" }
+            if (-not $localPosC) {
+                Enviar-Json $context @{ ok = $false; error = "La clave de administrador solo se cambia desde la PC." } 403
+            } elseif ($clavePosN -and (($clavePosN.Length -lt 4) -or ($clavePosN.Length -gt 20))) {
+                Enviar-Json $context @{ ok = $false; error = "La clave debe tener de 4 a 20 caracteres." } 400
+            } else {
+                $global:posClaveHash = if ($clavePosN) { Pos-Hash $clavePosN } else { "" }
+                $global:posTokens = @{}
+                $global:posIntentos = @{}
+                Guardar-Pos
+                Enviar-Json $context @{ ok = $true; definida = ($clavePosN -ne "") }
+            }
+
+        } elseif ($method -eq "POST" -and $path -eq "/api/pos/activar") {
+            # El movil manda la clave de administrador; si es correcta, recibe un token propio.
+            $dPosA = Leer-CuerpoJson $request
+            $vPosA = if ($dPosA -and $dPosA.vendedor) { ([string]$dPosA.vendedor).Trim() } else { "" }
+            $ipPosA = [string]$request.RemoteEndPoint.Address
+            $esperaPosA = Pos-Bloqueado $ipPosA
+            if ($esperaPosA -gt 0) {
+                Enviar-Json $context @{ ok = $false; error = "Demasiados intentos. Espera $esperaPosA segundos." } 429
+            } elseif ([string]::IsNullOrEmpty($global:posClaveHash)) {
+                Enviar-Json $context @{ ok = $false; error = "El administrador todavia no puso la clave en la PC (menu, PIN de vendedores)."; sinClave = $true } 409
+            } elseif ((-not $vPosA) -or (-not $global:pinesVendedores.ContainsKey($vPosA.ToLowerInvariant()))) {
+                Enviar-Json $context @{ ok = $false; error = "Entra primero como vendedor." } 403
+            } elseif (-not (Pin-Valido $vPosA $dPosA.pin)) {
+                Enviar-Json $context @{ ok = $false; error = "PIN incorrecto."; requierePin = $true } 403
+            } elseif ((Pos-Hash ([string]$dPosA.clave)) -ne $global:posClaveHash) {
+                Pos-Fallo $ipPosA
+                Enviar-Json $context @{ ok = $false; error = "Clave de administrador incorrecta." } 403
+            } else {
+                if ($global:posIntentos.ContainsKey($ipPosA)) { $global:posIntentos.Remove($ipPosA) }
+                $tokPos = [guid]::NewGuid().ToString("N") + [guid]::NewGuid().ToString("N")
+                $global:posTokens[(Pos-Hash $tokPos)] = $vPosA.ToLowerInvariant()
+                Guardar-Pos
+                Enviar-Json $context @{ ok = $true; token = $tokPos }
+            }
+
+        } elseif ($method -eq "GET" -and $path -eq "/api/pos/ventas") {
+            # Historial de ventas cobradas + reporte de efectivo / transferencia (solo moviles con el modo activado).
+            $vPosV = Pos-VendedorDe $request
+            if (-not (Pos-Token-Valido $request $vPosV)) {
+                Enviar-Json $context @{ ok = $false; error = "El modo punto de venta no esta activo en este telefono."; posInactivo = $true } 403
+            } else {
+                $diasPV = 1
+                if ($request.QueryString["dias"]) { try { $diasPV = [int]$request.QueryString["dias"] } catch { $diasPV = 1 } }
+                if ($diasPV -lt 1) { $diasPV = 1 }
+                if ($diasPV -gt 90) { $diasPV = 90 }
+                $quienPV = if ($request.QueryString["quien"] -eq "yo") { $vPosV.ToLowerInvariant() } else { "" }
+                try {
+                    Enviar-Json $context (Calcular-PosVentas $diasPV $quienPV) 200 8
+                } catch {
+                    Enviar-Json $context @{ ok = $false; error = "$($_.Exception.Message)" } 500
+                }
+            }
+
+        } elseif ($method -eq "POST" -and $path -eq "/api/pos/devolucion") {
+            # Devolucion desde el movil en modo punto de venta (valida contra la venta original).
+            $dPosD = Leer-CuerpoJson $request
+            $vPosD = Pos-VendedorDe $request
+            if (-not (Pos-Token-Valido $request $vPosD)) {
+                Enviar-Json $context @{ ok = $false; error = "El modo punto de venta no esta activo en este telefono."; posInactivo = $true } 403
+            } elseif (-not (Pin-Valido $vPosD $dPosD.pin)) {
+                Enviar-Json $context @{ ok = $false; error = "PIN incorrecto."; requierePin = $true } 403
+            } else {
+                try {
+                    $resPosD = Registrar-DevolucionPos $dPosD $vPosD
+                    Enviar-Json $context $resPosD.cuerpo ([int]$resPosD.codigo) 8
+                } catch {
+                    Enviar-Json $context @{ ok = $false; error = "$($_.Exception.Message)" } 500
+                }
+            }
+
+        } elseif ($method -eq "POST" -and $path -eq "/api/mensajes") {
+            # Mensaje corto del movil de un vendedor hacia la PC (sin pedido). Hace falta ser un
+            # vendedor creado en la PC y su PIN: un cliente (autoservicio) no puede mandar mensajes.
+            $dMsg = Leer-CuerpoJson $request
+            $vMsg = if ($dMsg -and $dMsg.vendedor) { ([string]$dMsg.vendedor).Trim() } else { "" }
+            $txtMsg = if ($dMsg) { Limpiar-TextoMensaje $dMsg.texto } else { "" }
+            if ((-not $vMsg) -or (-not $global:pinesVendedores.ContainsKey($vMsg.ToLowerInvariant())) -or (-not (Pin-Valido $vMsg $dMsg.pin))) {
+                Enviar-Json $context @{ ok = $false; error = "PIN incorrecto."; requierePin = $true } 403
+            } elseif (-not (Tiene-Permiso $vMsg 'mensajes')) {
+                Enviar-Json $context @{ ok = $false; error = "Tu usuario no puede enviar mensajes. Pidele al encargado que lo active desde la PC."; sinPermiso = $true } 403
+            } elseif (-not $txtMsg) {
+                Enviar-Json $context @{ ok = $false; error = "Escribe el mensaje." } 400
+            } else {
+                $nombreMsg = [string]$global:pinesVendedores[$vMsg.ToLowerInvariant()].nombre
+                $regMsg = [pscustomobject]@{ id = $global:nextIdMensaje; vendedor = $nombreMsg; texto = $txtMsg; hora = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss"); leido = $false }
+                $global:nextIdMensaje++
+                [void]$global:mensajesPc.Add($regMsg)
+                Guardar-MensajesPc
+                Enviar-Json $context @{ ok = $true; id = $regMsg.id }
+            }
+
+        } elseif ($method -eq "GET" -and $path -eq "/api/mensajes/pc") {
+            # Solo la PC: entrega (una sola vez) los mensajes de vendedores que todavia no se han mostrado.
+            if (-not [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)) {
+                Enviar-Json $context @{ ok = $false; error = "Solo desde la PC." } 403
+            } else {
+                $pendMsg = @($global:mensajesPc | Where-Object { -not $_.leido })
+                if ($pendMsg.Count -gt 0) {
+                    foreach ($mP in $pendMsg) { $mP.leido = $true }
+                    Guardar-MensajesPc
+                }
+                Enviar-Json $context @{ ok = $true; mensajes = @($pendMsg) } 200 4
+            }
+
+        } elseif ($method -eq "POST" -and $path -eq "/api/mensajes/enviar") {
+            # Solo la PC: mensaje corto para un vendedor (o para todos). Le llega como aviso en el movil.
+            $dMsgE = Leer-CuerpoJson $request
+            $txtMsgE = if ($dMsgE) { Limpiar-TextoMensaje $dMsgE.texto } else { "" }
+            $paraTodosMsg = [bool]($dMsgE -and $dMsgE.todos)
+            $destMsg = if ($dMsgE -and $dMsgE.vendedor) { ([string]$dMsgE.vendedor).Trim() } else { "" }
+            if (-not [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)) {
+                Enviar-Json $context @{ ok = $false; error = "Los mensajes a vendedores se envian desde la PC." } 403
+            } elseif (-not $txtMsgE) {
+                Enviar-Json $context @{ ok = $false; error = "Escribe el mensaje." } 400
+            } elseif ($paraTodosMsg) {
+                Avisar-A-Todos ("Mensaje de la caja: " + $txtMsgE) "mensaje"
+                Enviar-Json $context @{ ok = $true }
+            } elseif ($destMsg -and $global:pinesVendedores.ContainsKey($destMsg.ToLowerInvariant())) {
+                Agregar-AlertaVendedor ([string]$global:pinesVendedores[$destMsg.ToLowerInvariant()].nombre) ("Mensaje de la caja: " + $txtMsgE) $null "mensaje"
+                Enviar-Json $context @{ ok = $true }
+            } else {
+                Enviar-Json $context @{ ok = $false; error = "Ese vendedor no existe." } 404
+            }
 
         } elseif ($method -eq "GET" -and $path -eq "/api/permisos") {
             # La app movil pregunta que puede hacer este vendedor.
