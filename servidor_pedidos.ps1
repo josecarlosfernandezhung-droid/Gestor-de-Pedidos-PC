@@ -8806,10 +8806,12 @@ try {
 
 try {
     $reglaNombre = "ServidorPedidosTotoTools"
-    if (-not (Get-NetFirewallRule -DisplayName $reglaNombre -ErrorAction SilentlyContinue)) {
-        New-NetFirewallRule -DisplayName $reglaNombre -Direction Inbound -Protocol TCP -LocalPort $port -Action Allow -Profile Any | Out-Null
-        Write-Host "Regla de Firewall creada para el puerto $port (todas las redes)."
-    }
+    # Se recrea siempre: asi se corrigen reglas viejas que solo valian para red Privada
+    Get-NetFirewallRule -DisplayName $reglaNombre -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue
+    New-NetFirewallRule -DisplayName $reglaNombre -Direction Inbound -Protocol TCP -LocalPort $port -Action Allow -Profile Any -Enabled True | Out-Null
+    Write-Host "Regla de Firewall lista para el puerto $port (todas las redes)."
+    # Los hotspots y Wi-Fi nuevos llegan como "Publica"; se pasan a "Privada" para que los celulares puedan entrar
+    Get-NetConnectionProfile -ErrorAction SilentlyContinue | Where-Object { $_.NetworkCategory -eq 'Public' } | Set-NetConnectionProfile -NetworkCategory Private -ErrorAction SilentlyContinue
 } catch {
     Write-Host "Aviso: no se pudo crear la regla de Firewall automaticamente ($_)."
     Write-Host "Si los moviles no logran conectar, revisa el Firewall de Windows manualmente."
