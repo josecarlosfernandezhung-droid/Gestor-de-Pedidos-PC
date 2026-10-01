@@ -2182,6 +2182,23 @@ function Volver-IpAutomatica {
     return @{ ok = $true }
 }
 
+# Al arrancar con IP fija automatica: si el adaptador se quedo con la IP fija de OTRA red
+# (otro hotspot), primero se pide IP automatica a la red actual y despues se fija en su subred.
+function Aplicar-IpFijaAuto([int]$octeto) {
+    $r = Obtener-RedActiva
+    if ($r -and -not $r.dhcp) {
+        Write-Host " La PC tenia una IP fija anterior; pidiendo IP automatica a la red actual..."
+        [void](Ejecutar-Netsh ('interface ip set address name="' + $r.nombre + '" source=dhcp'))
+        [void](Ejecutar-Netsh ('interface ip set dns name="' + $r.nombre + '" source=dhcp'))
+        $limite = (Get-Date).AddSeconds(25)
+        do {
+            Start-Sleep -Milliseconds 1000
+            $r2 = Obtener-RedActiva
+        } while ((-not $r2 -or -not $r2.dhcp -or $r2.ip -like '169.254*') -and (Get-Date) -lt $limite)
+    }
+    return (Aplicar-IpFija $octeto)
+}
+
 # ---------------- Devoluciones / garantias ----------------
 $devolucionesFile = Join-Path $scriptDir "devoluciones.json"
 $global:devoluciones = New-Object System.Collections.ArrayList
@@ -2927,6 +2944,7 @@ $htmlPC = @'
         <input type="text" id="inputWifiClave" placeholder="Dejar vacio si la red es abierta" style="width:100%; padding:8px; border-radius:6px; border:1px solid #334155; background:#0f172a; color:#e2e8f0; font-size:13px; margin-bottom:8px;">
         <button class="btn-toggle" style="width:100%;" onclick="guardarYMostrarQRWifi()" title="El cliente escanea este QR y su telefono se conecta solo al WiFi, sin ver ni escribir la contraseña">Ver QR para conectarse al WiFi</button>
         <button class="btn-toggle" style="width:100%; margin-top:8px;" onclick="generarTarjetaImprimir()" title="Genera una hoja con los dos QR (WiFi y catalogo) lista para imprimir o mandar por WhatsApp">Generar tarjeta para imprimir (WiFi + Catalogo)</button>
+        <button class="btn-toggle" style="width:100%; margin-top:8px;" onclick="imprimirTarjetaTermica()" title="Imprime en la termica el QR del WiFi y el QR del catalogo, uno debajo del otro">Imprimir WiFi + Catalogo en la termica</button>
       </div>
 
       <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="window.open('/etiquetas', '_blank')">Etiquetas y códigos de barra</button>
@@ -3118,6 +3136,7 @@ $htmlPC = @'
       <div id="qrCodeBox" style="background:#fff; padding:12px; border-radius:8px; display:inline-block; min-width:200px; min-height:200px;"></div>
       <div id="qrEnlaceTexto" style="font-size:11px; color:#94a3b8; margin-top:12px; word-break:break-all;"></div>
       <button id="qrBotonCopiar" class="btn" style="margin-top:14px; width:100%;" onclick="copiarEnlaceQRActual()">Copiar enlace</button>
+      <button id="qrBotonTermica" class="btn" style="background:#0369a1; margin-top:8px; width:100%;" onclick="imprimirQRActualTermica()">Imprimir en la termica</button>
       <button class="btn" style="background:#475569; margin-top:8px; width:100%;" onclick="cerrarQRCliente()">Cerrar</button>
     </div>
   </div>
@@ -3648,9 +3667,10 @@ $htmlPC = @'
     function renderCard(p) {
       const revisar = necesitaRevision(p);
       const estadoClass = revisar ? 'porrevisar' : (p.estado === 'cobrado' ? 'cobrado' : (p.estado === 'cancelado' ? 'cancelado' : 'pendiente'));
+      const factorTr = (p.metodoPago === 'Transferencia') ? 2 : 1;   // en transferencia todo sale al precio x2
       const items = (p.items || []).map(it => {
         const fotoIt = tieneFoto(it.sku) ? ('<img class="ped-miniatura" src="/foto/' + encodeURIComponent(it.sku) + '.jpg" onerror=\'fotoFallo(this,' + JSON.stringify(String(it.sku)) + ')\' onclick=\'verFotoProductoNP(' + JSON.stringify(it.sku) + ',' + JSON.stringify(it.nombre || '') + ')\'>') : '';
-        return '<li>' + fotoIt + '<span>' + it.cantidad + ' x ' + it.nombre + ' — $' + (it.precio * it.cantidad).toFixed(2) + '</span></li>';
+        return '<li>' + fotoIt + '<span>' + it.cantidad + ' x ' + it.nombre + ' — $' + (it.precio * factorTr * it.cantidad).toFixed(2) + (factorTr === 2 ? ' <small style="color:#0369a1;">(transf. $' + (it.precio * 2).toFixed(2) + ' c/u)</small>' : '') + '</span></li>';
       }).join('');
 
       // Si este pedido venia de un "para todos" que alguien tomo, se deja
@@ -3672,7 +3692,11 @@ $htmlPC = @'
       const totalCobrado = Number(p.totalCobrado !== undefined && p.totalCobrado !== null ? p.totalCobrado : totalProductos);
 
       let totalHtml = '<div class="total">Total: $' + totalProductos.toFixed(2) + '</div>';
-      if (Math.abs(totalCobrado - totalProductos) > 0.009) {
+      if (factorTr === 2) {
+        // Transferencia: el total que se muestra ya es el de transferencia (precio x2); el precio base queda como referencia
+        totalHtml = '<div class="total">Total (transferencia): $' + (totalProductos * 2).toFixed(2) + '</div>' +
+          '<div style="font-size:12px; color:#64748b;">Precio base: $' + totalProductos.toFixed(2) + '</div>';
+      } else if (Math.abs(totalCobrado - totalProductos) > 0.009) {
         totalHtml += '<div class="total" style="color:#7c2d12;">A cobrar (' + (p.metodoPago || '') + '): $' + totalCobrado.toFixed(2) + '</div>';
       }
 
@@ -3961,6 +3985,7 @@ $htmlPC = @'
     async function mostrarQRCliente() {
       const enlace = await obtenerEnlaceCliente();
       enlaceQRActual = enlace;
+      qrActualDatos = { titulo: 'CATALOGO - CLIENTES', instruccion: 'Escanea con la camara del telefono', texto: enlace, pie: enlace };
       dibujarQREnBox(enlace, document.getElementById('qrCodeBox'));
       document.getElementById('qrTituloModal').textContent = 'QR para clientes';
       document.getElementById('qrEnlaceTexto').textContent = enlace;
@@ -3983,6 +4008,7 @@ $htmlPC = @'
     async function mostrarQRVendedor() {
       const enlace = await obtenerEnlaceVendedor();
       enlaceQRActual = enlace;
+      qrActualDatos = { titulo: 'APP DE VENDEDORES', instruccion: 'Escanea para entrar a la app', texto: enlace, pie: enlace };
       dibujarQREnBox(enlace, document.getElementById('qrCodeBox'));
       document.getElementById('qrTituloModal').textContent = 'QR para vendedores';
       document.getElementById('qrEnlaceTexto').textContent = enlace;
@@ -4028,6 +4054,7 @@ $htmlPC = @'
       const clave = document.getElementById('inputWifiClave').value;
       if (!ssid) { alert('Escribe el nombre (SSID) de la red WiFi.'); return; }
       await guardarConfigWifi(ssid, clave);
+      qrActualDatos = { titulo: 'WIFI', instruccion: 'Escanea para conectarte', texto: construirTextoWifi(ssid, clave), pie: 'Red: ' + ssid };
       dibujarQREnBox(construirTextoWifi(ssid, clave), document.getElementById('qrCodeBox'));
       document.getElementById('qrTituloModal').textContent = 'QR para conectarse al WiFi';
       document.getElementById('qrEnlaceTexto').textContent = 'Red: ' + ssid;
@@ -4049,6 +4076,116 @@ $htmlPC = @'
 
     function cerrarQRCliente() {
       document.getElementById('qrOverlay').style.display = 'none';
+    }
+
+    // ---- Imprimir QR en la termica ----
+    // El ticket se dibuja como imagen (titulo + QR + texto) y se manda como raster ESC/POS:
+    // asi sale igual en cualquier termica, sin depender de que soporte el comando QR nativo.
+    let qrActualDatos = null;
+    let anchoTermicaPuntos = 0;
+    async function obtenerAnchoTermica() {
+      if (anchoTermicaPuntos) return anchoTermicaPuntos;
+      try { const r = await fetch('/api/ip'); const d = await r.json(); anchoTermicaPuntos = Number(d.anchoPuntos) || 384; }
+      catch (e) { anchoTermicaPuntos = 384; }
+      return anchoTermicaPuntos;
+    }
+    function partirLineasCanvas(ctx, texto, maxAncho) {
+      const lineas = [];
+      String(texto || '').split(/\s+/).forEach(function (pal) {
+        if (!pal) return;
+        let resto = pal;
+        while (ctx.measureText(resto).width > maxAncho) {      // enlaces largos sin espacios: se cortan por letras
+          let n = resto.length;
+          while (n > 1 && ctx.measureText(resto.slice(0, n)).width > maxAncho) n--;
+          lineas.push(resto.slice(0, n)); resto = resto.slice(n);
+        }
+        const ult = lineas.length ? lineas[lineas.length - 1] : null;
+        if (ult !== null && !ult.__cerrada && ctx.measureText(ult + ' ' + resto).width <= maxAncho && pal === resto) lineas[lineas.length - 1] = ult + ' ' + resto;
+        else lineas.push(resto);
+      });
+      return lineas;
+    }
+    function dibujarTicketQR(items, W) {
+      const medida = document.createElement('canvas').getContext('2d');
+      const bloques = items.map(function (it) {
+        const qr = qrcode(0, 'M'); qr.addData(it.texto); qr.make();
+        const n = qr.getModuleCount();
+        const mod = Math.max(2, Math.min(9, Math.floor((W - 24) / (n + 4))));
+        medida.font = 'bold 30px Arial'; const lt = partirLineasCanvas(medida, it.titulo, W - 16);
+        medida.font = '22px Arial'; const li = partirLineasCanvas(medida, it.instruccion || '', W - 16);
+        medida.font = '20px Arial'; const lp = partirLineasCanvas(medida, it.pie || '', W - 16);
+        return { qr: qr, n: n, mod: mod, lt: lt, li: li, lp: lp, alto: 16 + lt.length * 36 + li.length * 28 + 8 + (n + 4) * mod + 10 + lp.length * 26 + 22 };
+      });
+      let H = 8; bloques.forEach(function (b) { H += b.alto; });
+      const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+      const g = cv.getContext('2d');
+      g.fillStyle = '#fff'; g.fillRect(0, 0, W, H); g.fillStyle = '#000'; g.textAlign = 'center'; g.textBaseline = 'top';
+      let y = 8;
+      bloques.forEach(function (b, idx) {
+        y += 16;
+        g.font = 'bold 30px Arial'; b.lt.forEach(function (l) { g.fillText(l, W / 2, y); y += 36; });
+        g.font = '22px Arial'; b.li.forEach(function (l) { g.fillText(l, W / 2, y); y += 28; });
+        y += 8;
+        const lado = (b.n + 4) * b.mod, x0 = Math.floor((W - lado) / 2), q = 2 * b.mod;
+        for (let r = 0; r < b.n; r++) for (let c = 0; c < b.n; c++) if (b.qr.isDark(r, c)) g.fillRect(x0 + q + c * b.mod, y + q + r * b.mod, b.mod, b.mod);
+        y += lado + 10;
+        g.font = '20px Arial'; b.lp.forEach(function (l) { g.fillText(l, W / 2, y); y += 26; });
+        y += 22;
+        if (idx < bloques.length - 1) { g.fillRect(0, y - 12, W, 2); }
+      });
+      return cv;
+    }
+    function bytesDesdeCanvas(cv) {
+      const W = cv.width, H = cv.height, bpr = W / 8;
+      const px = cv.getContext('2d').getImageData(0, 0, W, H).data;
+      const bits = new Uint8Array(bpr * H);
+      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+        const i = (y * W + x) * 4;
+        if (px[i] * 0.299 + px[i + 1] * 0.587 + px[i + 2] * 0.114 < 150) bits[y * bpr + (x >> 3)] |= 0x80 >> (x & 7);
+      }
+      const partes = [Uint8Array.of(0x1b, 0x40)];
+      for (let y = 0; y < H; y += 64) {
+        const n = Math.min(64, H - y);
+        partes.push(Uint8Array.of(0x1d, 0x76, 0x30, 0x00, bpr & 255, bpr >> 8, n & 255, n >> 8));
+        partes.push(bits.subarray(y * bpr, (y + n) * bpr));
+      }
+      partes.push(Uint8Array.of(0x1b, 0x4a, 60));          // avanza el papel
+      partes.push(Uint8Array.of(0x1d, 0x56, 0x42, 3));     // corte (si la impresora no corta, lo ignora)
+      const total = partes.reduce(function (s, p) { return s + p.length; }, 0), out = new Uint8Array(total);
+      let o = 0; partes.forEach(function (p) { out.set(p, o); o += p.length; });
+      return out;
+    }
+    async function mandarQRsATermica(items) {
+      try {
+        const W = await obtenerAnchoTermica();
+        const bytes = bytesDesdeCanvas(dibujarTicketQR(items, W));
+        const r = await fetch('/api/etiquetas/raw', { method: 'POST', body: bytes, headers: { 'Content-Type': 'application/octet-stream' } });
+        const d = await r.json();
+        if (!d.ok) throw new Error(d.error || 'La impresora no respondio.');
+        mostrarBanner('QR enviado a la termica.');
+        return true;
+      } catch (e) {
+        alert('No se pudo imprimir el QR: ' + ((e && e.message) || e));
+        return false;
+      }
+    }
+    async function imprimirQRActualTermica() {
+      if (!qrActualDatos) { alert('Primero abre el QR que quieres imprimir.'); return; }
+      const b = document.getElementById('qrBotonTermica'); const t0 = b.textContent;
+      b.disabled = true; b.textContent = 'Imprimiendo...';
+      await mandarQRsATermica([qrActualDatos]);
+      b.disabled = false; b.textContent = t0;
+    }
+    async function imprimirTarjetaTermica() {
+      const ssid = document.getElementById('inputWifiSSID').value.trim();
+      const clave = document.getElementById('inputWifiClave').value;
+      if (!ssid) { alert('Escribe el nombre (SSID) de la red WiFi antes de imprimir.'); return; }
+      await guardarConfigWifi(ssid, clave);
+      const enlace = await obtenerEnlaceCliente();
+      await mandarQRsATermica([
+        { titulo: 'WIFI', instruccion: 'Escanea para conectarte', texto: construirTextoWifi(ssid, clave), pie: 'Red: ' + ssid },
+        { titulo: 'CATALOGO', instruccion: 'Escanea para ver los productos', texto: enlace, pie: enlace }
+      ]);
     }
 
     // ---- Fotos del catalogo (desde el backup de la app del catalogo) ----
@@ -5114,7 +5251,10 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
 
   <div class="section" id="seccionBuscador">
     <h2>Buscar producto</h2>
-    <input type="text" id="buscador" placeholder="Nombre o SKU" oninput="buscar()">
+    <div style="display:flex; gap:8px; align-items:flex-start;">
+      <input type="text" id="buscador" placeholder="Nombre o SKU" oninput="buscar()" style="flex:1; min-width:0; width:auto;">
+      <button id="btnEscanear" type="button" onclick="abrirEscaner()" title="Escanear codigo de barras con la camara" style="flex:0 0 auto; width:48px; height:44px; border:none; border-radius:8px; background:var(--boton-suave); color:var(--texto); font-size:22px; cursor:pointer;">&#128247;</button>
+    </div>
     <div id="resultados"></div>
     <div id="recientes"></div>
   </div>
@@ -5313,6 +5453,27 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
     <div style="max-width:94vw; max-height:90vh; text-align:center;">
       <img id="fotoOverlayImg" src="" style="max-width:94vw; max-height:80vh; border-radius:10px; background:#fff;">
       <div id="fotoOverlayNombre" style="color:#fff; margin-top:10px; font-size:15px;"></div>
+    </div>
+  </div>
+
+  <div id="escanerOverlay" style="display:none; position:fixed; inset:0; background:#000; z-index:80; flex-direction:column;">
+    <div style="display:flex; justify-content:space-between; align-items:center; padding:12px 14px; background:#111827; color:#fff;">
+      <strong style="font-size:16px;">Escanear codigo de barras</strong>
+      <button type="button" onclick="cerrarEscaner()" style="background:#334155; color:#fff; border:none; border-radius:8px; padding:9px 16px; font-weight:600; font-size:14px;">Listo</button>
+    </div>
+    <div style="position:relative; flex:1; min-height:0; display:flex; align-items:center; justify-content:center; background:#000;">
+      <video id="escanerVideo" playsinline muted autoplay style="max-width:100%; max-height:100%; display:none;"></video>
+      <div id="escanerMira" style="display:none; position:absolute; left:8%; right:8%; top:50%; height:2px; background:rgba(239,68,68,0.9); box-shadow:0 0 8px rgba(239,68,68,0.9);"></div>
+      <div id="escanerSinCamara" style="display:none; color:#e2e8f0; text-align:center; padding:24px; font-size:15px; line-height:1.5;">Toca <b>Tomar foto del codigo</b>: se abre la camara del telefono, fotografia el codigo de barras (completo y enfocado) y el producto se agrega solo.</div>
+    </div>
+    <div style="padding:12px 14px; background:#111827;">
+      <div id="escanerEstado" style="color:#e2e8f0; font-size:14px; min-height:20px; margin-bottom:10px; text-align:center;"></div>
+      <button type="button" class="btn" onclick="document.getElementById('escanerFoto').click()">Tomar foto del codigo</button>
+      <div style="display:flex; gap:8px; margin-top:8px;">
+        <input type="text" id="escanerManual" placeholder="O escribe el codigo" inputmode="numeric" style="flex:1; min-width:0; width:auto; margin-bottom:0;">
+        <button type="button" class="btn btn-secundario" onclick="escanerCodigoManual()" style="width:auto; padding:0 18px;">Agregar</button>
+      </div>
+      <input type="file" id="escanerFoto" accept="image/*" capture="environment" style="display:none;" onchange="escanerFotoElegida(event)">
     </div>
   </div>
 
@@ -5964,14 +6125,15 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
           return;
         }
         const blob = await res.blob();
-        const nombre = res.headers.get('X-Nombre-Archivo') || 'catalogo.xlsx';
+        let nombre = res.headers.get('X-Nombre-Archivo') || 'catalogo.xlsx';
+        try { const enc = res.headers.get('X-Nombre-Archivo-Enc'); if (enc) nombre = decodeURIComponent(enc); } catch (e2) {}
         const como = await guardarArchivoEnMovil(blob, nombre);
         estado.textContent = como === 'compartido'
           ? 'Listo: elige donde guardar o con que abrir "' + nombre + '".'
           : 'Descargado: ' + nombre;
       } catch (e) {
         if (e && e.message === 'sin-soporte') {
-          estado.textContent = 'Este telefono no deja guardar el archivo desde la app. Abre ' + location.origin + '/vendedor en Chrome y descargalo ahi (o actualiza la app).';
+          estado.textContent = 'Esta app no tiene los plugins para guardar archivos (' + (e.detalle || 'sin detalle') + '). Abre ' + location.origin + '/vendedor en Chrome y descargalo ahi, o instala la APK nueva.';
         } else if (e && (e.name === 'AbortError' || /cancel/i.test(String(e.message || '')))) {
           estado.textContent = 'Cancelado.';
         } else {
@@ -5994,25 +6156,44 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
     }
     async function guardarArchivoEnMovil(blob, nombre) {
       const cap = window.Capacitor;
-      const plug = (cap && cap.Plugins) || {};
       const enApp = !!(cap && (typeof cap.isNativePlatform === 'function' ? cap.isNativePlatform() : cap.platform === 'android'));
-      if (plug.Filesystem && plug.Share) {
-        const datos = await blobABase64(blob);
-        const r = await plug.Filesystem.writeFile({ path: nombre, data: datos, directory: 'CACHE', recursive: true });
-        await plug.Share.share({ title: nombre, url: r.uri, dialogTitle: 'Guardar o abrir el Excel' });
-        return 'compartido';
+      const fs = pluginNativo('Filesystem'), share = pluginNativo('Share');
+      const cancelo = function (e) { return !!e && (e.name === 'AbortError' || /cancel/i.test(String(e.message || e))); };
+      let fallo = '';
+      // 1) APK con plugins: se guarda en la cache de la app y se abre el menu de compartir de Android
+      if (fs && share) {
+        try {
+          const datos = await blobABase64(blob);
+          const r = await fs.writeFile({ path: nombre, data: datos, directory: 'CACHE', recursive: true });
+          await share.share({ title: nombre, url: r.uri, dialogTitle: 'Guardar o abrir el archivo' });
+          return 'compartido';
+        } catch (e) {
+          if (cancelo(e)) throw e;
+          fallo = 'plugin: ' + ((e && e.message) || e);
+        }
       }
-      const archivo = new File([blob], nombre, { type: blob.type || 'application/octet-stream' });
-      if (navigator.canShare && navigator.canShare({ files: [archivo] })) {
-        await navigator.share({ files: [archivo], title: nombre });
-        return 'compartido';
+      // 2) Navegador compatible con compartir archivos
+      try {
+        const archivo = new File([blob], nombre, { type: blob.type || 'application/octet-stream' });
+        if (navigator.canShare && navigator.canShare({ files: [archivo] })) {
+          await navigator.share({ files: [archivo], title: nombre });
+          return 'compartido';
+        }
+      } catch (e) {
+        if (cancelo(e)) throw e;
       }
-      if (enApp) throw new Error('sin-soporte');   // APK vieja sin los plugins: se avisa en vez de no hacer nada
+      // 3) La app instalada no puede bajar archivos con <a download>: se explica que falta, con el detalle
+      if (enApp) {
+        const err = new Error('sin-soporte');
+        err.detalle = 'Filesystem=' + (fs ? 'si' : 'NO') + ', Share=' + (share ? 'si' : 'NO') + (fallo ? ', ' + fallo : '');
+        throw err;
+      }
+      // 4) Chrome / PWA: descarga normal
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url; a.download = nombre;
       document.body.appendChild(a); a.click(); a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 8000);
+      setTimeout(function () { URL.revokeObjectURL(url); }, 8000);
       return 'descargado';
     }
 
@@ -6532,6 +6713,474 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
     function cerrarFotoProducto() {
       document.getElementById('fotoOverlay').style.display = 'none';
     }
+
+    // ================= Lector de codigos de barras (vendedor y autoservicio) =================
+    // 1) Si la app (APK) trae un plugin nativo de escaneo, se usa (es lo mas rapido).
+    // 2) Si la pagina permite camara en vivo (https o localhost), se lee el video.
+    // 3) Si no (pagina http://IP:puerto, que es lo normal aqui), se toma una FOTO con la camara
+    //    del telefono y se lee el codigo de la foto. Esto funciona en el APK y en Chrome.
+    // Tambien sirve un lector de codigos Bluetooth/USB: escribe el codigo en el buscador y da Enter.
+
+// ===== Lector de codigos de barras propio (sin librerias, sin internet) =====
+// Lee Code 128 (el de las etiquetas), EAN-13, EAN-8 y UPC-A a partir de pixeles.
+var EscanerBarras = (function () {
+  var C128 = ['212222','222122','222221','121223','121322','131222','122213','122312','132212','221213','221312','231212','112232','122132','122231','113222','123122','123221','223211','221132','221231','213212','223112','312131','311222','321122','321221','312212','322112','322211','212123','212321','232121','111323','131123','131321','112313','132113','132311','211313','231113','231311','112133','112331','132131','113123','113321','133121','313121','211331','231131','213113','213311','213131','311123','311321','331121','312113','312311','332111','314111','221411','431111','111224','111422','121124','121421','141122','141221','112214','112412','122114','122411','142112','142211','241211','221114','413111','241112','134111','111242','121142','121241','114212','124112','124211','411212','421112','421211','212141','214121','412121','111143','111341','131141','114113','114311','411113','411311','113141','114131','311141','411131','211412','211214','211232','2331112'];
+  var L_BITS = ['0001101','0011001','0010011','0111101','0100011','0110001','0101111','0111011','0110111','0001011'];
+  var PARIDAD = ['LLLLLL','LLGLGG','LLGGLG','LLGGGL','LGLLGG','LGGLLG','LGGGLL','LGLGLG','LGLGGL','LGGLGL'];
+  function runsDeBits(b) {
+    var r = [], c = 1;
+    for (var i = 1; i < b.length; i++) { if (b[i] === b[i - 1]) c++; else { r.push(c); c = 1; } }
+    r.push(c);
+    return r;
+  }
+  function complemento(b) { return b.split('').map(function (x) { return x === '0' ? '1' : '0'; }).join(''); }
+  function reves(b) { return b.split('').reverse().join(''); }
+  var R_BITS = L_BITS.map(complemento);
+  var G_BITS = R_BITS.map(reves);
+  var L_RUNS = L_BITS.map(runsDeBits), R_RUNS = R_BITS.map(runsDeBits), G_RUNS = G_BITS.map(runsDeBits);
+  var C128_RUNS = C128.map(function (p) { return p.split('').map(Number); });
+  var C128_RUNS6 = C128_RUNS.map(function (p) { return p.slice(0, 6); });
+
+  // Compara n corridas con una lista de patrones; devuelve {i, e} del mejor o null
+  function mejor(r, ini, n, pats, modulos, maxErr) {
+    var t = 0, k;
+    for (k = 0; k < n; k++) t += r[ini + k];
+    if (t <= 0) return null;
+    var u = t / modulos, bi = -1, be = 1e9;
+    for (var p = 0; p < pats.length; p++) {
+      var pt = pats[p], e = 0;
+      for (k = 0; k < n; k++) e += Math.abs(r[ini + k] / u - pt[k]);
+      if (e < be) { be = e; bi = p; }
+    }
+    return be <= maxErr ? { i: bi, e: be } : null;
+  }
+
+  function sumaControlEAN(d) {
+    var s = 0, n = d.length;
+    for (var i = 0; i < n - 1; i++) s += d[i] * (((n - 1 - i) % 2 === 1) ? 3 : 1);
+    return (10 - (s % 10)) % 10 === d[n - 1];
+  }
+
+  function guardaOk(r, i, n) {
+    var t = 0, k;
+    for (k = 0; k < n; k++) t += r[i + k];
+    var u = t / n;
+    for (k = 0; k < n; k++) { if (r[i + k] < u * 0.45 || r[i + k] > u * 2.2) return false; }
+    return true;
+  }
+
+  // r = corridas que EMPIEZAN y TERMINAN en blanco (r[0] puede ser 0). Las barras estan en indices impares.
+  function silencioAntes(r, i, u) { return r[i - 1] >= 4 * u || (i - 1 === 0 && r[0] === 0); }
+  function silencioDespues(r, j, u) { return j >= r.length || r[j] >= 4 * u || (j === r.length - 1 && r[j] === 0); }
+  function sumaRuns(r, i, n) { var t = 0; for (var k = 0; k < n; k++) t += r[i + k]; return t; }
+
+  function decodificarEAN13(r) {
+    for (var i = 1; i + 59 <= r.length; i += 2) {
+      if (!guardaOk(r, i, 3)) continue;
+      var u13 = sumaRuns(r, i, 59) / 95;
+      if (!silencioAntes(r, i, u13) || !silencioDespues(r, i + 59, u13)) continue;
+      var d = [], par = '', ok = true, k, m;
+      for (k = 0; k < 6 && ok; k++) {
+        var a = mejor(r, i + 3 + k * 4, 4, L_RUNS, 7, 1.5), b = mejor(r, i + 3 + k * 4, 4, G_RUNS, 7, 1.5);
+        if (a && (!b || a.e <= b.e)) { d.push(a.i); par += 'L'; }
+        else if (b) { d.push(b.i); par += 'G'; }
+        else ok = false;
+      }
+      if (!ok) continue;
+      if (!guardaOk(r, i + 27, 5)) continue;
+      for (k = 0; k < 6 && ok; k++) {
+        m = mejor(r, i + 32 + k * 4, 4, R_RUNS, 7, 1.5);
+        if (m) d.push(m.i); else ok = false;
+      }
+      if (!ok || !guardaOk(r, i + 56, 3)) continue;
+      var primero = PARIDAD.indexOf(par);
+      if (primero < 0) continue;
+      var todos = [primero].concat(d);
+      if (!sumaControlEAN(todos)) continue;
+      return { texto: todos.join(''), formato: 'EAN-13' };
+    }
+    return null;
+  }
+
+  function decodificarEAN8(r) {
+    for (var i = 1; i + 43 <= r.length; i += 2) {
+      if (!guardaOk(r, i, 3)) continue;
+      var u8 = sumaRuns(r, i, 43) / 67;
+      if (!silencioAntes(r, i, u8) || !silencioDespues(r, i + 43, u8)) continue;
+      var d = [], ok = true, k, m;
+      for (k = 0; k < 4 && ok; k++) {
+        m = mejor(r, i + 3 + k * 4, 4, L_RUNS, 7, 1.5);
+        if (m) d.push(m.i); else ok = false;
+      }
+      if (!ok || !guardaOk(r, i + 19, 5)) continue;
+      for (k = 0; k < 4 && ok; k++) {
+        m = mejor(r, i + 24 + k * 4, 4, R_RUNS, 7, 1.5);
+        if (m) d.push(m.i); else ok = false;
+      }
+      if (!ok || !guardaOk(r, i + 40, 3)) continue;
+      if (!sumaControlEAN(d)) continue;
+      return { texto: d.join(''), formato: 'EAN-8' };
+    }
+    return null;
+  }
+
+  function textoCode128(cod) {
+    var set = cod[0] === 103 ? 'A' : (cod[0] === 104 ? 'B' : 'C');
+    var out = '', shift = false;
+    for (var k = 1; k < cod.length - 1; k++) {
+      var v = cod[k], s = shift ? (set === 'A' ? 'B' : 'A') : set;
+      shift = false;
+      if (s === 'C') {
+        if (v < 100) out += (v < 10 ? '0' : '') + v;
+        else if (v === 100) set = 'B';
+        else if (v === 101) set = 'A';
+      } else {
+        if (v === 99) set = 'C';
+        else if (v === 98) shift = true;
+        else if (s === 'B' && v === 100) { /* FNC4 */ }
+        else if (s === 'A' && v === 101) { /* FNC4 */ }
+        else if (s === 'B' && v === 101) set = 'A';
+        else if (s === 'A' && v === 100) set = 'B';
+        else if (v < 96) {
+          if (s === 'A') out += String.fromCharCode(v < 64 ? v + 32 : v - 64);
+          else out += String.fromCharCode(v + 32);
+        }
+      }
+    }
+    return out;
+  }
+
+  function decodificarCode128(r) {
+    for (var i = 1; i + 13 <= r.length; i += 2) {
+      var st = mejor(r, i, 6, [C128_RUNS[103], C128_RUNS[104], C128_RUNS[105]], 11, 1.9);
+      if (!st) continue;
+      var u128 = sumaRuns(r, i, 6) / 11;
+      if (!silencioAntes(r, i, u128)) continue;
+      var cod = [103 + st.i], pos = i + 6, fin = false, bad = false;
+      while (pos + 6 <= r.length) {
+        var m = mejor(r, pos, 6, C128_RUNS6, 11, 1.9);
+        if (!m) { bad = true; break; }
+        if (m.i === 106) {
+          if (pos + 7 > r.length) { bad = true; break; }
+          if (r[pos + 6] < u128 * 1.0 || r[pos + 6] > u128 * 3.2) { bad = true; break; }
+          if (!silencioDespues(r, pos + 7, u128)) { bad = true; break; }
+          fin = true; cod.push(106); break;
+        }
+        cod.push(m.i); pos += 6;
+        if (cod.length > 80) { bad = true; break; }
+      }
+      if (bad || !fin || cod.length < 4) continue;
+      var suma = cod[0];
+      for (var k = 1; k < cod.length - 2; k++) suma += cod[k] * k;
+      if (suma % 103 !== cod[cod.length - 2]) continue;
+      var txt = textoCode128(cod.slice(0, cod.length - 1));
+      if (txt.length < 1) continue;
+      return { texto: txt, formato: 'Code 128' };
+    }
+    return null;
+  }
+
+  function decodificarRuns(r) {
+    return decodificarEAN13(r) || decodificarEAN8(r) || decodificarCode128(r);
+  }
+
+  // Una linea de grises -> corridas (en pixeles, con bordes a media pixel) que empiezan y terminan en blanco
+  function runsDeLinea(lum, n) {
+    var suav = new Float32Array(n), i;
+    for (i = 0; i < n; i++) {
+      var a = lum[i > 0 ? i - 1 : i], b = lum[i], c = lum[i < n - 1 ? i + 1 : i];
+      suav[i] = (a + 2 * b + c) / 4;
+    }
+    // minimo y maximo por bloques de 8 px -> umbral local = punto medio entre ambos
+    var B = 8, nb = Math.ceil(n / B), bmin = new Float32Array(nb), bmax = new Float32Array(nb), k;
+    for (k = 0; k < nb; k++) {
+      var mn = 255, mx = 0, f = Math.min(n, (k + 1) * B);
+      for (i = k * B; i < f; i++) { if (suav[i] < mn) mn = suav[i]; if (suav[i] > mx) mx = suav[i]; }
+      bmin[k] = mn; bmax[k] = mx;
+    }
+    var Wb = Math.max(3, Math.round(n / 16 / B));
+    var thr = new Float32Array(n), contraste = new Uint8Array(n), hay = false;
+    for (i = 0; i < n; i++) {
+      var kc = (i / B) | 0, lo = kc - Wb < 0 ? 0 : kc - Wb, hi = kc + Wb >= nb ? nb - 1 : kc + Wb;
+      var wmn = 255, wmx = 0;
+      for (k = lo; k <= hi; k++) { if (bmin[k] < wmn) wmn = bmin[k]; if (bmax[k] > wmx) wmx = bmax[k]; }
+      thr[i] = (wmn + wmx) / 2;
+      if (wmx - wmn >= 40) { contraste[i] = 1; hay = true; }
+    }
+    if (!hay) return null;
+    function esNegro(j) { return contraste[j] && suav[j] < thr[j]; }
+    var bordes = [], prev = esNegro(0) ? 1 : 0, inicial = prev;
+    for (i = 1; i < n; i++) {
+      var cur = esNegro(i) ? 1 : 0;
+      if (cur !== prev) {
+        var va = suav[i - 1], vb = suav[i], fr = vb !== va ? (thr[i] - va) / (vb - va) : 0.5;
+        if (fr < 0) fr = 0; else if (fr > 1) fr = 1;
+        bordes.push(i - 1 + fr);
+        prev = cur;
+      }
+    }
+    if (bordes.length < 18) return null;
+    var runs = [];
+    if (inicial === 1) runs.push(0);
+    var ant = 0;
+    for (k = 0; k < bordes.length; k++) { runs.push(bordes[k] - ant); ant = bordes[k]; }
+    runs.push(n - ant);
+    if (prev === 1) runs.push(0);
+    return runs;
+  }
+
+  function probarLinea(lum, n) {
+    var r = runsDeLinea(lum, n);
+    if (!r) return null;
+    var res = decodificarRuns(r);
+    if (res) return res;
+    return decodificarRuns(r.slice().reverse());
+  }
+
+  // data = RGBA (ImageData.data), w x h. Prueba lineas horizontales y verticales.
+  function decodificarPixeles(data, w, h, opciones) {
+    var lineas = (opciones && opciones.lineas) || 24;
+    var gris = new Uint8Array(w * h), i, j;
+    for (i = 0, j = 0; j < w * h; i += 4, j++) gris[j] = (data[i] * 77 + data[i + 1] * 151 + data[i + 2] * 28) >> 8;
+    var lum = new Float32Array(Math.max(w, h)), y, x, k, res, d, yy;
+    for (k = 0; k < lineas; k++) {
+      y = Math.round(h * (0.08 + 0.84 * (k + 0.5) / lineas));
+      for (x = 0; x < w; x++) {
+        var s = 0, c = 0;
+        for (d = -1; d <= 1; d++) { yy = y + d; if (yy >= 0 && yy < h) { s += gris[yy * w + x]; c++; } }
+        lum[x] = s / c;
+      }
+      res = probarLinea(lum, w);
+      if (res) return res;
+    }
+    for (k = 0; k < lineas; k++) {
+      x = Math.round(w * (0.08 + 0.84 * (k + 0.5) / lineas));
+      for (y = 0; y < h; y++) {
+        var s2 = 0, c2 = 0;
+        for (d = -1; d <= 1; d++) { var xx = x + d; if (xx >= 0 && xx < w) { s2 += gris[y * w + xx]; c2++; } }
+        lum[y] = s2 / c2;
+      }
+      res = probarLinea(lum, h);
+      if (res) return res;
+    }
+    return null;
+  }
+
+  return { decodificarPixeles: decodificarPixeles, decodificarRuns: decodificarRuns };
+})();
+if (typeof module !== 'undefined' && module.exports) module.exports = EscanerBarras;
+
+    let escanerAbierto = false, escanerStream = null, escanerBucle = null, escanerDetector = null, escanerAudio = null;
+    let escanerAgregados = 0, escanerUltimoCodigo = '', escanerUltimoMs = 0, escanerCv = null;
+
+    function escanerEstado(texto, ok) {
+      const e = document.getElementById('escanerEstado');
+      if (!e) return;
+      e.textContent = texto || '';
+      e.style.color = ok === true ? '#86efac' : (ok === false ? '#fca5a5' : '#e2e8f0');
+    }
+    function escanerSonido(bien) {
+      try { if (navigator.vibrate) navigator.vibrate(bien ? 70 : [60, 40, 60]); } catch (e) {}
+      try {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) return;
+        escanerAudio = escanerAudio || new AC();
+        const o = escanerAudio.createOscillator(), g = escanerAudio.createGain();
+        o.frequency.value = bien ? 1500 : 300; g.gain.value = 0.15;
+        o.connect(g); g.connect(escanerAudio.destination);
+        o.start(); o.stop(escanerAudio.currentTime + (bien ? 0.09 : 0.25));
+      } catch (e) {}
+    }
+    function escanerClave(s) { return String(s == null ? '' : s).trim().replace(/\s+/g, '').toLowerCase(); }
+    function buscarProductoPorCodigo(codigo) {
+      const c = escanerClave(codigo);
+      if (!c) return null;
+      const variantes = [c];
+      if (/^\d+$/.test(c)) {
+        if (c.length === 13 && c.charAt(0) === '0') variantes.push(c.slice(1));   // EAN-13 que empieza en 0 = UPC-A
+        if (c.length === 12) variantes.push('0' + c);
+      }
+      const exacto = catalogo.find(function (p) { return p.sku && variantes.indexOf(escanerClave(p.sku)) >= 0; });
+      if (exacto) return exacto;
+      if (/^\d+$/.test(c)) {                                                       // SKU numerico guardado sin ceros a la izquierda
+        const sinCeros = c.replace(/^0+/, '');
+        return catalogo.find(function (p) { const k = String(p.sku || ''); return /^\d+$/.test(k) && k.replace(/^0+/, '') === sinCeros; }) || null;
+      }
+      return null;
+    }
+    function escanerCantidadEnCarrito(sku) { const it = carrito.find(function (i) { return i.sku === sku; }); return it ? it.cantidad : 0; }
+    function escanerProcesar(codigo, enOverlay, sinEspera) {
+      codigo = String(codigo || '').trim();
+      if (!codigo) return false;
+      const ahora = Date.now();
+      if (!sinEspera && codigo === escanerUltimoCodigo && ahora - escanerUltimoMs < 2200) return false;
+      escanerUltimoCodigo = codigo; escanerUltimoMs = ahora;
+      const avisar = function (txt, ok) { if (enOverlay) escanerEstado(txt, ok); else mostrarMensaje(txt, ok); };
+      const p = buscarProductoPorCodigo(codigo);
+      if (!p) { escanerSonido(false); avisar('El codigo ' + codigo + ' no esta en el catalogo.', false); return false; }
+      if (ocultandoSinStock() && productoSinStock(p)) { escanerSonido(false); avisar(p.nombre + ': agotado.', false); return false; }
+      const antes = escanerCantidadEnCarrito(p.sku);
+      agregarAlCarrito(p);
+      const despues = escanerCantidadEnCarrito(p.sku);
+      if (despues <= antes) { escanerSonido(false); return false; }     // no habia mas stock (agregarAlCarrito ya aviso)
+      escanerAgregados++;
+      escanerSonido(true);
+      avisar('Agregado: ' + p.nombre + ' (en el pedido: ' + despues + ')', true);
+      return true;
+    }
+    function escanerCodigoManual() {
+      const i = document.getElementById('escanerManual');
+      const v = (i.value || '').trim();
+      if (!v) return;
+      if (escanerProcesar(v, true, true)) i.value = '';
+    }
+
+    function pluginNativo(n) {
+      const cap = window.Capacitor;
+      if (!cap) return null;
+      try {
+        if (typeof cap.isPluginAvailable === 'function' && !cap.isPluginAvailable(n)) return null;
+        if (cap.Plugins && cap.Plugins[n]) return cap.Plugins[n];
+        if (typeof cap.registerPlugin === 'function') return cap.registerPlugin(n);
+      } catch (e) {}
+      return null;
+    }
+    // undefined = no hay plugin de escaneo; null = lo cancelaron / no leyo nada; texto = codigo leido
+    async function escanerNativo() {
+      try {
+        const ml = pluginNativo('BarcodeScanner');                       // @capacitor-mlkit/barcode-scanning
+        if (ml && typeof ml.scan === 'function') {
+          try { if (typeof ml.requestPermissions === 'function') await ml.requestPermissions(); } catch (e) {}
+          const r = await ml.scan();
+          const b = r && r.barcodes && r.barcodes[0];
+          return b ? (String(b.rawValue || b.displayValue || '') || null) : null;
+        }
+        const os = pluginNativo('CapacitorBarcodeScanner');              // @capacitor/barcode-scanner
+        if (os && typeof os.scanBarcode === 'function') {
+          const r = await os.scanBarcode({ hint: 17, scanButton: false });
+          return r && r.ScanResult ? String(r.ScanResult) : null;
+        }
+      } catch (e) {
+        if (/cancel/i.test(String((e && e.message) || e))) return null;
+      }
+      return undefined;
+    }
+
+    async function abrirEscaner() {
+      if (!catalogo || !catalogo.length) { mostrarMensaje('Todavia no se cargo el catalogo.', false); return; }
+      const nat = await escanerNativo();
+      if (nat === null) return;
+      if (typeof nat === 'string') { escanerProcesar(nat, false, true); return; }
+      escanerAbierto = true; escanerAgregados = 0;
+      document.getElementById('escanerOverlay').style.display = 'flex';
+      document.getElementById('escanerSinCamara').style.display = 'none';
+      escanerEstado('Iniciando camara...', null);
+      const hayVideo = await escanerArrancarCamara();
+      if (!hayVideo) {
+        document.getElementById('escanerSinCamara').style.display = 'block';
+        escanerEstado('', null);
+      }
+    }
+    function cerrarEscaner() {
+      escanerAbierto = false;
+      if (escanerBucle) { clearTimeout(escanerBucle); escanerBucle = null; }
+      if (escanerStream) { try { escanerStream.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {} escanerStream = null; }
+      const v = document.getElementById('escanerVideo');
+      if (v) { try { v.pause(); } catch (e) {} v.srcObject = null; v.style.display = 'none'; }
+      document.getElementById('escanerMira').style.display = 'none';
+      document.getElementById('escanerOverlay').style.display = 'none';
+      if (escanerAgregados > 0) mostrarMensaje(escanerAgregados === 1 ? 'Producto agregado al pedido.' : (escanerAgregados + ' productos agregados al pedido.'), true);
+      escanerAgregados = 0;
+    }
+    async function escanerArrancarCamara() {
+      const md = navigator.mediaDevices;
+      if (!md || !md.getUserMedia || window.isSecureContext === false) return false;   // pagina http://IP: la camara en vivo no se permite
+      try {
+        escanerStream = await md.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
+      } catch (e) { return false; }
+      const v = document.getElementById('escanerVideo');
+      v.srcObject = escanerStream; v.style.display = 'block';
+      document.getElementById('escanerMira').style.display = 'block';
+      try { await v.play(); } catch (e) {}
+      if ('BarcodeDetector' in window) {
+        try { escanerDetector = new BarcodeDetector({ formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39', 'itf', 'codabar'] }); } catch (e) { escanerDetector = null; }
+      }
+      escanerEstado('Apunta al codigo de barras', null);
+      escanerCiclo();
+      return true;
+    }
+    function escanerCiclo() {
+      if (!escanerAbierto || !escanerStream) return;
+      const v = document.getElementById('escanerVideo');
+      const siguiente = function () { if (escanerAbierto && escanerStream) escanerBucle = setTimeout(escanerCiclo, 140); };
+      if (!v.videoWidth) { siguiente(); return; }
+      if (escanerDetector) {
+        escanerDetector.detect(v).then(function (r) { if (r && r.length) escanerProcesar(r[0].rawValue, true); }).catch(function () {}).then(siguiente);
+        return;
+      }
+      try {
+        const cv = escanerCanvas();
+        const ancho = Math.min(960, v.videoWidth), alto = Math.round(v.videoHeight * ancho / v.videoWidth);
+        cv.width = ancho; cv.height = alto;
+        const cx = cv.getContext('2d', { willReadFrequently: true });
+        cx.drawImage(v, 0, 0, ancho, alto);
+        const img = cx.getImageData(0, 0, ancho, alto);
+        const r = EscanerBarras.decodificarPixeles(img.data, ancho, alto, { lineas: 14 });
+        if (r) escanerProcesar(r.texto, true);
+      } catch (e) {}
+      siguiente();
+    }
+    function escanerCanvas() { if (!escanerCv) escanerCv = document.createElement('canvas'); return escanerCv; }
+    function escanerCargarImagen(archivo) {
+      return new Promise(function (ok, mal) {
+        const url = URL.createObjectURL(archivo), im = new Image();
+        im.onload = function () { URL.revokeObjectURL(url); ok(im); };
+        im.onerror = function () { URL.revokeObjectURL(url); mal(new Error('imagen')); };
+        im.src = url;
+      });
+    }
+    async function escanerFotoElegida(ev) {
+      const f = ev.target.files && ev.target.files[0];
+      ev.target.value = '';
+      if (!f) return;
+      escanerEstado('Leyendo la foto...', null);
+      await new Promise(function (r) { setTimeout(r, 40); });
+      let texto = null;
+      try {
+        let bmp = null;
+        if (window.createImageBitmap) { try { bmp = await createImageBitmap(f); } catch (e) { bmp = null; } }
+        if (!bmp) bmp = await escanerCargarImagen(f);
+        const wO = bmp.width || bmp.naturalWidth, hO = bmp.height || bmp.naturalHeight;
+        if ('BarcodeDetector' in window) {
+          try { const r = await new BarcodeDetector().detect(bmp); if (r && r.length) texto = r[0].rawValue; } catch (e) {}
+        }
+        if (!texto) {
+          const cv = escanerCanvas(), cx = cv.getContext('2d', { willReadFrequently: true });
+          const lados = [1280, 1920, 2600];
+          for (let k = 0; k < lados.length && !texto; k++) {
+            const esc = Math.min(1, lados[k] / Math.max(wO, hO));
+            const w = Math.max(1, Math.round(wO * esc)), h = Math.max(1, Math.round(hO * esc));
+            cv.width = w; cv.height = h;
+            cx.drawImage(bmp, 0, 0, w, h);
+            const r = EscanerBarras.decodificarPixeles(cx.getImageData(0, 0, w, h).data, w, h, { lineas: 40 });
+            if (r) texto = r.texto;
+            if (esc >= 1) break;
+            await new Promise(function (res) { setTimeout(res, 10); });
+          }
+        }
+      } catch (e) {}
+      if (texto) escanerProcesar(texto, true, true);
+      else { escanerSonido(false); escanerEstado('No pude leer el codigo. Acerca mas la camara, con buena luz, que se vea completo y enfocado, y toma otra foto.', false); }
+    }
+    // Lector de codigos USB / Bluetooth: escribe el codigo en el buscador y termina con Enter.
+    (function () {
+      const b = document.getElementById('buscador');
+      if (!b) return;
+      b.addEventListener('keydown', function (e) {
+        if (e.key !== 'Enter') return;
+        if (buscarProductoPorCodigo(b.value)) { e.preventDefault(); escanerProcesar(b.value, false, true); }
+      });
+    })();
 
     // ---- Carrito ----
     function agregarAlCarrito(p) {
@@ -7521,7 +8170,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
           : 'Descargado: ' + nombre;
       } catch (e) {
         if (e && e.message === 'sin-soporte') {
-          estado.textContent = 'Este telefono no deja guardar el archivo desde la app. Abre ' + location.origin + '/vendedor en Chrome y descargalo ahi (o actualiza la app).';
+          estado.textContent = 'Esta app no tiene los plugins para guardar archivos (' + (e.detalle || 'sin detalle') + '). Abre ' + location.origin + '/vendedor en Chrome y descargalo ahi, o instala la APK nueva.';
         } else if (e && (e.name === 'AbortError' || /cancel/i.test(String(e.message || '')))) {
           estado.textContent = 'Cancelado.';
         } else {
@@ -8822,7 +9471,7 @@ Write-Host " Servidor de Pedidos iniciado (puerto $port)"
 Write-Host "=================================================="
 # IP fija automatica (si la activaste en Ajustes -> Red / IP fija): se aplica en la red a la que estes conectado
 if ($global:redConfig.auto -and [int]$global:redConfig.ultimoOcteto -gt 0) {
-    $resIpAuto = Aplicar-IpFija ([int]$global:redConfig.ultimoOcteto)
+    $resIpAuto = Aplicar-IpFijaAuto ([int]$global:redConfig.ultimoOcteto)
     if ($resIpAuto.ok) { Write-Host " IP fija aplicada: $($resIpAuto.ip)" } else { Write-Host " Aviso IP fija: $($resIpAuto.error)" }
 }
 $patronesAdaptadorVirtual = 'Virtual|VPN|Loopback|Hyper-V|VMware|VirtualBox|Tailscale|ZeroTier|Npcap|TAP-Windows|Bluetooth'
@@ -8916,7 +9565,7 @@ while ($listener.IsListening) {
             $context.Response.Headers["Vary"] = "Origin"
             $context.Response.Headers["Access-Control-Allow-Headers"] = "Content-Type, X-Vendedor, X-Pos-Token"
             $context.Response.Headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-            $context.Response.Headers["Access-Control-Expose-Headers"] = "X-Nombre-Archivo"
+            $context.Response.Headers["Access-Control-Expose-Headers"] = "X-Nombre-Archivo, X-Nombre-Archivo-Enc"
             $context.Response.Headers["Access-Control-Allow-Private-Network"] = "true"
         }
     } catch {}
@@ -9007,7 +9656,7 @@ while ($listener.IsListening) {
             $context.Response.OutputStream.Close()
 
         } elseif ($method -eq "GET" -and $path -eq "/api/ip") {
-            Enviar-Respuesta -Context $context -Body (@{ ip = $global:ipLan; puerto = $port } | ConvertTo-Json) -ContentType "application/json; charset=utf-8"
+            Enviar-Respuesta -Context $context -Body (@{ ip = $global:ipLan; puerto = $port; anchoPuntos = $(if ([int]$reciboAncho -le 32) { 384 } else { 576 }) } | ConvertTo-Json) -ContentType "application/json; charset=utf-8"
 
         } elseif ($method -eq "GET" -and $path -eq "/api/config") {
             Enviar-Respuesta -Context $context -Body ($global:configApp | ConvertTo-Json) -ContentType "application/json; charset=utf-8"
@@ -9154,10 +9803,15 @@ while ($listener.IsListening) {
                 try {
                     $bytesArchivo = [System.IO.File]::ReadAllBytes($ruta)
                     $nombreArchivo = [System.IO.Path]::GetFileName($ruta)
+                    # Los encabezados HTTP solo admiten ASCII: un nombre con tildes o simbolos hacia fallar la descarga.
+                    $nombreAscii = (Quitar-Acentos $nombreArchivo) -replace '[^A-Za-z0-9._-]', '_'
+                    if (-not $nombreAscii) { $nombreAscii = "catalogo.xlsx" }
+                    $nombreEnc = [System.Uri]::EscapeDataString($nombreArchivo)
                     $context.Response.StatusCode = 200
                     $context.Response.ContentType = "application/octet-stream"
-                    $context.Response.Headers.Add("Content-Disposition", "attachment; filename=`"$nombreArchivo`"")
-                    $context.Response.Headers.Add("X-Nombre-Archivo", $nombreArchivo)
+                    $context.Response.Headers.Add("Content-Disposition", "attachment; filename=`"$nombreAscii`"; filename*=UTF-8''$nombreEnc")
+                    $context.Response.Headers.Add("X-Nombre-Archivo", $nombreAscii)
+                    $context.Response.Headers.Add("X-Nombre-Archivo-Enc", $nombreEnc)
                     $context.Response.ContentLength64 = $bytesArchivo.Length
                     $context.Response.OutputStream.Write($bytesArchivo, 0, $bytesArchivo.Length)
                     $context.Response.OutputStream.Close()
