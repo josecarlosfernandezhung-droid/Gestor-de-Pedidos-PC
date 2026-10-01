@@ -15,6 +15,7 @@ jobs:
           python3 build_www.py
           npm init -y
           npm install @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6
+          npm install @capacitor/filesystem@6 @capacitor/share@6 @capacitor-mlkit/barcode-scanning@6
           cat > capacitor.config.json <<'JSON'
           {"appId":"com.totools.vendedor","appName":"Toto Vendedor","webDir":"www",
            "server":{"androidScheme":"http","cleartext":true},
@@ -22,6 +23,20 @@ jobs:
           JSON
           npx cap add android
           sed -i 's/<application/<application android:usesCleartextTraffic="true"/' android/app/src/main/AndroidManifest.xml
+          # ML Kit (escaner nativo) necesita minSdk 23
+          sed -i -E 's/minSdkVersion = [0-9]+/minSdkVersion = 23/' android/variables.gradle
+          # Permiso de CAMARA (foto/escaner del codigo de barras) + modulo del escaner de Google
+          python3 - <<'PY'
+          p = 'android/app/src/main/AndroidManifest.xml'
+          s = open(p, encoding='utf-8').read()
+          if 'android.permission.CAMERA' not in s:
+              s = s.replace('<application', '<uses-permission android:name="android.permission.CAMERA" />\n    <uses-feature android:name="android.hardware.camera" android:required="false" />\n    <application', 1)
+          if 'com.google.mlkit.vision.DEPENDENCIES' not in s:
+              i = s.index('<application')
+              j = s.index('>', i) + 1
+              s = s[:j] + '\n        <meta-data android:name="com.google.mlkit.vision.DEPENDENCIES" android:value="barcode_ui"/>' + s[j:]
+          open(p, 'w', encoding='utf-8').write(s)
+          PY
           npx cap sync android
           python3 -m pip install --quiet pillow
           python3 - <<'PY'
