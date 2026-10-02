@@ -7158,47 +7158,60 @@ if (typeof module !== 'undefined' && module.exports) module.exports = EscanerBar
       } catch (e) {}
       return null;
     }
-    // undefined = no hay plugin de escaneo; null = lo cancelaron / no leyo nada; texto = codigo leido
+    // Resultado: {tipo:'codigo', valor} | {tipo:'cancelado'} | {tipo:'sin-plugin'} | {tipo:'error', msg}
+    function esperar(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+    async function escanerEsperarModulo(ml) {
+      // El escaner de Google se descarga una sola vez por Google Play Services (necesita internet esa vez)
+      try { mostrarMensaje('Descargando el modulo del escaner de Google (solo la primera vez)...', true); } catch (e) {}
+      try { await ml.installGoogleBarcodeScannerModule(); } catch (e) {}
+      for (let i = 0; i < 40; i++) {
+        await esperar(1500);
+        try { const m = await ml.isGoogleBarcodeScannerModuleAvailable(); if (m && m.available) return true; } catch (e) {}
+      }
+      return false;
+    }
     async function escanerNativo() {
-      try {
-        const ml = pluginNativo('BarcodeScanner');                       // @capacitor-mlkit/barcode-scanning
-        if (ml && typeof ml.scan === 'function') {
-          try { if (typeof ml.requestPermissions === 'function') await ml.requestPermissions(); } catch (e) {}
-          try {
-            if (typeof ml.isGoogleBarcodeScannerModuleAvailable === 'function') {
-              const mod = await ml.isGoogleBarcodeScannerModuleAvailable();
-              if (mod && mod.available === false && typeof ml.installGoogleBarcodeScannerModule === 'function') { await ml.installGoogleBarcodeScannerModule(); return undefined; }
-            }
-          } catch (e) {}
+      const ml = pluginNativo('BarcodeScanner');                       // @capacitor-mlkit/barcode-scanning
+      if (!ml || typeof ml.scan !== 'function') return { tipo: 'sin-plugin' };
+      try { if (typeof ml.requestPermissions === 'function') await ml.requestPermissions(); } catch (e) {}
+      let ultimo = '';
+      for (let intento = 0; intento < 2; intento++) {
+        try {
           const r = await ml.scan();
           const b = r && r.barcodes && r.barcodes[0];
-          return b ? (String(b.rawValue || b.displayValue || '') || null) : null;
+          const v = b ? String(b.rawValue || b.displayValue || '') : '';
+          return v ? { tipo: 'codigo', valor: v } : { tipo: 'cancelado' };
+        } catch (e) {
+          const m = String((e && (e.message || e.errorMessage)) || e || '');
+          ultimo = m;
+          if (/cancel/i.test(m)) return { tipo: 'cancelado' };
+          if (intento === 0 && typeof ml.installGoogleBarcodeScannerModule === 'function' && /module|not available|unavailable|install|download|play services/i.test(m)) {
+            const ok = await escanerEsperarModulo(ml);
+            if (ok) continue;
+          }
+          break;
         }
-        const os = pluginNativo('CapacitorBarcodeScanner');              // @capacitor/barcode-scanner
-        if (os && typeof os.scanBarcode === 'function') {
-          const r = await os.scanBarcode({ hint: 17, scanButton: false });
-          return r && r.ScanResult ? String(r.ScanResult) : null;
-        }
-      } catch (e) {
-        if (/cancel/i.test(String((e && e.message) || e))) return null;
       }
-      return undefined;
+      return { tipo: 'error', msg: ultimo || 'error desconocido' };
     }
 
     async function abrirEscaner() {
       if (!catalogo || !catalogo.length) { mostrarMensaje('Todavia no se cargo el catalogo.', false); return; }
-      let nat = await escanerNativo();
-      if (nat === null) return;
-      if (typeof nat === 'string') {
+      let res = await escanerNativo();
+      if (res.tipo === 'cancelado') return;
+      if (res.tipo === 'codigo') {
         // Escaneo nativo continuo: cada codigo leido se agrega solo al carrito y el escaner se
         // vuelve a abrir para el siguiente producto, sin tomar fotos. Se sale con el boton atras/cerrar.
-        while (typeof nat === 'string') {
-          escanerProcesar(nat, false);
-          await new Promise(function (r) { setTimeout(r, 700); });
-          nat = await escanerNativo();
+        while (res && res.tipo === 'codigo') {
+          escanerProcesar(res.valor, false);
+          await esperar(700);
+          res = await escanerNativo();
         }
-        return;
+        if (res.tipo === 'cancelado') return;
       }
+      // Sin escaner nativo (o fallo): camara de la pagina, mostrando el motivo
+      const motivo = res.tipo === 'error' ? ('El escaner nativo fallo: ' + res.msg + '. ')
+        : (res.tipo === 'sin-plugin' ? 'Esta APK no trae el escaner nativo (recompila la APK). ' : '');
       escanerAbierto = true; escanerAgregados = 0;
       document.getElementById('escanerOverlay').style.display = 'flex';
       document.getElementById('escanerSinCamara').style.display = 'none';
@@ -7206,7 +7219,9 @@ if (typeof module !== 'undefined' && module.exports) module.exports = EscanerBar
       const hayVideo = await escanerArrancarCamara();
       if (!hayVideo) {
         document.getElementById('escanerSinCamara').style.display = 'block';
-        escanerEstado('', null);
+        escanerEstado(motivo.trim(), motivo ? false : null);
+      } else if (motivo) {
+        escanerEstado(motivo + 'Usando la camara de la pagina.', false);
       }
     }
     function cerrarEscaner() {
@@ -7604,8 +7619,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = EscanerBar
         pagoEfectivo: pagoEfectivo,
         pagoTransferencia: pagoTransferencia,
         origenAsignados: origenesAsignadosCarrito,
-        nota: autoservicioActivo ? '' : ((document.getElementById('notaPedido').value || '').trim()),
-        horaVenta: (function () { const d = new Date(); return hoyStr() + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0') + ':' + String(d.getSeconds()).padStart(2, '0'); })()
+        nota: autoservicioActivo ? '' : ((document.getElementById('notaPedido').value || '').trim())
       };
 
       try {
@@ -7650,11 +7664,9 @@ if (typeof module !== 'undefined' && module.exports) module.exports = EscanerBar
         if (autoservicioActivo) {
           mostrarMensaje('Sin conexion: no se pudo enviar el pedido. Revisa tu WiFi e intenta de nuevo.', false);
         } else {
-          if (payload.estado === 'cobrado' && posActivo()) payload.ventaOffline = true;   // la PC la acepta aunque el stock ya no alcance
           agregarACola(payload);
           try { document.getElementById('notaPedido').value = ''; } catch (e) {}
-          mostrarMensaje(payload.ventaOffline ? 'Sin conexion: la venta quedo guardada en el telefono y se enviara sola a la PC cuando vuelva la red.' : 'Sin conexion: el pedido se guardo en el telefono y se enviara solo cuando vuelva la red.', true);
-          if (payload.ventaOffline) { try { posUltimaFirma = null; cargarVentasPOS(); } catch (e) {} }
+          mostrarMensaje('Sin conexion: el pedido se guardo en el telefono y se enviara solo cuando vuelva la red.', true);
           volverAEfectivo();
         }
         carrito = [];
@@ -8318,8 +8330,18 @@ if (typeof module !== 'undefined' && module.exports) module.exports = EscanerBar
         return true;
       } catch (e) { return false; }
     }
-    let segundoPlanoActivo = false;
+    let segundoPlanoActivo = false, segundoPlanoError = '';
     async function activarSegundoPlano() {
+      // 1) Plugin propio de la APK (TotoBg): servicio en primer plano + wakelock + WebView despierto
+      const tb = pluginNativo('TotoBg');
+      if (tb && typeof tb.start === 'function') {
+        try {
+          await tb.start({ title: 'Toto Tools', text: 'Esperando pedidos y avisos de la caja' });
+          segundoPlanoActivo = true; segundoPlanoError = '';
+          return true;
+        } catch (e) { segundoPlanoError = String((e && e.message) || e); }
+      }
+      // 2) Plugin de terceros (APK antiguas)
       const bg = pluginNativo('BackgroundMode');
       if (!bg) return false;
       try {
@@ -8335,11 +8357,26 @@ if (typeof module !== 'undefined' && module.exports) module.exports = EscanerBar
     }
     async function pedirSinAhorroBateria() {
       // Android puede dormir la app aunque este en segundo plano; esto abre la pantalla para dejarla sin restriccion.
+      const tb = pluginNativo('TotoBg');
+      if (tb && typeof tb.ignoreBattery === 'function') {
+        try {
+          const r = await tb.isIgnoringBattery();
+          if (r && r.ignoring) return true;
+          await tb.ignoreBattery();
+        } catch (e) {}
+        return true;
+      }
       const bg = pluginNativo('BackgroundMode');
-      if (!bg) return;
+      if (!bg) return false;
       for (const nombre of ['requestDisableBatteryOptimizations', 'disableBatteryOptimizations']) {
         if (typeof bg[nombre] === 'function') { try { await bg[nombre](); } catch (e) {} break; }
       }
+      return true;
+    }
+    // Estado de los plugins nativos de la APK (para saber que trae esta version)
+    function diagnosticoPlugins() {
+      const q = function (n) { return pluginNativo(n) ? 'si' : 'NO'; };
+      return 'Escaner: ' + q('BarcodeScanner') + ' | Avisos: ' + q('LocalNotifications') + ' | Segundo plano: ' + (pluginNativo('TotoBg') ? 'si' : (pluginNativo('BackgroundMode') ? 'si (antiguo)' : 'NO'));
     }
     setTimeout(function () {
       const cap = window.Capacitor;
@@ -8348,6 +8385,13 @@ if (typeof module !== 'undefined' && module.exports) module.exports = EscanerBar
       prepararNotificacionesNativas();
       activarSegundoPlano();
     }, 2500);
+
+    document.addEventListener('visibilitychange', function () {
+      if (document.visibilityState !== 'visible') return;
+      const cap = window.Capacitor;
+      const enApp = !!(cap && (typeof cap.isNativePlatform === 'function' ? cap.isNativePlatform() : cap.platform === 'android'));
+      if (enApp && segundoPlanoActivo) activarSegundoPlano();
+    });
 
     async function mostrarNotificacionSistema(titulo, cuerpo) {
       try {
@@ -8368,12 +8412,13 @@ if (typeof module !== 'undefined' && module.exports) module.exports = EscanerBar
     }
     async function activarAvisosTelefono() {
       const st = document.getElementById('estadoAvisosTel');
-      if (pluginNativo('LocalNotifications') || pluginNativo('BackgroundMode')) {
+      if (pluginNativo('LocalNotifications') || pluginNativo('BackgroundMode') || pluginNativo('TotoBg')) {
         const okNoti = await prepararNotificacionesNativas();
         const okBg = await activarSegundoPlano();
         if (okBg) await pedirSinAhorroBateria();
         st.textContent = (okNoti ? 'Avisos del teléfono activados. ' : 'Falta permitir las notificaciones para esta app en los ajustes de Android. ') +
-          (okBg ? 'La app sigue recibiendo pedidos con la pantalla apagada (deja la notificación fija y, si Android lo pide, sin restricción de batería).' : 'Esta APK no trae el modo segundo plano: hay que recompilarla con el plugin.');
+          (okBg ? 'La app sigue recibiendo pedidos con la pantalla apagada (deja la notificación fija y, si Android lo pide, elige "Permitir" / sin restricción de batería). ' : ('No se pudo activar el segundo plano' + (segundoPlanoError ? ': ' + segundoPlanoError : ' (esta APK no lo trae: recompílala)') + '. ')) +
+          '[' + diagnosticoPlugins() + ']';
         if (okNoti) mostrarNotificacionSistema('Toto Tools', 'Avisos activados en este teléfono.');
         return;
       }
@@ -8559,8 +8604,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = EscanerBar
       const r = d.reporte || {};
       const pedidos = d.pedidos || [];
       document.getElementById('resumenMisPedidos').textContent = ' | ' + (r.ventas || 0) + (r.ventas === 1 ? ' venta' : ' ventas') + ' | neto ' + dineroPOS(r.netoTotal);
-      const sinEnviar = leerCola().filter(c => c.payload && c.payload.estado === 'cobrado' && !c.payload.autoservicio);
-      const firma = JSON.stringify([r, pedidos.map(p => [p.id, p.hora, p.totalCobrado, p.devuelto]), cacheDe || 0, pend.map(firmaMP), sinEnviar.map(c => [c.id, c.error || ''])]);
+      const firma = JSON.stringify([r, pedidos.map(p => [p.id, p.hora, p.totalCobrado, p.devuelto]), cacheDe || 0, pend.map(firmaMP)]);
       if (auto === true && firma === posUltimaFirma) return;
       posUltimaFirma = firma;
       posPedidosPorClave = {};
@@ -8593,19 +8637,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = EscanerBar
       const pendHtml = pend.length
         ? '<div style="font-size:12px; font-weight:700; color:#92400e; margin:2px 0 6px;">Pendientes de cobro (' + pend.length + ')</div>' + pend.map(renderMiPedido).join('')
         : '';
-      let sinEnviarHtml = '';
-      if (sinEnviar.length) {
-        const totSin = sinEnviar.reduce((a, c) => a + (Number(c.payload.totalCobrado) || 0), 0);
-        sinEnviarHtml = '<div style="font-size:12px; font-weight:700; color:#92400e; margin:2px 0 6px;">Ventas guardadas en este telefono, sin enviar a la PC (' + sinEnviar.length + ' | ' + dineroPOS(totSin) + ')</div>' +
-          sinEnviar.map(c => {
-            const pl = c.payload, hh = String(pl.horaVenta || '').slice(11, 16);
-            const lin = (pl.items || []).map(it => '<div><span>' + it.cantidad + ' x ' + escaparHtml(it.nombre) + '</span><span>$' + (it.precio * it.cantidad).toFixed(2) + '</span></div>').join('');
-            return '<div class="mp-card"><div class="mp-top"><span>' + (hh ? 'Hoy ' + hh : 'Sin enviar') + '</span><span class="mp-estado pendiente">' + (c.error ? 'NO SE ENVIO' : 'POR ENVIAR') + '</span></div>' +
-              '<div class="mp-total">' + dineroPOS(pl.totalCobrado) + ' - ' + escaparHtml(pl.metodoPago || 'Efectivo') + '</div>' +
-              '<div class="mp-items" style="display:block;">' + lin + (c.error ? '<div style="color:#991b1b;"><span>' + escaparHtml(c.error) + '</span><span></span></div>' : '') + '</div></div>';
-          }).join('');
-      }
-      cont.innerHTML = aviso + sinEnviarHtml + pendHtml + rep + lista + mas;
+      cont.innerHTML = aviso + pendHtml + rep + lista + mas;
     }
 
     function renderVentaPOS(p) {
@@ -10604,24 +10636,6 @@ while ($listener.IsListening) {
             if ($continuarPedido) {
             $items = @($data.items)
 
-            # Movil en MODO PUNTO DE VENTA (token valido para ese vendedor): sus ventas cobradas no pasan por
-            # "revisar" en la caja, y las hechas SIN CONEXION se aceptan aunque el stock de la PC ya no alcance
-            # (el producto ya se le entrego al cliente; el stock solo queda en 0).
-            $esPosMovil = $false
-            try { if ((-not $esAutoCli) -and ([string]$data.estado -eq "cobrado") -and (Pos-Token-Valido $request ([string]$data.vendedor))) { $esPosMovil = $true } } catch { $esPosMovil = $false }
-            $ventaOfflinePos = $false
-            try { $ventaOfflinePos = ($esPosMovil -and ($data.ventaOffline -eq $true)) } catch { $ventaOfflinePos = $false }
-            $horaVentaPos = ""
-            if ($esPosMovil) {
-                try {
-                    $hv = [string]$data.horaVenta
-                    $dtHv = [datetime]::MinValue
-                    if ($hv -match '^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$' -and [datetime]::TryParse($hv, [ref]$dtHv)) {
-                        if ($dtHv -le (Get-Date).AddMinutes(5) -and $dtHv -ge (Get-Date).AddDays(-3)) { $horaVentaPos = $dtHv.ToString("yyyy-MM-dd HH:mm:ss") }
-                    }
-                } catch { $horaVentaPos = "" }
-            }
-
             # --- Validar stock disponible antes de aceptar el pedido ---
             $erroresStock = New-Object System.Collections.ArrayList
             foreach ($it in $items) {
@@ -10629,7 +10643,7 @@ while ($listener.IsListening) {
                 $cantidadPedida = [double]$it.cantidad
                 if ([string]::IsNullOrWhiteSpace($skuItem)) { continue }
                 $prod = $global:catalogo | Where-Object { $_.sku -eq $skuItem } | Select-Object -First 1
-                if ((-not $ventaOfflinePos) -and $prod -and $prod.stock -ne $null -and $cantidadPedida -gt $prod.stock) {
+                if ($prod -and $prod.stock -ne $null -and $cantidadPedida -gt $prod.stock) {
                     [void]$erroresStock.Add("$($prod.nombre): solo quedan $($prod.stock)")
                 }
             }
@@ -10706,10 +10720,10 @@ while ($listener.IsListening) {
                     cambio             = $data.cambio
                     pagoEfectivo       = $pagoEfectivoInicial
                     pagoTransferencia  = $pagoTransferenciaInicial
-                    hora               = $(if ($horaVentaPos) { $horaVentaPos } else { (Get-Date).ToString("yyyy-MM-dd HH:mm:ss") })
+                    hora               = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
                     cobradoPor         = $(if ([string]$data.estado -eq "cobrado") { "vendedor" } else { "" })
-                    revisado           = $esPosMovil
-                    horaCobro          = $(if ([string]$data.estado -eq "cobrado") { $(if ($horaVentaPos) { $horaVentaPos } else { (Get-Date).ToString("yyyy-MM-dd HH:mm:ss") }) } else { "" })
+                    revisado           = $false
+                    horaCobro          = $(if ([string]$data.estado -eq "cobrado") { (Get-Date).ToString("yyyy-MM-dd HH:mm:ss") } else { "" })
                     origenAsignados    = $origenAsignados
                     nota               = $notaPedido
                 }
@@ -10799,9 +10813,7 @@ while ($listener.IsListening) {
                     $pedido | Add-Member -NotePropertyName cambio -NotePropertyValue ([math]::Round($montoRecibidoNuevo - $pedido.totalCobrado, 2)) -Force
                 }
                 $pedido | Add-Member -NotePropertyName cobradoPor -NotePropertyValue $(if ($cobroCaja) { "caja" } else { "vendedor" }) -Force
-                $cobroPosMovil = $false
-                try { if ((-not $cobroCaja) -and (Pos-Token-Valido $request ([string]$pedido.vendedor))) { $cobroPosMovil = $true } } catch { $cobroPosMovil = $false }
-                $pedido | Add-Member -NotePropertyName revisado -NotePropertyValue ([bool]($cobroCaja -or $cobroPosMovil)) -Force
+                $pedido | Add-Member -NotePropertyName revisado -NotePropertyValue ([bool]$cobroCaja) -Force
                 $pedido | Add-Member -NotePropertyName horaCobro -NotePropertyValue ((Get-Date).ToString("yyyy-MM-dd HH:mm:ss")) -Force
                 Guardar-Pedidos
                 Enviar-Respuesta -Context $context -Body (@{ ok = $true } | ConvertTo-Json) -ContentType "application/json; charset=utf-8"
