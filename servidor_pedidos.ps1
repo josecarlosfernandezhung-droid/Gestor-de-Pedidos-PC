@@ -2896,7 +2896,7 @@ $htmlPC = @'
     <h1>Panel de Pedidos - Toto Tools</h1>
     <div class="share">Vendedores conectan en: <b id="shareUrl">...</b></div>
     <button id="btnStockBajo" class="btn-toggle" style="font-size:15px; position:relative;" onclick="togglePanelStockBajo()" title="Productos con stock bajo">&#128276;<span id="badgeStockBajo" style="display:none; position:absolute; top:-6px; right:-6px; min-width:18px; height:18px; padding:0 4px; border-radius:9px; background:#ef4444; color:#fff; font-size:11px; font-weight:bold; align-items:center; justify-content:center;">0</span></button>
-    <button id="btnMenuPC" class="btn-toggle" style="font-size:15px;" onclick="abrirMenuPC()">&#9881; Ajustes</button>
+    <button id="btnMenuPC" class="btn-toggle" style="font-size:15px;" onclick="abrirMenuPC()" title="Atajo: F10 (F1 muestra todos los atajos)">&#9881; Ajustes (F10)</button>
   </header>
 
   <div class="catalogoInfo" id="catalogoInfo">Cargando catalogo...</div>
@@ -2904,7 +2904,7 @@ $htmlPC = @'
   <div class="toolbar">
     <label><input type="checkbox" id="soloPendientes" checked> Mostrar solo pendientes y por revisar</label>
     <span id="contadorRevisar"></span>
-    <button class="btn-nuevo-pedido" onclick="abrirNuevoPedido()">Nuevo pedido para vendedor</button>
+    <button class="btn-nuevo-pedido" onclick="abrirNuevoPedido()" title="Atajo: F2">Nuevo pedido para vendedor (F2)</button>
   </div>
 
   <div id="panelStockBajo" style="display:none; position:fixed; top:64px; right:16px; z-index:57; width:340px; max-width:92vw; max-height:70vh; overflow:auto; background:#1e293b; border:1px solid #334155; border-radius:12px; padding:12px; box-shadow:0 8px 24px rgba(0,0,0,0.5);">
@@ -2948,12 +2948,12 @@ $htmlPC = @'
         <button class="btn-toggle" style="width:100%; margin-top:8px;" onclick="imprimirTarjetaTermica()" title="Imprime en la termica el QR del WiFi y el QR del catalogo, uno debajo del otro">Imprimir WiFi + Catalogo en la termica</button>
       </div>
 
-      <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="window.open('/etiquetas', '_blank')">Etiquetas y códigos de barra</button>
-      <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="abrirCompras()">Lista de compras (reabastecer)</button>
-      <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="abrirDevolucion()">Ticket de devolución / garantía</button>
+      <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="window.open('/etiquetas', '_blank')">Etiquetas y códigos de barra (F4)</button>
+      <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="abrirCompras()">Lista de compras (reabastecer) (F6)</button>
+      <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="abrirDevolucion()">Ticket de devolución / garantía (F7)</button>
       <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="abrirPermisos()">Permisos de vendedores</button>
       <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="abrirRed()">Red / IP fija de la PC</button>
-      <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="window.open('/metricas', '_blank')">Ver metricas</button>
+      <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="window.open('/metricas', '_blank')">Ver metricas (F8)</button>
 
       <button class="btn-nuevo-pedido" style="width:100%; background:#0369a1; margin-bottom:10px;" onclick="cerrarMenuPC(); abrirPines();">PIN de vendedores</button>
 
@@ -4248,6 +4248,101 @@ $htmlPC = @'
     });
 
     document.getElementById('soloPendientes').addEventListener('change', cargarPedidos);
+
+    // ---- Atajos de teclado del Panel de la PC ----
+    // Sin botones ni ventanas nuevas: las teclas estan en las etiquetas de los botones que ya existian
+    // y F1 muestra la lista completa en el banner verde de arriba.
+    const ATAJOS_PC_AYUDA = 'ATAJOS: F2 Nuevo pedido | F3 Buscar producto | F4 Etiquetas | F6 Compras | F7 Devolucion | F8 Metricas | F9 Solo pendientes | F10 Ajustes | Alt+S Stock bajo | Alt+E Excel | Alt+P Permisos | Alt+V PIN vendedores | Alt+R Red | Alt+Q QR vendedor | Ctrl+Enter Enviar pedido | Esc Cerrar';
+    const PC_OVERLAYS = [
+      ['fotoOverlayNP', function () { cerrarFotoProductoNP(); }],
+      ['qrOverlay', function () { cerrarQRCliente(); }],
+      ['nuevoPedidoOverlay', function () { cerrarNuevoPedido(); }],
+      ['menuPCOverlay', function () { cerrarMenuPC(); }],
+      ['pinesOverlay', function () { cerrarPines(); }],
+      ['comprasOverlay', function () { cerrarCompras(); }],
+      ['devOverlay', function () { cerrarDevolucion(); }],
+      ['permOverlay', function () { cerrarPermisos(); }],
+      ['redOverlay', function () { var e = document.getElementById('redOverlay'); if (e) e.style.display = 'none'; }],
+      ['configOverlay', function () { cerrarConfig(); }]
+    ];
+    function pcVisible(id) { var e = document.getElementById(id); return !!e && e.style.display !== 'none' && getComputedStyle(e).display !== 'none'; }
+    function pcOverlayArriba() {
+      var mejor = null, zMejor = -1;
+      PC_OVERLAYS.forEach(function (o) {
+        if (!pcVisible(o[0])) return;
+        var z = parseInt(getComputedStyle(document.getElementById(o[0])).zIndex, 10) || 0;
+        if (z >= zMejor) { zMejor = z; mejor = o; }
+      });
+      return mejor;
+    }
+    function pcAtajo(fn) { try { fn(); } catch (err) {} }
+    document.addEventListener('keydown', function (e) {
+      if (e.isComposing) return;
+      var k = e.key, kl = (k || '').toLowerCase();
+      var npAbierto = pcVisible('nuevoPedidoOverlay');
+      var hecho = true;
+
+      if (k === 'Escape') {
+        var top = pcOverlayArriba();
+        if (top) top[1]();
+        else if (pcVisible('panelStockBajo')) togglePanelStockBajo();
+        else hecho = false;
+      } else if (k === 'F1') {
+        mostrarBanner(ATAJOS_PC_AYUDA, 14000);
+      } else if (e.ctrlKey && k === 'Enter') {
+        if (npAbierto) { var bEnv = document.getElementById('npBtnEnviar'); if (bEnv) bEnv.click(); } else hecho = false;
+      } else if (k === 'F2') {
+        if (npAbierto) { var bq = document.getElementById('npBuscador'); if (bq) bq.focus(); }
+        else if (!pcOverlayArriba()) abrirNuevoPedido();
+        else hecho = false;
+      } else if (k === 'F3') {
+        if (!npAbierto && !pcOverlayArriba()) abrirNuevoPedido();
+        if (pcVisible('nuevoPedidoOverlay')) setTimeout(function () { var b = document.getElementById('npBuscador'); if (b) { b.focus(); b.select(); } }, 60);
+        else hecho = false;
+      } else if (npAbierto) {
+        // con un pedido a medio armar no se abre nada mas (para no perderlo): solo Esc, F2, F3, Ctrl+Enter
+        hecho = false;
+      } else if (k === 'F4') {
+        window.open('/etiquetas', '_blank');
+      } else if (k === 'F6') {
+        pcAtajo(abrirCompras);
+      } else if (k === 'F7') {
+        pcAtajo(abrirDevolucion);
+      } else if (k === 'F8') {
+        window.open('/metricas', '_blank');
+      } else if (k === 'F9') {
+        var chk = document.getElementById('soloPendientes');
+        chk.click();
+        mostrarBanner(chk.checked ? 'Mostrando solo pendientes y por revisar' : 'Mostrando todos los pedidos', 2500);
+      } else if (k === 'F10') {
+        if (pcVisible('menuPCOverlay')) cerrarMenuPC(); else if (!pcOverlayArriba()) abrirMenuPC(); else hecho = false;
+      } else if (e.altKey && !e.ctrlKey && !e.metaKey && kl === 's') {
+        togglePanelStockBajo();
+      } else if (e.altKey && !e.ctrlKey && !e.metaKey && kl === 'e') {
+        cerrarMenuPC(); abrirConfig();
+      } else if (e.altKey && !e.ctrlKey && !e.metaKey && kl === 'p') {
+        pcAtajo(abrirPermisos);
+      } else if (e.altKey && !e.ctrlKey && !e.metaKey && kl === 'v') {
+        cerrarMenuPC(); abrirPines();
+      } else if (e.altKey && !e.ctrlKey && !e.metaKey && kl === 'r') {
+        pcAtajo(abrirRed);
+      } else if (e.altKey && !e.ctrlKey && !e.metaKey && kl === 'q') {
+        cerrarMenuPC(); pcAtajo(mostrarQRVendedor);
+      } else {
+        hecho = false;
+      }
+      if (hecho) { e.preventDefault(); e.stopPropagation(); }
+    }, true);
+    // En el buscador del pedido: Enter agrega el primer resultado y deja el texto seleccionado para el siguiente.
+    (function () {
+      var b = document.getElementById('npBuscador');
+      if (!b) return;
+      b.addEventListener('keydown', function (e) {
+        if (e.key !== 'Enter' || e.ctrlKey) return;
+        var primero = document.querySelector('#npResultados .np-resultado button');
+        if (primero) { e.preventDefault(); primero.click(); b.select(); }
+      });
+    })();
     cargarPedidos();
     cargarEstadoCatalogo();
     cargarConfigApp();
@@ -6989,7 +7084,7 @@ var EscanerBarras = (function () {
 if (typeof module !== 'undefined' && module.exports) module.exports = EscanerBarras;
 
     let escanerAbierto = false, escanerStream = null, escanerBucle = null, escanerDetector = null, escanerAudio = null;
-    let escanerAgregados = 0, escanerUltimoCodigo = '', escanerUltimoMs = 0, escanerCv = null;
+    let escanerAgregados = 0, escanerUltimoCodigo = '', escanerUltimoMs = 0, escanerCv = null, escanerTick = 0;
 
     function escanerEstado(texto, ok) {
       const e = document.getElementById('escanerEstado');
@@ -7069,6 +7164,12 @@ if (typeof module !== 'undefined' && module.exports) module.exports = EscanerBar
         const ml = pluginNativo('BarcodeScanner');                       // @capacitor-mlkit/barcode-scanning
         if (ml && typeof ml.scan === 'function') {
           try { if (typeof ml.requestPermissions === 'function') await ml.requestPermissions(); } catch (e) {}
+          try {
+            if (typeof ml.isGoogleBarcodeScannerModuleAvailable === 'function') {
+              const mod = await ml.isGoogleBarcodeScannerModuleAvailable();
+              if (mod && mod.available === false && typeof ml.installGoogleBarcodeScannerModule === 'function') { await ml.installGoogleBarcodeScannerModule(); return undefined; }
+            }
+          } catch (e) {}
           const r = await ml.scan();
           const b = r && r.barcodes && r.barcodes[0];
           return b ? (String(b.rawValue || b.displayValue || '') || null) : null;
@@ -7123,8 +7224,16 @@ if (typeof module !== 'undefined' && module.exports) module.exports = EscanerBar
       const md = navigator.mediaDevices;
       if (!md || !md.getUserMedia || window.isSecureContext === false) return false;   // pagina http://IP: la camara en vivo no se permite
       try {
-        escanerStream = await md.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
-      } catch (e) { return false; }
+        escanerStream = await md.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false });
+      } catch (e) {
+        try { escanerStream = await md.getUserMedia({ video: true, audio: false }); } catch (e2) { return false; }
+      }
+      try {   // enfoque continuo: sin esto el video queda borroso y no lee
+        const tr = escanerStream.getVideoTracks()[0];
+        const caps = (tr && tr.getCapabilities) ? tr.getCapabilities() : {};
+        if (caps.focusMode && caps.focusMode.indexOf('continuous') >= 0) await tr.applyConstraints({ advanced: [{ focusMode: 'continuous' }] });
+      } catch (e) {}
+      escanerTick = 0;
       const v = document.getElementById('escanerVideo');
       v.srcObject = escanerStream; v.style.display = 'block';
       document.getElementById('escanerMira').style.display = 'block';
@@ -7136,25 +7245,44 @@ if (typeof module !== 'undefined' && module.exports) module.exports = EscanerBar
       escanerCiclo();
       return true;
     }
-    function escanerCiclo() {
-      if (!escanerAbierto || !escanerStream) return;
-      const v = document.getElementById('escanerVideo');
-      const siguiente = function () { if (escanerAbierto && escanerStream) escanerBucle = setTimeout(escanerCiclo, 140); };
-      if (!v.videoWidth) { siguiente(); return; }
-      if (escanerDetector) {
-        escanerDetector.detect(v).then(function (r) { if (r && r.length) escanerProcesar(r[0].rawValue, true); }).catch(function () {}).then(siguiente);
-        return;
-      }
-      try {
-        const cv = escanerCanvas();
-        const ancho = Math.min(960, v.videoWidth), alto = Math.round(v.videoHeight * ancho / v.videoWidth);
+    function escanerLeerCuadro(v) {
+      // Alterna: (a) banda central a casi toda la resolucion de la camara (la que mas lee, codigos horizontales)
+      // y (b) cuadro completo reducido (codigos verticales o fuera del centro).
+      const cv = escanerCanvas();
+      const sw = v.videoWidth, sh = v.videoHeight;
+      escanerTick++;
+      let r = null;
+      if (escanerTick % 3 !== 0) {
+        const e = Math.min(1, 1500 / sw);
+        const sy = Math.round(sh * 0.2), sAlto = Math.round(sh * 0.6);
+        cv.width = Math.max(1, Math.round(sw * e)); cv.height = Math.max(1, Math.round(sAlto * e));
+        const cx = cv.getContext('2d', { willReadFrequently: true });
+        cx.drawImage(v, 0, sy, sw, sAlto, 0, 0, cv.width, cv.height);
+        r = EscanerBarras.decodificarPixeles(cx.getImageData(0, 0, cv.width, cv.height).data, cv.width, cv.height, { lineas: 26 });
+      } else {
+        const ancho = Math.min(1100, sw), alto = Math.round(sh * ancho / sw);
         cv.width = ancho; cv.height = alto;
         const cx = cv.getContext('2d', { willReadFrequently: true });
         cx.drawImage(v, 0, 0, ancho, alto);
-        const img = cx.getImageData(0, 0, ancho, alto);
-        const r = EscanerBarras.decodificarPixeles(img.data, ancho, alto, { lineas: 14 });
-        if (r) escanerProcesar(r.texto, true);
-      } catch (e) {}
+        r = EscanerBarras.decodificarPixeles(cx.getImageData(0, 0, ancho, alto).data, ancho, alto, { lineas: 16 });
+      }
+      return r ? r.texto : null;
+    }
+    function escanerCiclo() {
+      if (!escanerAbierto || !escanerStream) return;
+      const v = document.getElementById('escanerVideo');
+      const siguiente = function () { if (escanerAbierto && escanerStream) escanerBucle = setTimeout(escanerCiclo, 90); };
+      if (!v.videoWidth) { siguiente(); return; }
+      const porPixeles = function () { try { return escanerLeerCuadro(v); } catch (e) { return null; } };
+      if (escanerDetector) {
+        escanerDetector.detect(v)
+          .then(function (r) { return (r && r.length) ? r[0].rawValue : null; })
+          .catch(function () { return null; })
+          .then(function (t) { if (!t) t = porPixeles(); if (t) escanerProcesar(t, true); siguiente(); });
+        return;
+      }
+      const t = porPixeles();
+      if (t) escanerProcesar(t, true);
       siguiente();
     }
     function escanerCanvas() { if (!escanerCv) escanerCv = document.createElement('canvas'); return escanerCv; }
@@ -7476,7 +7604,8 @@ if (typeof module !== 'undefined' && module.exports) module.exports = EscanerBar
         pagoEfectivo: pagoEfectivo,
         pagoTransferencia: pagoTransferencia,
         origenAsignados: origenesAsignadosCarrito,
-        nota: autoservicioActivo ? '' : ((document.getElementById('notaPedido').value || '').trim())
+        nota: autoservicioActivo ? '' : ((document.getElementById('notaPedido').value || '').trim()),
+        horaVenta: (function () { const d = new Date(); return hoyStr() + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0') + ':' + String(d.getSeconds()).padStart(2, '0'); })()
       };
 
       try {
@@ -7521,9 +7650,11 @@ if (typeof module !== 'undefined' && module.exports) module.exports = EscanerBar
         if (autoservicioActivo) {
           mostrarMensaje('Sin conexion: no se pudo enviar el pedido. Revisa tu WiFi e intenta de nuevo.', false);
         } else {
+          if (payload.estado === 'cobrado' && posActivo()) payload.ventaOffline = true;   // la PC la acepta aunque el stock ya no alcance
           agregarACola(payload);
           try { document.getElementById('notaPedido').value = ''; } catch (e) {}
-          mostrarMensaje('Sin conexion: el pedido se guardo en el telefono y se enviara solo cuando vuelva la red.', true);
+          mostrarMensaje(payload.ventaOffline ? 'Sin conexion: la venta quedo guardada en el telefono y se enviara sola a la PC cuando vuelva la red.' : 'Sin conexion: el pedido se guardo en el telefono y se enviara solo cuando vuelva la red.', true);
+          if (payload.ventaOffline) { try { posUltimaFirma = null; cargarVentasPOS(); } catch (e) {} }
           volverAEfectivo();
         }
         carrito = [];
@@ -8134,6 +8265,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = EscanerBar
         if (!hayNuevo) return;
         renderAsignados();
         beepAsignado();
+        if (document.hidden) { try { mostrarNotificacionSistema('Pedido nuevo', 'Hay un pedido nuevo de la caja para ti.'); } catch (e) {} }
         document.getElementById('bannerAsignado').style.display = 'block';
         mostrarMensaje('Hay un pedido nuevo: revisalo abajo, en "Pedidos que te armo la caja".', true);
       } catch (e) {}
@@ -8168,7 +8300,63 @@ if (typeof module !== 'undefined' && module.exports) module.exports = EscanerBar
     setInterval(revisarAsignadosTomadosPorOtro, 5000);
 
     // ---- Avisos push locales: la caja avisa de precios, stock, anulaciones y permisos ----
+    // ---- APK: avisos nativos y trabajo en segundo plano (pantalla apagada) ----
+    // Usan plugins de Capacitor (@capacitor/local-notifications y @anuradev/capacitor-background-mode).
+    // Si el plugin no esta instalado, no pasa nada: se usa lo de antes (navegador).
+    let canalNotiListo = false;
+    async function prepararNotificacionesNativas() {
+      const ln = pluginNativo('LocalNotifications');
+      if (!ln) return false;
+      try {
+        let perm = await ln.checkPermissions();
+        if (!perm || perm.display !== 'granted') perm = await ln.requestPermissions();
+        if (!perm || perm.display !== 'granted') return false;
+        if (!canalNotiListo) {
+          try { await ln.createChannel({ id: 'pedidos', name: 'Pedidos y avisos', description: 'Pedidos nuevos, mensajes y avisos de la caja', importance: 5, visibility: 1, vibration: true, lights: true }); } catch (e) {}
+          canalNotiListo = true;
+        }
+        return true;
+      } catch (e) { return false; }
+    }
+    let segundoPlanoActivo = false;
+    async function activarSegundoPlano() {
+      const bg = pluginNativo('BackgroundMode');
+      if (!bg) return false;
+      try {
+        if (typeof bg.requestNotificationsPermission === 'function') { try { await bg.requestNotificationsPermission(); } catch (e) {} }
+        if (typeof bg.setSettings === 'function') {
+          try { await bg.setSettings({ title: 'Toto Tools', text: 'Esperando pedidos y avisos de la caja', subText: 'Conectado', channelName: 'Toto Tools en segundo plano', channelDescription: 'Mantiene la app despierta para recibir pedidos', silent: false, hidden: false, resume: true }); } catch (e) {}
+        }
+        if (typeof bg.enable === 'function') await bg.enable();
+        if (typeof bg.disableWebViewOptimizations === 'function') { try { await bg.disableWebViewOptimizations(); } catch (e) {} }
+        segundoPlanoActivo = true;
+        return true;
+      } catch (e) { return false; }
+    }
+    async function pedirSinAhorroBateria() {
+      // Android puede dormir la app aunque este en segundo plano; esto abre la pantalla para dejarla sin restriccion.
+      const bg = pluginNativo('BackgroundMode');
+      if (!bg) return;
+      for (const nombre of ['requestDisableBatteryOptimizations', 'disableBatteryOptimizations']) {
+        if (typeof bg[nombre] === 'function') { try { await bg[nombre](); } catch (e) {} break; }
+      }
+    }
+    setTimeout(function () {
+      const cap = window.Capacitor;
+      const enApp = !!(cap && (typeof cap.isNativePlatform === 'function' ? cap.isNativePlatform() : cap.platform === 'android'));
+      if (!enApp) return;
+      prepararNotificacionesNativas();
+      activarSegundoPlano();
+    }, 2500);
+
     async function mostrarNotificacionSistema(titulo, cuerpo) {
+      try {
+        const ln = pluginNativo('LocalNotifications');
+        if (ln && await prepararNotificacionesNativas()) {
+          await ln.schedule({ notifications: [{ id: Math.floor(Date.now() % 2000000000), title: String(titulo), body: String(cuerpo), channelId: 'pedidos' }] });
+          return;
+        }
+      } catch (e) {}
       try {
         if (!('Notification' in window) || Notification.permission !== 'granted') return;
         const opts = { body: cuerpo, icon: '/icon-192.png', badge: '/icon-192.png', tag: 'tt-' + Date.now(), vibrate: [200, 100, 200] };
@@ -8180,6 +8368,15 @@ if (typeof module !== 'undefined' && module.exports) module.exports = EscanerBar
     }
     async function activarAvisosTelefono() {
       const st = document.getElementById('estadoAvisosTel');
+      if (pluginNativo('LocalNotifications') || pluginNativo('BackgroundMode')) {
+        const okNoti = await prepararNotificacionesNativas();
+        const okBg = await activarSegundoPlano();
+        if (okBg) await pedirSinAhorroBateria();
+        st.textContent = (okNoti ? 'Avisos del teléfono activados. ' : 'Falta permitir las notificaciones para esta app en los ajustes de Android. ') +
+          (okBg ? 'La app sigue recibiendo pedidos con la pantalla apagada (deja la notificación fija y, si Android lo pide, sin restricción de batería).' : 'Esta APK no trae el modo segundo plano: hay que recompilarla con el plugin.');
+        if (okNoti) mostrarNotificacionSistema('Toto Tools', 'Avisos activados en este teléfono.');
+        return;
+      }
       if (!('Notification' in window)) {
         st.textContent = 'Este navegador no permite avisos del sistema. Igual te avisaremos con sonido y vibración dentro de la app.';
         return;
@@ -8362,7 +8559,8 @@ if (typeof module !== 'undefined' && module.exports) module.exports = EscanerBar
       const r = d.reporte || {};
       const pedidos = d.pedidos || [];
       document.getElementById('resumenMisPedidos').textContent = ' | ' + (r.ventas || 0) + (r.ventas === 1 ? ' venta' : ' ventas') + ' | neto ' + dineroPOS(r.netoTotal);
-      const firma = JSON.stringify([r, pedidos.map(p => [p.id, p.hora, p.totalCobrado, p.devuelto]), cacheDe || 0, pend.map(firmaMP)]);
+      const sinEnviar = leerCola().filter(c => c.payload && c.payload.estado === 'cobrado' && !c.payload.autoservicio);
+      const firma = JSON.stringify([r, pedidos.map(p => [p.id, p.hora, p.totalCobrado, p.devuelto]), cacheDe || 0, pend.map(firmaMP), sinEnviar.map(c => [c.id, c.error || ''])]);
       if (auto === true && firma === posUltimaFirma) return;
       posUltimaFirma = firma;
       posPedidosPorClave = {};
@@ -8395,7 +8593,19 @@ if (typeof module !== 'undefined' && module.exports) module.exports = EscanerBar
       const pendHtml = pend.length
         ? '<div style="font-size:12px; font-weight:700; color:#92400e; margin:2px 0 6px;">Pendientes de cobro (' + pend.length + ')</div>' + pend.map(renderMiPedido).join('')
         : '';
-      cont.innerHTML = aviso + pendHtml + rep + lista + mas;
+      let sinEnviarHtml = '';
+      if (sinEnviar.length) {
+        const totSin = sinEnviar.reduce((a, c) => a + (Number(c.payload.totalCobrado) || 0), 0);
+        sinEnviarHtml = '<div style="font-size:12px; font-weight:700; color:#92400e; margin:2px 0 6px;">Ventas guardadas en este telefono, sin enviar a la PC (' + sinEnviar.length + ' | ' + dineroPOS(totSin) + ')</div>' +
+          sinEnviar.map(c => {
+            const pl = c.payload, hh = String(pl.horaVenta || '').slice(11, 16);
+            const lin = (pl.items || []).map(it => '<div><span>' + it.cantidad + ' x ' + escaparHtml(it.nombre) + '</span><span>$' + (it.precio * it.cantidad).toFixed(2) + '</span></div>').join('');
+            return '<div class="mp-card"><div class="mp-top"><span>' + (hh ? 'Hoy ' + hh : 'Sin enviar') + '</span><span class="mp-estado pendiente">' + (c.error ? 'NO SE ENVIO' : 'POR ENVIAR') + '</span></div>' +
+              '<div class="mp-total">' + dineroPOS(pl.totalCobrado) + ' - ' + escaparHtml(pl.metodoPago || 'Efectivo') + '</div>' +
+              '<div class="mp-items" style="display:block;">' + lin + (c.error ? '<div style="color:#991b1b;"><span>' + escaparHtml(c.error) + '</span><span></span></div>' : '') + '</div></div>';
+          }).join('');
+      }
+      cont.innerHTML = aviso + sinEnviarHtml + pendHtml + rep + lista + mas;
     }
 
     function renderVentaPOS(p) {
@@ -10394,6 +10604,24 @@ while ($listener.IsListening) {
             if ($continuarPedido) {
             $items = @($data.items)
 
+            # Movil en MODO PUNTO DE VENTA (token valido para ese vendedor): sus ventas cobradas no pasan por
+            # "revisar" en la caja, y las hechas SIN CONEXION se aceptan aunque el stock de la PC ya no alcance
+            # (el producto ya se le entrego al cliente; el stock solo queda en 0).
+            $esPosMovil = $false
+            try { if ((-not $esAutoCli) -and ([string]$data.estado -eq "cobrado") -and (Pos-Token-Valido $request ([string]$data.vendedor))) { $esPosMovil = $true } } catch { $esPosMovil = $false }
+            $ventaOfflinePos = $false
+            try { $ventaOfflinePos = ($esPosMovil -and ($data.ventaOffline -eq $true)) } catch { $ventaOfflinePos = $false }
+            $horaVentaPos = ""
+            if ($esPosMovil) {
+                try {
+                    $hv = [string]$data.horaVenta
+                    $dtHv = [datetime]::MinValue
+                    if ($hv -match '^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$' -and [datetime]::TryParse($hv, [ref]$dtHv)) {
+                        if ($dtHv -le (Get-Date).AddMinutes(5) -and $dtHv -ge (Get-Date).AddDays(-3)) { $horaVentaPos = $dtHv.ToString("yyyy-MM-dd HH:mm:ss") }
+                    }
+                } catch { $horaVentaPos = "" }
+            }
+
             # --- Validar stock disponible antes de aceptar el pedido ---
             $erroresStock = New-Object System.Collections.ArrayList
             foreach ($it in $items) {
@@ -10401,7 +10629,7 @@ while ($listener.IsListening) {
                 $cantidadPedida = [double]$it.cantidad
                 if ([string]::IsNullOrWhiteSpace($skuItem)) { continue }
                 $prod = $global:catalogo | Where-Object { $_.sku -eq $skuItem } | Select-Object -First 1
-                if ($prod -and $prod.stock -ne $null -and $cantidadPedida -gt $prod.stock) {
+                if ((-not $ventaOfflinePos) -and $prod -and $prod.stock -ne $null -and $cantidadPedida -gt $prod.stock) {
                     [void]$erroresStock.Add("$($prod.nombre): solo quedan $($prod.stock)")
                 }
             }
@@ -10478,10 +10706,10 @@ while ($listener.IsListening) {
                     cambio             = $data.cambio
                     pagoEfectivo       = $pagoEfectivoInicial
                     pagoTransferencia  = $pagoTransferenciaInicial
-                    hora               = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+                    hora               = $(if ($horaVentaPos) { $horaVentaPos } else { (Get-Date).ToString("yyyy-MM-dd HH:mm:ss") })
                     cobradoPor         = $(if ([string]$data.estado -eq "cobrado") { "vendedor" } else { "" })
-                    revisado           = $false
-                    horaCobro          = $(if ([string]$data.estado -eq "cobrado") { (Get-Date).ToString("yyyy-MM-dd HH:mm:ss") } else { "" })
+                    revisado           = $esPosMovil
+                    horaCobro          = $(if ([string]$data.estado -eq "cobrado") { $(if ($horaVentaPos) { $horaVentaPos } else { (Get-Date).ToString("yyyy-MM-dd HH:mm:ss") }) } else { "" })
                     origenAsignados    = $origenAsignados
                     nota               = $notaPedido
                 }
@@ -10571,7 +10799,9 @@ while ($listener.IsListening) {
                     $pedido | Add-Member -NotePropertyName cambio -NotePropertyValue ([math]::Round($montoRecibidoNuevo - $pedido.totalCobrado, 2)) -Force
                 }
                 $pedido | Add-Member -NotePropertyName cobradoPor -NotePropertyValue $(if ($cobroCaja) { "caja" } else { "vendedor" }) -Force
-                $pedido | Add-Member -NotePropertyName revisado -NotePropertyValue ([bool]$cobroCaja) -Force
+                $cobroPosMovil = $false
+                try { if ((-not $cobroCaja) -and (Pos-Token-Valido $request ([string]$pedido.vendedor))) { $cobroPosMovil = $true } } catch { $cobroPosMovil = $false }
+                $pedido | Add-Member -NotePropertyName revisado -NotePropertyValue ([bool]($cobroCaja -or $cobroPosMovil)) -Force
                 $pedido | Add-Member -NotePropertyName horaCobro -NotePropertyValue ((Get-Date).ToString("yyyy-MM-dd HH:mm:ss")) -Force
                 Guardar-Pedidos
                 Enviar-Respuesta -Context $context -Body (@{ ok = $true } | ConvertTo-Json) -ContentType "application/json; charset=utf-8"
