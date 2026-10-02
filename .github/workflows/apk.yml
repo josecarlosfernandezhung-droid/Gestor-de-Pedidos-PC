@@ -3,19 +3,19 @@ on:
   workflow_dispatch:
 jobs:
   apk:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: 20 }
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with: { distribution: temurin, java-version: 17 }
       - name: Preparar la app del vendedor
         run: |
           python3 build_www.py
           npm init -y
           npm install @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6
-          npm install @capacitor/filesystem@6 @capacitor/share@6 @capacitor-mlkit/barcode-scanning@6
+          npm install @capacitor/filesystem@6 @capacitor/share@6
           # Avisos nativos: si no se puede instalar, la APK se arma igual (sin esa funcion)
           npm install @capacitor/local-notifications@6 || echo "AVISO: sin local-notifications"
           # El segundo plano ya NO usa plugin de terceros: es un plugin propio (TotoBg) que se escribe mas abajo
@@ -26,21 +26,13 @@ jobs:
           JSON
           npx cap add android
           sed -i 's/<application/<application android:usesCleartextTraffic="true"/' android/app/src/main/AndroidManifest.xml
-          # ML Kit (escaner nativo) necesita minSdk 23
-          sed -i -E 's/minSdkVersion = [0-9]+/minSdkVersion = 23/' android/variables.gradle
-          # Permiso de CAMARA (foto/escaner del codigo de barras) + modulo del escaner de Google
+          # Permisos del segundo plano y avisos
           python3 - <<'PY'
           p = 'android/app/src/main/AndroidManifest.xml'
           s = open(p, encoding='utf-8').read()
           for perm in ['POST_NOTIFICATIONS', 'FOREGROUND_SERVICE', 'FOREGROUND_SERVICE_DATA_SYNC', 'FOREGROUND_SERVICE_SPECIAL_USE', 'WAKE_LOCK', 'REQUEST_IGNORE_BATTERY_OPTIMIZATIONS', 'VIBRATE']:
               if 'android.permission.' + perm not in s:
                   s = s.replace('<application', '<uses-permission android:name="android.permission.' + perm + '" />\n    <application', 1)
-          if 'android.permission.CAMERA' not in s:
-              s = s.replace('<application', '<uses-permission android:name="android.permission.CAMERA" />\n    <uses-feature android:name="android.hardware.camera" android:required="false" />\n    <application', 1)
-          if 'com.google.mlkit.vision.DEPENDENCIES' not in s:
-              i = s.index('<application')
-              j = s.index('>', i) + 1
-              s = s[:j] + '\n        <meta-data android:name="com.google.mlkit.vision.DEPENDENCIES" android:value="barcode_ui"/>' + s[j:]
           if 'TotoBgService' not in s:
               servicio = ('\n        <service android:name=".TotoBgService" android:exported="false" android:foregroundServiceType="specialUse">'
                           '\n            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="Mantiene la conexion con la caja para recibir pedidos y avisos"/>'
@@ -261,7 +253,6 @@ jobs:
           npx cap sync android
           echo "=== Plugins registrados ==="
           cat android/app/src/main/assets/capacitor.plugins.json
-          grep -q "BarcodeScanner" android/app/src/main/assets/capacitor.plugins.json || { echo "ERROR: el plugin del escaner no quedo instalado"; exit 1; }
           python3 -m pip install --quiet pillow
           python3 - <<'PY'
           from PIL import Image
