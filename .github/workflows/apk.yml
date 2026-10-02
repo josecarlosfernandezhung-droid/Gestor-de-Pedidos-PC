@@ -16,9 +16,9 @@ jobs:
           npm init -y
           npm install @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6
           npm install @capacitor/filesystem@6 @capacitor/share@6 @capacitor-mlkit/barcode-scanning@6
-          # Avisos nativos y segundo plano: si alguno no se puede instalar, la APK se arma igual (sin esa funcion)
+          # Avisos nativos: si no se puede instalar, la APK se arma igual (sin esa funcion)
           npm install @capacitor/local-notifications@6 || echo "AVISO: sin local-notifications"
-          npm install @anuradev/capacitor-background-mode@6 || echo "AVISO: sin background-mode"
+          # El segundo plano ya NO usa plugin de terceros: es un plugin propio (TotoBg) que se escribe mas abajo
           cat > capacitor.config.json <<'JSON'
           {"appId":"com.totools.vendedor","appName":"Toto Vendedor","webDir":"www",
            "server":{"androidScheme":"http","cleartext":true},
@@ -32,7 +32,7 @@ jobs:
           python3 - <<'PY'
           p = 'android/app/src/main/AndroidManifest.xml'
           s = open(p, encoding='utf-8').read()
-          for perm in ['POST_NOTIFICATIONS', 'FOREGROUND_SERVICE', 'FOREGROUND_SERVICE_DATA_SYNC', 'WAKE_LOCK', 'REQUEST_IGNORE_BATTERY_OPTIMIZATIONS', 'VIBRATE']:
+          for perm in ['POST_NOTIFICATIONS', 'FOREGROUND_SERVICE', 'FOREGROUND_SERVICE_DATA_SYNC', 'FOREGROUND_SERVICE_SPECIAL_USE', 'WAKE_LOCK', 'REQUEST_IGNORE_BATTERY_OPTIMIZATIONS', 'VIBRATE']:
               if 'android.permission.' + perm not in s:
                   s = s.replace('<application', '<uses-permission android:name="android.permission.' + perm + '" />\n    <application', 1)
           if 'android.permission.CAMERA' not in s:
@@ -41,9 +41,227 @@ jobs:
               i = s.index('<application')
               j = s.index('>', i) + 1
               s = s[:j] + '\n        <meta-data android:name="com.google.mlkit.vision.DEPENDENCIES" android:value="barcode_ui"/>' + s[j:]
+          if 'TotoBgService' not in s:
+              servicio = ('\n        <service android:name=".TotoBgService" android:exported="false" android:foregroundServiceType="specialUse">'
+                          '\n            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="Mantiene la conexion con la caja para recibir pedidos y avisos"/>'
+                          '\n        </service>\n    ')
+              s = s.replace('</application>', servicio + '</application>', 1)
           open(p, 'w', encoding='utf-8').write(s)
           PY
+          # Plugin propio de segundo plano (servicio en primer plano + wakelock + WebView despierto)
+          mkdir -p android/app/src/main/java/com/totools/vendedor
+          cat > android/app/src/main/java/com/totools/vendedor/TotoBgService.java <<'JAVA'
+          package com.totools.vendedor;
+
+          import android.app.Notification;
+          import android.app.NotificationChannel;
+          import android.app.NotificationManager;
+          import android.app.PendingIntent;
+          import android.app.Service;
+          import android.content.Intent;
+          import android.content.pm.ServiceInfo;
+          import android.net.wifi.WifiManager;
+          import android.os.Build;
+          import android.os.IBinder;
+          import android.os.PowerManager;
+          import androidx.core.app.NotificationCompat;
+
+          public class TotoBgService extends Service {
+              static final String CANAL = "toto_segundo_plano";
+              static final int ID = 7731;
+              private PowerManager.WakeLock wl;
+              private WifiManager.WifiLock wifi;
+
+              @Override
+              public IBinder onBind(Intent i) { return null; }
+
+              @Override
+              public int onStartCommand(Intent intent, int flags, int startId) {
+                  String titulo = "Toto Tools";
+                  String texto = "Esperando pedidos y avisos de la caja";
+                  if (intent != null) {
+                      if (intent.getStringExtra("title") != null) titulo = intent.getStringExtra("title");
+                      if (intent.getStringExtra("text") != null) texto = intent.getStringExtra("text");
+                  }
+                  try {
+                      if (Build.VERSION.SDK_INT >= 26) {
+                          NotificationChannel c = new NotificationChannel(CANAL, "Toto Tools en segundo plano", NotificationManager.IMPORTANCE_LOW);
+                          c.setDescription("Mantiene la app despierta para recibir pedidos");
+                          NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+                          if (nm != null) nm.createNotificationChannel(c);
+                      }
+                      Intent abrir = getPackageManager().getLaunchIntentForPackage(getPackageName());
+                      PendingIntent pi = PendingIntent.getActivity(this, 0, abrir, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+                      Notification n = new NotificationCompat.Builder(this, CANAL)
+                          .setContentTitle(titulo)
+                          .setContentText(texto)
+                          .setSmallIcon(android.R.drawable.stat_notify_sync)
+                          .setOngoing(true)
+                          .setContentIntent(pi)
+                          .setCategory(NotificationCompat.CATEGORY_SERVICE)
+                          .setPriority(NotificationCompat.PRIORITY_LOW)
+                          .build();
+                      if (Build.VERSION.SDK_INT >= 34) {
+                          startForeground(ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
+                      } else {
+                          startForeground(ID, n);
+                      }
+                  } catch (Throwable t) {
+                      stopSelf();
+                      return START_NOT_STICKY;
+                  }
+                  try {
+                      PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+                      if (wl == null && pm != null) {
+                          wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "TotoTools:bg");
+                          wl.setReferenceCounted(false);
+                      }
+                      if (wl != null && !wl.isHeld()) wl.acquire();
+                  } catch (Throwable t) { }
+                  try {
+                      WifiManager wm = (WifiManager) getApplicationContext().getSystemService(WIFI_SERVICE);
+                      if (wifi == null && wm != null) {
+                          wifi = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "TotoTools:wifi");
+                          wifi.setReferenceCounted(false);
+                      }
+                      if (wifi != null && !wifi.isHeld()) wifi.acquire();
+                  } catch (Throwable t) { }
+                  return START_STICKY;
+              }
+
+              @Override
+              public void onDestroy() {
+                  try { if (wl != null && wl.isHeld()) wl.release(); } catch (Throwable t) { }
+                  try { if (wifi != null && wifi.isHeld()) wifi.release(); } catch (Throwable t) { }
+                  super.onDestroy();
+              }
+          }
+          JAVA
+          cat > android/app/src/main/java/com/totools/vendedor/TotoBgPlugin.java <<'JAVA'
+          package com.totools.vendedor;
+
+          import android.content.Context;
+          import android.content.Intent;
+          import android.net.Uri;
+          import android.os.Handler;
+          import android.os.Looper;
+          import android.os.PowerManager;
+          import android.provider.Settings;
+          import android.view.View;
+          import android.webkit.WebView;
+          import androidx.core.content.ContextCompat;
+          import com.getcapacitor.JSObject;
+          import com.getcapacitor.Plugin;
+          import com.getcapacitor.PluginCall;
+          import com.getcapacitor.PluginMethod;
+          import com.getcapacitor.annotation.CapacitorPlugin;
+
+          @CapacitorPlugin(name = "TotoBg")
+          public class TotoBgPlugin extends Plugin {
+              private final Handler h = new Handler(Looper.getMainLooper());
+              private boolean activo = false;
+              private boolean enSegundoPlano = false;
+
+              // Mientras la app esta en segundo plano, mantiene el WebView "visible" para que Android
+              // no le congele los temporizadores (asi sigue consultando pedidos con la pantalla apagada).
+              private final Runnable mantener = new Runnable() {
+                  @Override
+                  public void run() {
+                      if (!activo || !enSegundoPlano) return;
+                      try {
+                          WebView w = getBridge().getWebView();
+                          w.resumeTimers();
+                          w.onResume();
+                          w.dispatchWindowVisibilityChanged(View.VISIBLE);
+                      } catch (Throwable t) { }
+                      h.postDelayed(this, 8000);
+                  }
+              };
+
+              @Override
+              protected void handleOnPause() {
+                  enSegundoPlano = true;
+                  if (activo) { h.removeCallbacks(mantener); h.postDelayed(mantener, 500); }
+              }
+
+              @Override
+              protected void handleOnResume() {
+                  enSegundoPlano = false;
+                  h.removeCallbacks(mantener);
+              }
+
+              @PluginMethod
+              public void start(PluginCall call) {
+                  try {
+                      Intent i = new Intent(getContext(), TotoBgService.class);
+                      i.putExtra("title", call.getString("title", "Toto Tools"));
+                      i.putExtra("text", call.getString("text", "Esperando pedidos y avisos de la caja"));
+                      ContextCompat.startForegroundService(getContext(), i);
+                      activo = true;
+                      JSObject r = new JSObject();
+                      r.put("active", true);
+                      call.resolve(r);
+                  } catch (Throwable t) {
+                      call.reject("No se pudo iniciar el servicio: " + t.getMessage());
+                  }
+              }
+
+              @PluginMethod
+              public void stop(PluginCall call) {
+                  activo = false;
+                  h.removeCallbacks(mantener);
+                  try { getContext().stopService(new Intent(getContext(), TotoBgService.class)); } catch (Throwable t) { }
+                  call.resolve();
+              }
+
+              @PluginMethod
+              public void isIgnoringBattery(PluginCall call) {
+                  boolean ok = false;
+                  try {
+                      PowerManager pm = (PowerManager) getContext().getSystemService(Context.POWER_SERVICE);
+                      ok = pm != null && pm.isIgnoringBatteryOptimizations(getContext().getPackageName());
+                  } catch (Throwable t) { }
+                  JSObject r = new JSObject();
+                  r.put("ignoring", ok);
+                  call.resolve(r);
+              }
+
+              @PluginMethod
+              public void ignoreBattery(PluginCall call) {
+                  try {
+                      Intent i = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
+                      i.setData(Uri.parse("package:" + getContext().getPackageName()));
+                      i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                      getContext().startActivity(i);
+                  } catch (Throwable t) {
+                      try {
+                          Intent i2 = new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS);
+                          i2.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                          getContext().startActivity(i2);
+                      } catch (Throwable t2) { }
+                  }
+                  call.resolve();
+              }
+          }
+          JAVA
+          cat > android/app/src/main/java/com/totools/vendedor/MainActivity.java <<'JAVA'
+          package com.totools.vendedor;
+
+          import android.os.Bundle;
+          import com.getcapacitor.BridgeActivity;
+
+          public class MainActivity extends BridgeActivity {
+              @Override
+              public void onCreate(Bundle savedInstanceState) {
+                  registerPlugin(TotoBgPlugin.class);
+                  super.onCreate(savedInstanceState);
+              }
+          }
+          JAVA
           npx cap sync android
+          echo "=== Plugins registrados ==="
+          cat android/app/src/main/assets/capacitor.plugins.json
+          grep -q "BarcodeScanner" android/app/src/main/assets/capacitor.plugins.json || { echo "ERROR: el plugin del escaner no quedo instalado"; exit 1; }
           python3 -m pip install --quiet pillow
           python3 - <<'PY'
           from PIL import Image
