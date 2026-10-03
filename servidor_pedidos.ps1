@@ -6479,6 +6479,11 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
       </div>
 
       <div class="section">
+        <h2>Escaner de la camara</h2>
+        <button class="btn btn-secundario" id="btnModoEscaner" onclick="cambiarModoEscaner()">Escaner: continuo</button>
+      </div>
+
+      <div class="section">
         <h2>Avisos en este teléfono</h2>
         <p style="font-size:12px; color:#64748b; margin-bottom:8px;">La caja te avisa si cambia un precio, se agota un producto, te anula un pedido o cambia tus permisos. Con la app abierta suena y vibra siempre.</p>
         <button class="btn btn-secundario" onclick="activarAvisosTelefono()">Activar avisos del teléfono</button>
@@ -7846,6 +7851,17 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
         o.start(); o.stop(escanerAudio.currentTime + (bien ? 0.09 : 0.25));
       } catch (e) {}
     }
+    // Ajuste del escaner: 'continuo' (como siempre) o 'uno' (un producto por toque a la camara y vuelve al pedido).
+    function escanerModoUno() { try { return localStorage.getItem('escanerModoV1') === 'uno'; } catch (e) { return false; } }
+    function pintarModoEscaner() {
+      const b = document.getElementById('btnModoEscaner');
+      if (b) b.textContent = escanerModoUno() ? 'Escaner: un producto por toque (tocar para cambiar a continuo)' : 'Escaner: continuo (tocar para cambiar a un producto por toque)';
+    }
+    function cambiarModoEscaner() {
+      try { localStorage.setItem('escanerModoV1', escanerModoUno() ? 'continuo' : 'uno'); } catch (e) {}
+      pintarModoEscaner();
+    }
+    pintarModoEscaner();
     function escanerClave(s) { return String(s == null ? '' : s).trim().replace(/\s+/g, '').toLowerCase(); }
     function buscarProductoPorCodigo(codigo) {
       const c = escanerClave(codigo);
@@ -7929,6 +7945,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
           let r = await escanerGoogle();
           while (r.tipo === 'codigo') {
             escanerProcesar(r.valor, true);
+            if (escanerModoUno()) return;   // modo "un producto por toque": vuelve al pedido
             await esperar(450);
             r = await escanerGoogle();
           }
@@ -7961,7 +7978,10 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
         handle = await ml.addListener('barcodesScanned', function (ev) {
           const b = ev && ev.barcodes && ev.barcodes[0];
           const v = b ? String(b.rawValue || b.displayValue || '') : '';
-          if (v) { try { escanerProcesar(v); } catch (e) {} }
+          if (v) {
+            if (escanerModoUno() && escanerAgregados > 0) return;   // ya se agrego uno: ignora lecturas mientras se cierra
+            try { if (escanerProcesar(v) && escanerModoUno() && escanerCerrar) escanerCerrar(); } catch (e) {}
+          }
         });
         try { history.pushState({ escaner: 1 }, ''); hechoHistorial = true; } catch (e) {}
         window.addEventListener('popstate', alAtras);
