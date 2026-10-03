@@ -18,16 +18,20 @@ jobs:
           npm install @capacitor/filesystem@6 @capacitor/share@6 @capacitor-mlkit/barcode-scanning@6
           # Avisos nativos: si no se puede instalar, la APK se arma igual (sin esa funcion)
           npm install @capacitor/local-notifications@6 || echo "AVISO: sin local-notifications"
-          # El segundo plano ya NO usa plugin de terceros: es un plugin propio (TotoBg) que se escribe mas abajo
-          # El escaner usa el modelo ML Kit incluido en la APK (necesita minSdk 23). No descarga nada.
-          sed -i -E 's/minSdkVersion = [0-9]+/minSdkVersion = 23/' android/variables.gradle
+          
           cat > capacitor.config.json <<'JSON'
           {"appId":"com.totools.vendedor","appName":"Toto Vendedor","webDir":"www",
            "server":{"androidScheme":"http","cleartext":true},
            "android":{"allowMixedContent":true,"backgroundColor":"#00000000"}}
           JSON
+          
+          # PRIMERO se genera la plataforma Android para que existan las rutas y archivos
           npx cap add android
+          
+          # AHORA SÍ se pueden modificar con sed los archivos recién creados
+          sed -i -E 's/minSdkVersion = [0-9]+/minSdkVersion = 23/' android/variables.gradle
           sed -i 's/<application/<application android:usesCleartextTraffic="true"/' android/app/src/main/AndroidManifest.xml
+          
           # Permisos del segundo plano y avisos
           python3 - <<'PY'
           p = 'android/app/src/main/AndroidManifest.xml'
