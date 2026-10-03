@@ -1405,6 +1405,9 @@ $global:configAxis = [pscustomobject]@{
     cadaSegundos  = 30
     cerrarPedidosAuto = $true
     ventasCadaSegundos = 5
+    reservaMinutos = 180
+    avisoPedidoMinutos = 15
+    cuadreEsperaMinutos = 30
 }
 $global:axisUltimaLectura = [datetime]::MinValue
 $global:axisFallosSeguidos = 0
@@ -1418,7 +1421,7 @@ function Cargar-ConfigAxis {
         $raw = Get-Content $configAxisPath -Raw -Encoding UTF8
         if ($raw -and $raw.Trim().Length -gt 0) {
             $d = $raw | ConvertFrom-Json
-            foreach ($k in @('activo','servidor','puerto','usuario','clave','base','clienteMysql','almacenes','columnaPrecio','columnaSku','cadaSegundos','cerrarPedidosAuto','ventasCadaSegundos')) {
+            foreach ($k in @('activo','servidor','puerto','usuario','clave','base','clienteMysql','almacenes','columnaPrecio','columnaSku','cadaSegundos','cerrarPedidosAuto','ventasCadaSegundos','reservaMinutos','avisoPedidoMinutos','cuadreEsperaMinutos')) {
                 if (($d.PSObject.Properties.Name -contains $k) -and ($d.$k -ne $null)) { $global:configAxis.$k = $d.$k }
             }
         }
@@ -1570,9 +1573,12 @@ function Aplicar-ProductosCatalogo($productos) {
             stock = $stockEfectivo
             stockBase = $stockBase
             vendido = $vendido
+            reservado = 0.0
         })
     }
 
+    # Con AxisPOS el stock es el real menos lo apartado en pedidos que todavia no estan en AxisPOS.
+    if ($global:configAxis.activo) { try { Aplicar-ReservasALista $nuevo } catch {} }
     Avisar-CambiosCatalogo $anteriorPorSku $nuevo
     Registrar-ProductosNuevos $nuevo
     $global:catalogo = $nuevo
@@ -1627,6 +1633,8 @@ $global:axisVentasUltima = [datetime]::MinValue
 $global:axisVentasFallos = 0
 $global:axisVentasVistas = @{}
 $global:axisVentasListas = @{}
+$global:axisSeguimientoDesde = ""
+$global:axisBaseCambio = $false
 
 function Cargar-EstadoVentasAxis {
     if (Test-Path $axisVentasPath) {
@@ -1634,7 +1642,15 @@ function Cargar-EstadoVentasAxis {
             $raw = Get-Content $axisVentasPath -Raw -Encoding UTF8
             if ($raw -and $raw.Trim().Length -gt 0) {
                 $d = $raw | ConvertFrom-Json
-                if ($d.PSObject.Properties.Name -contains 'ultimoId') { $global:axisVentasUltimoId = [long]$d.ultimoId }
+                $baseGuardada = ""
+                if ($d.PSObject.Properties.Name -contains 'base') { $baseGuardada = [string]$d.base }
+                if ($baseGuardada -ne [string]$global:configAxis.base) {
+                    # Otra base (o archivo viejo sin base): se empieza de cero para no mezclar ventas.
+                    $global:axisBaseCambio = $true
+                } else {
+                    if ($d.PSObject.Properties.Name -contains 'ultimoId') { $global:axisVentasUltimoId = [long]$d.ultimoId }
+                    if ($d.PSObject.Properties.Name -contains 'seguimientoDesde') { $global:axisSeguimientoDesde = [string]$d.seguimientoDesde }
+                }
             }
         } catch {}
     }
@@ -1643,7 +1659,7 @@ function Cargar-EstadoVentasAxis {
 Cargar-EstadoVentasAxis
 
 function Guardar-EstadoVentasAxis {
-    Escribir-ArchivoConReintento -ruta $axisVentasPath -contenido (@{ ultimoId = $global:axisVentasUltimoId } | ConvertTo-Json) | Out-Null
+    Escribir-ArchivoConReintento -ruta $axisVentasPath -contenido (@{ ultimoId = $global:axisVentasUltimoId; base = [string]$global:configAxis.base; seguimientoDesde = [string]$global:axisSeguimientoDesde } | ConvertTo-Json) | Out-Null
 }
 
 function Leer-VentasAxis([long]$desdeId) {
@@ -1654,7 +1670,7 @@ function Leer-VentasAxis([long]$desdeId) {
     foreach ($a in @($c.almacenes)) { $n = 0; if ([int]::TryParse([string]$a, [ref]$n)) { [void]$ids.Add($n) } }
     if ($ids.Count -eq 0) { throw "config_axis.json: 'almacenes' esta vacio." }
     $lista = ($ids -join ',')
-    $sql = "SELECT o.ID, o.Acct, o.ObjectID, g.$colSku, o.Qtty, DATE_FORMAT(IF(o.UserRealTime IS NULL OR o.UserRealTime < '2000-01-01', o.Timestamp, o.UserRealTime), '%Y-%m-%d %H:%i:%s') FROM operations o JOIN goods g ON g.ID = o.GoodID WHERE o.OperType = 2 AND o.ID > $desdeId AND o.ObjectID IN ($lista) ORDER BY o.ID"
+    $sql = "SELECT o.ID, o.Acct, o.ObjectID, g.$colSku, o.Qtty, DATE_FORMAT(IF(o.UserRealTime IS NULL OR o.UserRealTime < '2000-01-01', o.Timestamp, o.UserRealTime), '%Y-%m-%d %H:%i:%s'), o.PriceOut FROM operations o JOIN goods g ON g.ID = o.GoodID WHERE o.OperType = 2 AND o.ID > $desdeId AND o.ObjectID IN ($lista) ORDER BY o.ID"
     $texto = Ejecutar-ConsultaAxis $sql
     $inv = [System.Globalization.CultureInfo]::InvariantCulture
     $res = New-Object System.Collections.ArrayList
@@ -1667,7 +1683,9 @@ function Leer-VentasAxis([long]$desdeId) {
         if (-not [long]::TryParse([string]$f[0], [ref]$idFila)) { continue }
         $qty = 0.0
         [void][double]::TryParse([string]$f[4], [System.Globalization.NumberStyles]::Float, $inv, [ref]$qty)
-        [void]$res.Add([pscustomobject]@{ id = $idFila; acct = [string]$f[1]; obj = [string]$f[2]; sku = ([string]$f[3]).Trim(); qty = $qty; fecha = [string]$f[5] })
+        $prc = 0.0
+        if ($f.Count -ge 7) { [void][double]::TryParse([string]$f[6], [System.Globalization.NumberStyles]::Float, $inv, [ref]$prc) }
+        [void]$res.Add([pscustomobject]@{ id = $idFila; acct = [string]$f[1]; obj = [string]$f[2]; sku = ([string]$f[3]).Trim(); qty = $qty; fecha = [string]$f[5]; precio = $prc })
     }
     return @($res)
 }
@@ -1747,10 +1765,12 @@ function Revisar-VentasAxis {
             $n = [long]0
             if (-not [long]::TryParse($t, [ref]$n)) { throw "No se pudo leer el ultimo movimiento de AxisPOS." }
             $global:axisVentasUltimoId = $n
+            $global:axisSeguimientoDesde = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
             Guardar-EstadoVentasAxis
             $global:axisVentasFallos = 0
             return
         }
+        if (-not $global:axisSeguimientoDesde) { $global:axisSeguimientoDesde = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss"); Guardar-EstadoVentasAxis }
         $filas = @(Leer-VentasAxis $global:axisVentasUltimoId)
         $global:axisVentasFallos = 0
         if ($filas.Count -eq 0) { $global:axisVentasVistas = @{}; $global:axisVentasListas = @{}; return }
@@ -1774,7 +1794,7 @@ function Revisar-VentasAxis {
             $vistasNuevas[$k] = $firma
             if ($global:axisVentasListas.ContainsKey($k)) { continue }
             if ([string]$global:axisVentasVistas[$k] -ne $firma) { $hayEnEspera = $true; continue }
-            Cerrar-PedidoConVentaAxis $g
+            Conciliar-VentaAxis $g
             $global:axisVentasListas[$k] = $true
         }
         $global:axisVentasVistas = $vistasNuevas
@@ -1788,6 +1808,411 @@ function Revisar-VentasAxis {
         $global:axisVentasFallos = $global:axisVentasFallos + 1
         if ($global:axisVentasFallos -eq 1) { Write-Host "Aviso: no se pudieron revisar las ventas de AxisPOS: $_" }
     }
+}
+
+# ------------------------------------------------------------------
+# STOCK REAL + RESERVAS, PEDIDOS OLVIDADOS Y CUADRE CON AXISPOS
+# (todo en solo lectura sobre AxisPOS)
+#  - Stock = existencia real de AxisPOS menos lo apartado en pedidos que
+#    todavia no aparecen en AxisPOS. Un pedido aparta stock mientras esta
+#    pendiente (o cobrado por el vendedor sin revisar ni encontrar en
+#    AxisPOS) y deja de apartarlo al cancelarse, cobrarse en AxisPOS o
+#    pasar "reservaMinutos" (config_axis.json, 180 por defecto).
+#  - Si un pedido pendiente lleva "avisoPedidoMinutos" (15) sin cobrarse
+#    se avisa al vendedor y se marca en la tarjeta de la PC (max. 3 avisos).
+#  - Cuadre: cada pedido cobrado se busca entre las ventas de AxisPOS
+#    (axis_ventas_dia.json guarda las ultimas 3 dias de ventas leidas).
+# ------------------------------------------------------------------
+$global:ventasAxisDia = New-Object System.Collections.ArrayList
+$axisVentasDiaPath = Join-Path $scriptDir "axis_ventas_dia.json"
+$global:tareasPedidosUltima = [datetime]::MinValue
+
+function Poner-Prop($o, [string]$n, $v) { $o | Add-Member -NotePropertyName $n -NotePropertyValue $v -Force }
+
+function Hora-Pedido($p) {
+    try { return [datetime]::ParseExact([string]$p.hora, "yyyy-MM-dd HH:mm:ss", [System.Globalization.CultureInfo]::InvariantCulture) } catch { return $null }
+}
+
+function Inicio-Seguimiento {
+    if ($global:axisSeguimientoDesde) {
+        try { return [datetime]::ParseExact([string]$global:axisSeguimientoDesde, "yyyy-MM-dd HH:mm:ss", [System.Globalization.CultureInfo]::InvariantCulture) } catch {}
+    }
+    return $null
+}
+
+function Cargar-VentasAxisDia {
+    if ($global:axisBaseCambio) { return }
+    if (-not (Test-Path $axisVentasDiaPath)) { return }
+    try {
+        $raw = Get-Content $axisVentasDiaPath -Raw -Encoding UTF8
+        if ($raw -and $raw.Trim().Length -gt 0) {
+            foreach ($r in @($raw | ConvertFrom-Json)) {
+                if ($r -and $r.clave) { [void]$global:ventasAxisDia.Add($r) }
+            }
+        }
+    } catch {}
+}
+
+function Guardar-VentasAxisDia {
+    try {
+        $limite = (Get-Date).Date.AddDays(-2)
+        $inv = [System.Globalization.CultureInfo]::InvariantCulture
+        $quedan = New-Object System.Collections.ArrayList
+        foreach ($r in $global:ventasAxisDia) {
+            $f = $null
+            try { $f = [datetime]::ParseExact([string]$r.fecha, "yyyy-MM-dd HH:mm:ss", $inv) } catch { $f = $null }
+            if ($f -and $f -lt $limite) { continue }
+            [void]$quedan.Add($r)
+        }
+        $global:ventasAxisDia = $quedan
+        $json = ConvertTo-Json -InputObject @($quedan.ToArray()) -Depth 6
+        Escribir-ArchivoConReintento -ruta $axisVentasDiaPath -contenido $json | Out-Null
+    } catch {}
+}
+
+Cargar-VentasAxisDia
+
+function Registrar-VentaAxisDia($grupo, [double]$total) {
+    $clave = [string]$grupo[0].acct + "|" + [string]$grupo[0].obj
+    foreach ($r in $global:ventasAxisDia) { if ([string]$r.clave -eq $clave) { return $r } }
+    $items = @()
+    foreach ($l in $grupo) { $items += [pscustomobject]@{ sku = [string]$l.sku; qty = [double]$l.qty } }
+    $rec = [pscustomobject]@{ clave = $clave; acct = [string]$grupo[0].acct; fecha = [string]$grupo[$grupo.Count - 1].fecha; total = [math]::Round($total, 2); items = $items; pedidoId = $null }
+    [void]$global:ventasAxisDia.Add($rec)
+    return $rec
+}
+
+function Nombre-ProductoSku([string]$sku) {
+    $pr = $global:catalogo | Where-Object { [string]$_.sku -eq $sku } | Select-Object -First 1
+    if ($pr) { return [string]$pr.nombre }
+    return $sku
+}
+
+function Items-IgualesAVenta($pedidoItems, $venta) {
+    if ($null -eq $pedidoItems -or $null -eq $venta) { return $false }
+    if ($pedidoItems.Count -ne $venta.Count) { return $false }
+    foreach ($sku in @($pedidoItems.Keys)) {
+        if (-not $venta.ContainsKey($sku)) { return $false }
+        if ([math]::Abs([double]$venta[$sku] - [double]$pedidoItems[$sku]) -gt 0.0001) { return $false }
+    }
+    return $true
+}
+
+function Detalle-DiferenciaVenta($pedidoItems, $venta) {
+    $claves = @{}
+    foreach ($k in @($pedidoItems.Keys)) { $claves[$k] = $true }
+    foreach ($k in @($venta.Keys)) { $claves[$k] = $true }
+    $partes = New-Object System.Collections.ArrayList
+    foreach ($k in @($claves.Keys)) {
+        $a = 0.0; if ($pedidoItems.ContainsKey($k)) { $a = [double]$pedidoItems[$k] }
+        $b = 0.0; if ($venta.ContainsKey($k)) { $b = [double]$venta[$k] }
+        if ([math]::Abs($a - $b) -gt 0.0001) {
+            [void]$partes.Add((Nombre-ProductoSku $k) + ": pedido " + (Formato-Cantidad $a) + " / AxisPOS " + (Formato-Cantidad $b))
+        }
+    }
+    if ($partes.Count -eq 0) { return "" }
+    $txt = (@($partes) | Select-Object -First 4) -join "; "
+    if ($partes.Count -gt 4) { $txt += "; ..." }
+    return $txt
+}
+
+# ---- Reservas de stock ----
+function Pedido-ReservaStock($p, [datetime]$ahora, [int]$minutos) {
+    $est = [string]$p.estado
+    if ($est -ne "pendiente" -and $est -ne "cobrado") { return $false }
+    if ($est -eq "cobrado" -and $p.ventaAxis) { return $false }
+    $h = Hora-Pedido $p
+    if ($h -and (($ahora - $h).TotalMinutes -gt $minutos)) { return $false }
+    return $true
+}
+
+function Aplicar-ReservasALista($lista) {
+    try {
+        $ahora = Get-Date
+        $min = 180
+        try { $min = [int]$global:configAxis.reservaMinutos } catch { $min = 180 }
+        if ($min -lt 10) { $min = 10 }
+        $res = @{}
+        foreach ($p in @($global:pedidos)) {
+            if (-not (Pedido-ReservaStock $p $ahora $min)) { continue }
+            foreach ($it in @($p.items)) {
+                $sku = ([string]$it.sku).Trim()
+                if ([string]::IsNullOrWhiteSpace($sku)) { continue }
+                $q = 0.0
+                try { $q = [double]$it.cantidad } catch { $q = 0.0 }
+                if ($res.ContainsKey($sku)) { $res[$sku] = [double]$res[$sku] + $q } else { $res[$sku] = $q }
+            }
+        }
+        foreach ($pr in @($lista)) {
+            if ($null -eq $pr.stockBase) { continue }
+            $r = 0.0
+            if ($pr.sku -and $res.ContainsKey([string]$pr.sku)) { $r = [double]$res[[string]$pr.sku] }
+            $pr.vendido = $r
+            $pr.reservado = $r
+            $s = [double]$pr.stockBase - $r
+            if ($s -lt 0) { $s = 0 }
+            $pr.stock = $s
+        }
+    } catch {}
+}
+
+function Recalcular-Reservas {
+    if (-not $global:configAxis.activo) { return }
+    Aplicar-ReservasALista $global:catalogo
+}
+
+# ---- Conciliar una venta de AxisPOS con los pedidos ----
+function Conciliar-VentaAxis($grupo) {
+    $venta = Juntar-CantidadesPorSku $grupo 'sku' 'qty'
+    $total = 0.0
+    foreach ($l in $grupo) { try { $total += [double]$l.qty * [double]$l.precio } catch {} }
+    $rec = Registrar-VentaAxisDia $grupo $total
+    if ($null -eq $venta) { Guardar-VentasAxisDia; return }
+    $acct = [string]$grupo[0].acct
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $horaVenta = $null
+    try { $horaVenta = [datetime]::ParseExact([string]$grupo[$grupo.Count - 1].fecha, "yyyy-MM-dd HH:mm:ss", $inv) } catch { $horaVenta = $null }
+    $hecho = $false
+
+    # 1) Pedido pendiente igual a la venta: se cierra solo.
+    $candidatos = @($global:pedidos | Where-Object { [string]$_.estado -eq "pendiente" } | Sort-Object { [string]$_.hora })
+    foreach ($p in $candidatos) {
+        $pedidoItems = Juntar-CantidadesPorSku $p.items 'sku' 'cantidad'
+        if (-not (Items-IgualesAVenta $pedidoItems $venta)) { continue }
+        if ($horaVenta) {
+            $horaPedido = Hora-Pedido $p
+            if ($horaPedido -and ($horaVenta -lt $horaPedido.AddSeconds(-60))) { continue }
+        }
+        $metodo = if ($p.metodoPago) { [string]$p.metodoPago } else { "Efectivo" }
+        $baseTotal = [double]$p.totalProductos
+        $totalAuto = if ($metodo -eq "Transferencia") { [math]::Round($baseTotal * 2, 2) } else { $baseTotal }
+        $p.estado = "cobrado"
+        Poner-Prop $p "totalCobrado" $totalAuto
+        Poner-Prop $p "cobradoPor" "caja"
+        Poner-Prop $p "revisado" $true
+        Poner-Prop $p "horaCobro" ((Get-Date).ToString("yyyy-MM-dd HH:mm:ss"))
+        Poner-Prop $p "ventaAxis" $acct
+        Poner-Prop $p "ventaAxisTotal" ([math]::Round($total, 2))
+        Poner-Prop $p "cuadreAxis" "ok"
+        Poner-Prop $p "cuadreDetalle" ""
+        $rec.pedidoId = $p.id
+        Guardar-Pedidos
+        try { Agregar-AlertaVendedor ([string]$p.vendedor) ("Tu pedido #" + $p.id + " ya se cobro en caja.") $p.id "pedido" } catch {}
+        Write-Host ("[" + (Get-Date).ToString('HH:mm:ss') + "] AxisPOS: la venta " + $acct + " cerro el pedido #" + $p.id + " (" + [string]$p.vendedor + ")")
+        $hecho = $true
+        break
+    }
+
+    # 2) Pedido que el vendedor ya cobro y todavia no estaba en AxisPOS: se vincula (confirma el cuadre).
+    if (-not $hecho) {
+        $cobrados = @($global:pedidos | Where-Object { [string]$_.estado -eq "cobrado" -and -not $_.ventaAxis } | Sort-Object { [string]$_.hora })
+        foreach ($p in $cobrados) {
+            $pedidoItems = Juntar-CantidadesPorSku $p.items 'sku' 'cantidad'
+            if (-not (Items-IgualesAVenta $pedidoItems $venta)) { continue }
+            if ($horaVenta) {
+                $horaPedido = Hora-Pedido $p
+                if ($horaPedido -and ($horaVenta -lt $horaPedido.AddSeconds(-60))) { continue }
+            }
+            Poner-Prop $p "ventaAxis" $acct
+            Poner-Prop $p "ventaAxisTotal" ([math]::Round($total, 2))
+            Poner-Prop $p "cuadreAxis" "ok"
+            Poner-Prop $p "cuadreDetalle" ""
+            $rec.pedidoId = $p.id
+            Guardar-Pedidos
+            Write-Host ("[" + (Get-Date).ToString('HH:mm:ss') + "] AxisPOS: la venta " + $acct + " confirma el pedido cobrado #" + $p.id + " (" + [string]$p.vendedor + ")")
+            $hecho = $true
+            break
+        }
+    }
+
+    Guardar-VentasAxisDia
+    if ($hecho) {
+        try { Revisar-CatalogoAxis -Forzar } catch {}
+        Recalcular-Reservas
+    }
+}
+
+# ---- Cuadre ----
+function Evaluar-CuadrePedido($p, $inicio) {
+    $r = @{ estado = "sin_datos"; detalle = ""; acct = ""; total = 0.0 }
+    if ($p.ventaAxis) {
+        $r.estado = "ok"
+        $r.acct = [string]$p.ventaAxis
+        if ($null -ne $p.ventaAxisTotal) { try { $r.total = [double]$p.ventaAxisTotal } catch {} }
+        return $r
+    }
+    if (-not $global:configAxis.activo) { return $r }
+    $h = Hora-Pedido $p
+    if ($null -eq $h) { return $r }
+    if ($null -eq $inicio -or $h -lt $inicio) { return $r }
+    $espera = 30
+    try { $espera = [int]$global:configAxis.cuadreEsperaMinutos } catch { $espera = 30 }
+    if ($espera -lt 1) { $espera = 1 }
+    if (((Get-Date) - $h).TotalMinutes -lt $espera) { $r.estado = "esperando"; return $r }
+
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $pedItems = Juntar-CantidadesPorSku $p.items 'sku' 'cantidad'
+    if ($null -ne $pedItems) {
+        foreach ($s in $global:ventasAxisDia) {
+            if ($s.pedidoId -and ([string]$s.pedidoId -ne [string]$p.id)) { continue }
+            $hs = $null
+            try { $hs = [datetime]::ParseExact([string]$s.fecha, "yyyy-MM-dd HH:mm:ss", $inv) } catch { continue }
+            if ($hs -lt $h.AddSeconds(-60)) { continue }
+            $vd = Juntar-CantidadesPorSku $s.items 'sku' 'qty'
+            if (Items-IgualesAVenta $pedItems $vd) { $r.estado = "ok"; $r.acct = [string]$s.acct; $r.total = [double]$s.total; return $r }
+        }
+    }
+    $mejor = $null; $mejorVd = $null; $mejorScore = 0.0; $mejorDif = [double]::MaxValue
+    if ($null -ne $pedItems) {
+        foreach ($s in $global:ventasAxisDia) {
+            if ($s.pedidoId) { continue }
+            $hs = $null
+            try { $hs = [datetime]::ParseExact([string]$s.fecha, "yyyy-MM-dd HH:mm:ss", $inv) } catch { continue }
+            if ($hs -lt $h.AddSeconds(-60)) { continue }
+            if ($hs -gt $h.AddHours(8)) { continue }
+            $vd = Juntar-CantidadesPorSku $s.items 'sku' 'qty'
+            if ($null -eq $vd) { continue }
+            $comun = 0
+            foreach ($k in @($pedItems.Keys)) { if ($vd.ContainsKey($k)) { $comun++ } }
+            if ($comun -eq 0) { continue }
+            $union = $pedItems.Count + $vd.Count - $comun
+            $score = [double]$comun / [double]$union
+            if ($score -lt 0.5) { continue }
+            $dif = [math]::Abs(($hs - $h).TotalMinutes)
+            if (($score -gt $mejorScore) -or (($score -eq $mejorScore) -and ($dif -lt $mejorDif))) {
+                $mejor = $s; $mejorVd = $vd; $mejorScore = $score; $mejorDif = $dif
+            }
+        }
+    }
+    if ($mejor) {
+        $r.estado = "difiere"
+        $r.acct = [string]$mejor.acct
+        $r.total = [double]$mejor.total
+        $r.detalle = "Venta AxisPOS #" + [string]$mejor.acct + ": " + (Detalle-DiferenciaVenta $pedItems $mejorVd)
+        return $r
+    }
+    $r.estado = "no_aparece"
+    return $r
+}
+
+function Actualizar-CuadreAxis {
+    if (-not $global:configAxis.activo) { return }
+    $inicio = Inicio-Seguimiento
+    if ($null -eq $inicio) { return }
+    $cambio = $false
+    foreach ($p in @($global:pedidos)) {
+        if ([string]$p.estado -ne "cobrado") { continue }
+        $e = Evaluar-CuadrePedido $p $inicio
+        if ($e.estado -eq "sin_datos") { continue }
+        if (([string]$p.cuadreAxis -ne [string]$e.estado) -or ([string]$p.cuadreDetalle -ne [string]$e.detalle)) {
+            Poner-Prop $p "cuadreAxis" ([string]$e.estado)
+            Poner-Prop $p "cuadreDetalle" ([string]$e.detalle)
+            $cambio = $true
+        }
+    }
+    if ($cambio) { Guardar-Pedidos }
+}
+
+function Calcular-CuadreAxis([int]$dias) {
+    $desde = (Get-Date).Date.AddDays(-($dias - 1))
+    $inicio = Inicio-Seguimiento
+    $porV = @{}
+    $problemas = New-Object System.Collections.ArrayList
+    $espera = 30
+    try { $espera = [int]$global:configAxis.cuadreEsperaMinutos } catch { $espera = 30 }
+    foreach ($p in @(Obtener-PedidosCobradosDesde $desde)) {
+        $v = ([string]$p.vendedor).Trim()
+        if ([string]::IsNullOrWhiteSpace($v)) { $v = "(sin nombre)" }
+        if (-not $porV.ContainsKey($v)) {
+            $porV[$v] = [pscustomobject]@{ vendedor = $v; pedidos = 0; declarado = 0.0; confirmado = 0.0; ok = 0; esperando = 0; noAparece = 0; difiere = 0; sinDatos = 0 }
+        }
+        $e = $porV[$v]
+        $monto = 0.0
+        try { if ($null -ne $p.totalCobrado -and "$($p.totalCobrado)" -ne "") { $monto = [double]$p.totalCobrado } else { $monto = [double]$p.totalProductos } } catch { $monto = 0.0 }
+        $e.pedidos++
+        $e.declarado = [math]::Round($e.declarado + $monto, 2)
+
+        $est = [string]$p.cuadreAxis
+        $det = [string]$p.cuadreDetalle
+        $acct = [string]$p.ventaAxis
+        $axTotal = 0.0
+        if ($null -ne $p.ventaAxisTotal) { try { $axTotal = [double]$p.ventaAxisTotal } catch {} }
+        $h = Hora-Pedido $p
+        $viejo = ($h -and (((Get-Date) - $h).TotalMinutes -ge $espera))
+        if (-not $est -or ($est -eq "esperando" -and $viejo)) {
+            $ev = Evaluar-CuadrePedido $p $inicio
+            $est = [string]$ev.estado; $det = [string]$ev.detalle
+            if ($ev.acct) { $acct = [string]$ev.acct }
+            if ($ev.total) { $axTotal = [double]$ev.total }
+        }
+        switch ($est) {
+            "ok"         { $e.ok++; $e.confirmado = [math]::Round($e.confirmado + $monto, 2) }
+            "esperando"  { $e.esperando++ }
+            "no_aparece" { $e.noAparece++ }
+            "difiere"    { $e.difiere++ }
+            default      { $e.sinDatos++ }
+        }
+        if ($est -eq "no_aparece" -or $est -eq "difiere") {
+            [void]$problemas.Add([pscustomobject]@{ id = $p.id; vendedor = $v; hora = [string]$p.hora; monto = [math]::Round($monto, 2); estado = $est; detalle = $det; acct = $acct; totalAxis = [math]::Round($axTotal, 2) })
+        }
+    }
+    $sinPedidoN = 0; $sinPedidoTotal = 0.0
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    foreach ($s in $global:ventasAxisDia) {
+        if ($s.pedidoId) { continue }
+        $f = $null
+        try { $f = [datetime]::ParseExact([string]$s.fecha, "yyyy-MM-dd HH:mm:ss", $inv) } catch { continue }
+        if ($f -lt $desde) { continue }
+        $sinPedidoN++
+        try { $sinPedidoTotal += [double]$s.total } catch {}
+    }
+    $lista = @($porV.Values | Sort-Object { -[double]$_.declarado })
+    return [pscustomobject]@{
+        axisActivo = [bool]$global:configAxis.activo
+        desde = $desde.ToString("yyyy-MM-dd")
+        seguimientoDesde = [string]$global:axisSeguimientoDesde
+        esperaMinutos = $espera
+        porVendedor = @($lista)
+        problemas = @($problemas | Sort-Object { [string]$_.hora })
+        axisSinPedido = [pscustomobject]@{ ventas = $sinPedidoN; total = [math]::Round($sinPedidoTotal, 2) }
+    }
+}
+
+# ---- Pedidos olvidados ----
+function Revisar-PedidosOlvidados {
+    $min = 15
+    try { $min = [int]$global:configAxis.avisoPedidoMinutos } catch { $min = 15 }
+    if ($min -le 0) { return }
+    $ahora = Get-Date
+    $cambio = $false
+    foreach ($p in @($global:pedidos)) {
+        if ([string]$p.estado -ne "pendiente") { continue }
+        $h = Hora-Pedido $p
+        if ($null -eq $h) { continue }
+        $espera = ($ahora - $h).TotalMinutes
+        $n = 0
+        try { $n = [int]$p.avisosOlvidado } catch { $n = 0 }
+        if ($n -ge 3) { continue }
+        if ($espera -lt ($min * ($n + 1))) { continue }
+        Poner-Prop $p "olvidado" $true
+        Poner-Prop $p "avisosOlvidado" ($n + 1)
+        $cambio = $true
+        $mins = [int][math]::Floor($espera)
+        try {
+            if ($p.vendedor) { Agregar-AlertaVendedor ([string]$p.vendedor) ("Tu pedido #" + $p.id + " lleva " + $mins + " min sin cobrarse en caja.") $p.id "pedido" }
+        } catch {}
+        Write-Host ("[" + $ahora.ToString('HH:mm:ss') + "] Pedido #" + $p.id + " (" + [string]$p.vendedor + ") lleva " + $mins + " min sin cobrarse.")
+    }
+    if ($cambio) { Guardar-Pedidos }
+}
+
+function Revisar-TareasPedidos {
+    $ahora = Get-Date
+    if (($ahora - $global:tareasPedidosUltima).TotalSeconds -lt 20) { return }
+    $global:tareasPedidosUltima = $ahora
+    try { Revisar-PedidosOlvidados } catch {}
+    try { Actualizar-CuadreAxis } catch {}
+    try { Recalcular-Reservas } catch {}
 }
 
 # ------------------------------------------------------------------
@@ -3907,6 +4332,7 @@ $htmlPC = @'
     }
     let ultimoMaxId = 0;
     let idsRevisarAnt = new Set();
+    let avisosOlvAnt = {};
     let primerCarga = true;
     let configMapeoEncabezados = [];
     let procesandoExcel = false;
@@ -4697,6 +5123,18 @@ $htmlPC = @'
         extra = '<div style="font-size:12px;">Metodo elegido por el vendedor: <b>' + p.metodoPago + '</b></div>';
       }
 
+      let cuadreHtml = '';
+      if (p.estado === 'pendiente' && p.olvidado) {
+        const minsEsp = Math.max(0, Math.round((Date.now() - new Date(String(p.hora).replace(' ', 'T')).getTime()) / 60000));
+        cuadreHtml = '<div class="discrepancia-aviso">&#9203; Lleva ' + minsEsp + ' min sin cobrarse en caja.</div>';
+      } else if (p.estado === 'cobrado' && p.cuadreAxis === 'ok') {
+        cuadreHtml = '<div style="font-size:12px; color:#166534;">&#10003; Confirmado en AxisPOS' + (p.ventaAxis ? (' (venta #' + escaparHtml(String(p.ventaAxis)) + ')') : '') + '</div>';
+      } else if (p.estado === 'cobrado' && p.cuadreAxis === 'no_aparece') {
+        cuadreHtml = '<div class="discrepancia-aviso">&#9888; Esta venta no aparece en AxisPOS.</div>';
+      } else if (p.estado === 'cobrado' && p.cuadreAxis === 'difiere') {
+        cuadreHtml = '<div class="discrepancia-aviso">&#9888; No coincide con AxisPOS. ' + escaparHtml(String(p.cuadreDetalle || '')) + '</div>';
+      }
+
       let accionesPendiente = '';
       if (p.estado === 'pendiente') {
         accionesPendiente =
@@ -4756,6 +5194,7 @@ $htmlPC = @'
         '<ul>' + items + '</ul>' +
         totalHtml +
         extra +
+        cuadreHtml +
         revisionHtml +
         accionesRevision +
         accionesPendiente +
@@ -4800,6 +5239,16 @@ $htmlPC = @'
         const idsRevisar = new Set(porRevisar.map(p => p.id));
         const nuevoRevisar = primerCarga ? null : porRevisar.find(p => !idsRevisarAnt.has(p.id));
         idsRevisarAnt = idsRevisar;
+        let nuevoOlv = null;
+        const avisosOlvAhora = {};
+        pedidos.forEach(p => {
+          if (p.estado === 'pendiente' && p.olvidado) {
+            const n = Number(p.avisosOlvidado || 1);
+            avisosOlvAhora[p.id] = n;
+            if (!primerCarga && !nuevoOlv && n > Number(avisosOlvAnt[p.id] || 0)) nuevoOlv = p;
+          }
+        });
+        avisosOlvAnt = avisosOlvAhora;
 
         const grid = document.getElementById('grid');
         if (visibles.length === 0) {
@@ -4815,6 +5264,9 @@ $htmlPC = @'
         } else if (!primerCarga && maxId > ultimoMaxId) {
           beep();
           mostrarBanner('Nuevo pedido recibido');
+        } else if (nuevoOlv) {
+          beep();
+          mostrarBanner('El pedido #' + nuevoOlv.id + ' (' + (nuevoOlv.vendedor || 'vendedor') + ') lleva mucho sin cobrarse');
         }
         ultimoMaxId = maxId;
         primerCarga = false;
@@ -7762,7 +8214,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
         const agotado = tieneStock && disponible <= 0;
         const stockBajo = tieneStock && !agotado && umbralStockBajoActual > 0 && disponible <= umbralStockBajoActual;
         const stockTxt = (tieneStock && !autoservicioActivo)
-          ? ('<div class="sku"' + (stockBajo ? ' style="color:#f87171; font-weight:bold;"' : '') + '>' + (stockBajo ? '&#9888; ' : '') + 'Disponible: ' + disponible + '</div>')
+          ? ('<div class="sku"' + (stockBajo ? ' style="color:#f87171; font-weight:bold;"' : '') + '>' + (stockBajo ? '&#9888; ' : '') + 'Disponible: ' + disponible + (Number(p.reservado) > 0 ? ' (apartados en pedidos: ' + p.reservado + ')' : '') + '</div>')
           : '';
         const fotoTag = tieneFoto(p.sku) ? ('<img class="miniatura" data-sku="' + p.sku + '" src="/foto/' + encodeURIComponent(p.sku) + '.jpg" onerror=\'fotoFallo(this,' + JSON.stringify(String(p.sku)) + ')\' onclick=\'verFotoProducto(' + JSON.stringify(p.sku) + ',' + JSON.stringify(p.nombre) + ')\'>') : '';
         return '<div class="resultado">' +
@@ -10369,6 +10821,10 @@ $htmlMetricas = @'
   .fila.hora .barra { background:#7c3aed; }
   .vacio { color:#64748b; font-size:13px; }
   #cargando { color:#94a3b8; font-size:13px; }
+  table.cuadre { width:100%; border-collapse:collapse; font-size:13px; }
+  table.cuadre th, table.cuadre td { text-align:left; padding:6px 8px; border-bottom:1px solid #334155; }
+  table.cuadre th { color:#94a3b8; font-weight:600; }
+  .bien { color:#4ade80; } .mal { color:#f87171; } .nota { color:#94a3b8; font-size:12px; margin-top:8px; }
 </style>
 </head>
 <body>
@@ -10392,6 +10848,12 @@ $htmlMetricas = @'
     <div class="panel">
       <h2>Facturado por vendedor</h2>
       <div id="listaVendedores"></div>
+    </div>
+    <div class="panel" id="panelCuadre" style="display:none;">
+      <h2>Cuadre contra AxisPOS</h2>
+      <div id="cuadreTabla"></div>
+      <div id="cuadreProblemas"></div>
+      <div class="nota" id="cuadreNota"></div>
     </div>
     <div class="panel">
       <h2>Pedidos por hora del dia</h2>
@@ -10437,9 +10899,47 @@ $htmlMetricas = @'
 
         document.getElementById('cargando').style.display = 'none';
         document.getElementById('contenido').style.display = 'block';
+        cargarCuadre();
       } catch (e) {
         document.getElementById('cargando').textContent = 'No se pudieron cargar las metricas.';
       }
+    }
+    function escHtml(x) {
+      return String(x === null || x === undefined ? '' : x).replace(/[&<>"]/g, function (ch) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]; });
+    }
+    async function cargarCuadre() {
+      const panel = document.getElementById('panelCuadre');
+      try {
+        const res = await fetch('/api/cuadre?dias=' + rangoActual);
+        if (!res.ok) { panel.style.display = 'none'; return; }
+        const c = await res.json();
+        if (!c.axisActivo) { panel.style.display = 'none'; return; }
+        panel.style.display = 'block';
+        const filas = (c.porVendedor || []);
+        let t = '<div class="vacio">Sin pedidos cobrados en este periodo.</div>';
+        if (filas.length) {
+          t = '<table class="cuadre"><tr><th>Vendedor</th><th>Pedidos</th><th>Dice haber cobrado</th><th>Confirmado en AxisPOS</th><th>Estado</th></tr>' +
+            filas.map(function (v) {
+              const partes = [];
+              if (v.noAparece) partes.push('<span class="mal">' + v.noAparece + ' no aparecen</span>');
+              if (v.difiere) partes.push('<span class="mal">' + v.difiere + ' no coinciden</span>');
+              if (v.esperando) partes.push(v.esperando + ' esperando');
+              if (v.sinDatos) partes.push(v.sinDatos + ' sin datos');
+              const estado = partes.length ? partes.join(', ') : '<span class="bien">Todo confirmado</span>';
+              return '<tr><td>' + escHtml(v.vendedor) + '</td><td>' + v.pedidos + '</td><td>$' + Number(v.declarado).toFixed(2) + '</td><td>$' + Number(v.confirmado).toFixed(2) + '</td><td>' + estado + '</td></tr>';
+            }).join('') + '</table>';
+        }
+        document.getElementById('cuadreTabla').innerHTML = t;
+        const pr = (c.problemas || []);
+        document.getElementById('cuadreProblemas').innerHTML = pr.length ?
+          ('<div style="margin-top:12px;font-size:13px;"><b>Pedidos a revisar</b></div>' + pr.map(function (p) {
+            return '<div class="fila" style="margin-top:6px;"><div style="flex:1;"><span class="mal">' + (p.estado === 'difiere' ? 'NO COINCIDE' : 'NO APARECE EN AXISPOS') + '</span> &mdash; pedido #' + p.id + ' &middot; ' + escHtml(p.vendedor) + ' &middot; ' + escHtml(String(p.hora).slice(11, 16)) + ' &middot; $' + Number(p.monto).toFixed(2) + (p.detalle ? ('<div class="nota">' + escHtml(p.detalle) + '</div>') : '') + '</div></div>';
+          }).join('')) : '';
+        const sp = c.axisSinPedido || { ventas: 0, total: 0 };
+        document.getElementById('cuadreNota').textContent = 'Ventas de AxisPOS sin pedido (mostrador): ' + sp.ventas + ' por $' + Number(sp.total).toFixed(2) +
+          '. Un pedido se confirma cuando AxisPOS registra la misma venta; si pasan ' + c.esperaMinutos + ' min sin aparecer se marca. Los montos son los del pedido.' +
+          (c.seguimientoDesde ? (' Seguimiento desde ' + c.seguimientoDesde + '.') : '');
+      } catch (e) { panel.style.display = 'none'; }
     }
     cambiarRango(1);
   </script>
@@ -10643,6 +11143,7 @@ while ($listener.IsListening) {
     Revisar-CambioCatalogo
     Revisar-CatalogoAxis
     Revisar-VentasAxis
+    Revisar-TareasPedidos
 
     # Las consultas de sincronizacion del Gestor de Almacenes (cada ~10 s por telefono) no se anotan en pantalla para no llenar la consola.
     if (-not ($method -eq "GET" -and ($path.StartsWith("/api/almacen/") -or $path -eq "/api/fotos/skus"))) {
@@ -10666,6 +11167,23 @@ while ($listener.IsListening) {
 
         } elseif ($method -eq "GET" -and $path -eq "/metricas") {
             Enviar-Respuesta -Context $context -Body (Inyectar-Guardian $htmlMetricas)
+
+        } elseif ($method -eq "GET" -and $path -eq "/api/cuadre") {
+            if (-not [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)) {
+                Enviar-Json $context @{ ok = $false; error = "El cuadre solo se consulta desde la PC." } 403
+            } else {
+                $diasC = 1
+                if ($request.QueryString["dias"]) { try { $diasC = [int]$request.QueryString["dias"] } catch { $diasC = 1 } }
+                if ($diasC -lt 1) { $diasC = 1 }
+                if ($diasC -gt 30) { $diasC = 30 }
+                try {
+                    Actualizar-CuadreAxis
+                    $cu = Calcular-CuadreAxis $diasC
+                    Enviar-Respuesta -Context $context -Body ($cu | ConvertTo-Json -Depth 6) -ContentType "application/json; charset=utf-8"
+                } catch {
+                    Enviar-Respuesta -Context $context -Body (@{ ok = $false; error = "$($_.Exception.Message)" } | ConvertTo-Json) -ContentType "application/json; charset=utf-8" -StatusCode 500
+                }
+            }
 
         } elseif ($method -eq "GET" -and $path -eq "/api/metricas") {
             $diasQ = 1
@@ -10864,28 +11382,6 @@ while ($listener.IsListening) {
                     Enviar-Json $context @{ ok = $true; sha = (Almacen-Sha $cuerpoResp) }
                 }
             }
-
-        } elseif ($method -eq "GET" -and $path -eq "/api/almacen/stockvivo") {
-            # Stock efectivo para la app de Arqueo (ligero: [sku, nombre, stock, precio]). Cache de 2 s para no frenar al servidor.
-            $ahoraMsV = [int64][DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
-            if ((-not $global:stockVivoJson) -or (($ahoraMsV - [int64]$global:stockVivoTs) -gt 2000)) {
-                $sbV = New-Object System.Text.StringBuilder
-                [void]$sbV.Append('{"ok":true,"ts":' + $ahoraMsV + ',"items":[')
-                $primeroV = $true
-                foreach ($pV in $global:catalogo) {
-                    if (-not $primeroV) { [void]$sbV.Append(',') }
-                    $primeroV = $false
-                    $skuV = (([string]$pV.sku) -replace '[\x00-\x1F]', ' ').Replace('\', '\\').Replace('"', '\"')
-                    $nomV = (([string]$pV.nombre) -replace '[\x00-\x1F]', ' ').Replace('\', '\\').Replace('"', '\"')
-                    $stV = if ($pV.stock -ne $null) { ([double]$pV.stock).ToString([System.Globalization.CultureInfo]::InvariantCulture) } else { 'null' }
-                    $prV = if ($pV.precio -ne $null) { ([double]$pV.precio).ToString([System.Globalization.CultureInfo]::InvariantCulture) } else { '0' }
-                    [void]$sbV.Append('["' + $skuV + '","' + $nomV + '",' + $stV + ',' + $prV + ']')
-                }
-                [void]$sbV.Append(']}')
-                $global:stockVivoJson = $sbV.ToString()
-                $global:stockVivoTs = $ahoraMsV
-            }
-            Enviar-Respuesta -Context $context -Body $global:stockVivoJson -ContentType "application/json; charset=utf-8"
 
         } elseif ($method -eq "GET" -and $path -eq "/api/catalogo") {
             $json = if ($global:catalogo.Count -eq 0) { "[]" } else {
@@ -11437,7 +11933,7 @@ while ($listener.IsListening) {
                 if ([string]::IsNullOrWhiteSpace($skuItem)) { continue }
                 $prod = $global:catalogo | Where-Object { $_.sku -eq $skuItem } | Select-Object -First 1
                 if ($prod -and $prod.stock -ne $null -and $cantidadPedida -gt $prod.stock) {
-                    [void]$erroresStock.Add("$($prod.nombre): solo quedan $($prod.stock)")
+                    [void]$erroresStock.Add("$($prod.nombre): solo quedan $($prod.stock)" + $(if ([double]$prod.reservado -gt 0) { " (hay " + (Formato-Cantidad $prod.reservado) + " apartados en pedidos pendientes)" } else { "" }))
                 }
             }
 
@@ -11523,6 +12019,7 @@ while ($listener.IsListening) {
                 $global:nextId++
                 [void]$global:pedidos.Add([pscustomobject]$pedido)
                 Guardar-Pedidos
+                try { Recalcular-Reservas } catch {}
                 try {
                     $agotadosVenta = @()
                     foreach ($skB in @($stockAntesPorSku.Keys)) {
@@ -12159,6 +12656,7 @@ while ($listener.IsListening) {
                 }
                 $pedido.estado = "cancelado"
                 Guardar-Pedidos
+                try { Recalcular-Reservas } catch {}
                 if ($esLocalCanc -and $pedido.vendedor) {
                     Agregar-AlertaVendedor ([string]$pedido.vendedor) ("La caja anulo tu pedido #" + $pedido.id + ". El stock se devolvio.") $pedido.id "anulado"
                 }
@@ -12202,7 +12700,7 @@ while ($listener.IsListening) {
                     if ([string]::IsNullOrWhiteSpace($skuItem)) { continue }
                     $prod = $global:catalogo | Where-Object { $_.sku -eq $skuItem } | Select-Object -First 1
                     if ($prod -and $prod.stock -ne $null -and $cantidadPedida -gt $prod.stock) {
-                        [void]$erroresStockAg.Add("$($prod.nombre): solo quedan $($prod.stock)")
+                        [void]$erroresStockAg.Add("$($prod.nombre): solo quedan $($prod.stock)" + $(if ([double]$prod.reservado -gt 0) { " (hay " + (Formato-Cantidad $prod.reservado) + " apartados en pedidos pendientes)" } else { "" }))
                     }
                 }
                 if ($erroresStockAg.Count -gt 0) {
