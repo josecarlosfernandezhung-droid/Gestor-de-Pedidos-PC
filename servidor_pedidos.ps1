@@ -10865,6 +10865,28 @@ while ($listener.IsListening) {
                 }
             }
 
+        } elseif ($method -eq "GET" -and $path -eq "/api/almacen/stockvivo") {
+            # Stock efectivo para la app de Arqueo (ligero: [sku, nombre, stock, precio]). Cache de 2 s para no frenar al servidor.
+            $ahoraMsV = [int64][DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+            if ((-not $global:stockVivoJson) -or (($ahoraMsV - [int64]$global:stockVivoTs) -gt 2000)) {
+                $sbV = New-Object System.Text.StringBuilder
+                [void]$sbV.Append('{"ok":true,"ts":' + $ahoraMsV + ',"items":[')
+                $primeroV = $true
+                foreach ($pV in $global:catalogo) {
+                    if (-not $primeroV) { [void]$sbV.Append(',') }
+                    $primeroV = $false
+                    $skuV = (([string]$pV.sku) -replace '[\x00-\x1F]', ' ').Replace('\', '\\').Replace('"', '\"')
+                    $nomV = (([string]$pV.nombre) -replace '[\x00-\x1F]', ' ').Replace('\', '\\').Replace('"', '\"')
+                    $stV = if ($pV.stock -ne $null) { ([double]$pV.stock).ToString([System.Globalization.CultureInfo]::InvariantCulture) } else { 'null' }
+                    $prV = if ($pV.precio -ne $null) { ([double]$pV.precio).ToString([System.Globalization.CultureInfo]::InvariantCulture) } else { '0' }
+                    [void]$sbV.Append('["' + $skuV + '","' + $nomV + '",' + $stV + ',' + $prV + ']')
+                }
+                [void]$sbV.Append(']}')
+                $global:stockVivoJson = $sbV.ToString()
+                $global:stockVivoTs = $ahoraMsV
+            }
+            Enviar-Respuesta -Context $context -Body $global:stockVivoJson -ContentType "application/json; charset=utf-8"
+
         } elseif ($method -eq "GET" -and $path -eq "/api/catalogo") {
             $json = if ($global:catalogo.Count -eq 0) { "[]" } else {
                 $j = $global:catalogo | ConvertTo-Json -Depth 6
