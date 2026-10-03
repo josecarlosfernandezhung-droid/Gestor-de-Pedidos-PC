@@ -15,14 +15,16 @@ jobs:
           python3 build_www.py
           npm init -y
           npm install @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6
-          npm install @capacitor/filesystem@6 @capacitor/share@6
+          npm install @capacitor/filesystem@6 @capacitor/share@6 @capacitor-mlkit/barcode-scanning@6
           # Avisos nativos: si no se puede instalar, la APK se arma igual (sin esa funcion)
           npm install @capacitor/local-notifications@6 || echo "AVISO: sin local-notifications"
           # El segundo plano ya NO usa plugin de terceros: es un plugin propio (TotoBg) que se escribe mas abajo
+          # El escaner usa el modelo ML Kit incluido en la APK (necesita minSdk 23). No descarga nada.
+          sed -i -E 's/minSdkVersion = [0-9]+/minSdkVersion = 23/' android/variables.gradle
           cat > capacitor.config.json <<'JSON'
           {"appId":"com.totools.vendedor","appName":"Toto Vendedor","webDir":"www",
            "server":{"androidScheme":"http","cleartext":true},
-           "android":{"allowMixedContent":true}}
+           "android":{"allowMixedContent":true,"backgroundColor":"#00000000"}}
           JSON
           npx cap add android
           sed -i 's/<application/<application android:usesCleartextTraffic="true"/' android/app/src/main/AndroidManifest.xml
@@ -33,6 +35,8 @@ jobs:
           for perm in ['POST_NOTIFICATIONS', 'FOREGROUND_SERVICE', 'FOREGROUND_SERVICE_DATA_SYNC', 'FOREGROUND_SERVICE_SPECIAL_USE', 'WAKE_LOCK', 'REQUEST_IGNORE_BATTERY_OPTIMIZATIONS', 'VIBRATE']:
               if 'android.permission.' + perm not in s:
                   s = s.replace('<application', '<uses-permission android:name="android.permission.' + perm + '" />\n    <application', 1)
+          if 'android.permission.CAMERA' not in s:
+              s = s.replace('<application', '<uses-permission android:name="android.permission.CAMERA" />\n    <application', 1)
           if 'TotoBgService' not in s:
               servicio = ('\n        <service android:name=".TotoBgService" android:exported="false" android:foregroundServiceType="specialUse">'
                           '\n            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="Mantiene la conexion con la caja para recibir pedidos y avisos"/>'
@@ -40,6 +44,9 @@ jobs:
               s = s.replace('</application>', servicio + '</application>', 1)
           open(p, 'w', encoding='utf-8').write(s)
           PY
+          # Escaner de Google (Code Scanner), el mismo que usan otras apps: se llama directo desde el plugin TotoBg
+          sed -i '0,/^dependencies {/s//dependencies {\n    implementation "com.google.android.gms:play-services-code-scanner:16.1.0"\n    implementation "com.google.mlkit:barcode-scanning-common:17.0.0"/' android/app/build.gradle
+          grep -n "play-services-code-scanner" android/app/build.gradle || { echo "ERROR: no se pudo agregar el escaner de Google"; exit 1; }
           # Plugin propio de segundo plano (servicio en primer plano + wakelock + WebView despierto)
           mkdir -p android/app/src/main/java/com/totools/vendedor
           cat > android/app/src/main/java/com/totools/vendedor/TotoBgService.java <<'JAVA'
@@ -147,6 +154,10 @@ jobs:
           import com.getcapacitor.PluginCall;
           import com.getcapacitor.PluginMethod;
           import com.getcapacitor.annotation.CapacitorPlugin;
+          import com.google.mlkit.vision.barcode.common.Barcode;
+          import com.google.mlkit.vision.codescanner.GmsBarcodeScanner;
+          import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions;
+          import com.google.mlkit.vision.codescanner.GmsBarcodeScanning;
 
           @CapacitorPlugin(name = "TotoBg")
           public class TotoBgPlugin extends Plugin {
@@ -234,6 +245,34 @@ jobs:
                   }
                   call.resolve();
               }
+
+              // Escaner de Google (Google Code Scanner): se abre directo, Google se encarga de todo.
+              @PluginMethod
+              public void scan(final PluginCall call) {
+                  try {
+                      GmsBarcodeScannerOptions opts = new GmsBarcodeScannerOptions.Builder()
+                          .setBarcodeFormats(Barcode.FORMAT_ALL_FORMATS)
+                          .enableAutoZoom()
+                          .build();
+                      GmsBarcodeScanner sc = GmsBarcodeScanning.getClient(getActivity(), opts);
+                      sc.startScan()
+                          .addOnSuccessListener(b -> {
+                              JSObject r = new JSObject();
+                              String v = b.getRawValue();
+                              r.put("value", v == null ? "" : v);
+                              r.put("cancelled", false);
+                              call.resolve(r);
+                          })
+                          .addOnCanceledListener(() -> {
+                              JSObject r = new JSObject();
+                              r.put("cancelled", true);
+                              call.resolve(r);
+                          })
+                          .addOnFailureListener(e -> call.reject(String.valueOf(e.getMessage())));
+                  } catch (Throwable t) {
+                      call.reject("No se pudo abrir el escaner: " + t.getMessage());
+                  }
+              }
           }
           JAVA
           cat > android/app/src/main/java/com/totools/vendedor/MainActivity.java <<'JAVA'
@@ -253,6 +292,7 @@ jobs:
           npx cap sync android
           echo "=== Plugins registrados ==="
           cat android/app/src/main/assets/capacitor.plugins.json
+          grep -q "BarcodeScanner" android/app/src/main/assets/capacitor.plugins.json || { echo "ERROR: el plugin del escaner no quedo instalado"; exit 1; }
           python3 -m pip install --quiet pillow
           python3 - <<'PY'
           from PIL import Image
