@@ -1,4 +1,4 @@
-<#
+﻿<#
 ====================================================================
  SERVIDOR DE PEDIDOS - Toto Tools
 ====================================================================
@@ -88,6 +88,13 @@
      /api/pedidos/N/metodo). Un pedido ya cobrado no se puede anular,
      editar, cambiar ni volver a cobrar (lo valida el servidor).
 
+ NOVEDADES (v15):
+   - Panel -> Ajustes -> "Personalizar comprobante y QR": nombre, NIT,
+     direccion, telefono, textos, logo, QR de pago (desde imagen o texto),
+     papel y que datos se muestran. Se guarda en recibo_config.json.
+   - La caja puede cobrar por efectivo o por transferencia (boton extra
+     en cada pedido pendiente); avisa al vendedor si cambia el metodo.
+
  NOVEDADES (v14):
    - Etiquetas y codigos de barra: http://localhost:8080/etiquetas (Ajustes).
    - Lista de compras: boton en el aviso de stock bajo y en Ajustes; minimo
@@ -104,6 +111,18 @@
    - Modo punto de venta en el movil: lo activa el vendedor con la clave de administrador que se pone en la PC
      (menu, "PIN de vendedores"). Ventas (caja), devoluciones, descuentos y reporte de efectivo / transferencia.
    - Mensajes cortos opcionales caja <-> vendedor (nota en el pedido o mensaje suelto). Permiso "mensajes".
+
+ NOVEDADES (v38):
+   - La caja ya NO puede cambiar el metodo de pago: se quito el boton "Cobrar por transferencia/en efectivo"
+     y el servidor ignora cualquier cambio de metodo que mande la PC. Solo cobra con el que dejo el vendedor.
+   - Recibo: el logo y el QR salen centrados (se rellenan con blanco hasta el ancho del papel).
+ NOVEDADES (v37):
+   - Cobro por transferencia en el movil: al elegir Transferencia (o Efectivo + Transferencia) se muestra ahi mismo
+     el QR de pago guardado en la PC (Ajustes -> Personalizar comprobante y QR), tambien en "Mis pedidos de hoy".
+     El vendedor escribe el monto que llego segun el mensaje del banco; si es menor al total (x2) no se cierra la venta
+     (lo valida el movil y tambien el servidor). El pedido igual queda "por revisar" en la caja. La caja no cambia el metodo.
+   - Autoservicio: si el cliente pierde la conexion armando o enviando el pedido, no se pierde: lo armado se guarda
+     en su telefono y el pedido enviado queda en cola y se manda solo al volver la conexion (sin duplicarse).
 
  COMO USARLO:
    1. Deja "xlsx_full_min.js", "iniciar.bat" y este script en la
@@ -1132,7 +1151,7 @@ function Importar-FotosCatalogo {
 
         $datosJsonPath = Join-Path $carpetaTemp "datos.json"
         if (-not (Test-Path $datosJsonPath)) {
-            throw "El .zip no tiene 'datos.json' (¿es una copia de seguridad valida del catalogo?)."
+            throw "El .zip no tiene 'datos.json' (es una copia de seguridad valida del catalogo?)."
         }
         $datos = Get-Content $datosJsonPath -Raw -Encoding UTF8 | ConvertFrom-Json
         $productos = @($datos.products)
@@ -1329,6 +1348,7 @@ $global:catalogoInfo = [pscustomobject]@{
     cantidad         = 0
     necesitaRecarga  = $false
     mapeoConfigurado = $false
+    origen           = "excel"
 }
 
 $configExcelPath = Join-Path $scriptDir "config_excel.json"
@@ -1361,6 +1381,414 @@ function Guardar-ConfigExcel {
 }
 
 Cargar-ConfigExcel
+
+# ------------------------------------------------------------------
+# CATALOGO DESDE AXISPOS (MariaDB / MySQL) - SOLO LECTURA
+# Si config_axis.json tiene "activo": true, el catalogo (SKU, nombre,
+# precio y stock) se lee directo de la base de AxisPOS cada pocos
+# segundos y ya no hace falta cargar ningun Excel. Nunca se escribe
+# nada en la base: la consulta es un SELECT fijo y la sesion se abre
+# en modo "solo lectura". Usa el cliente mariadb.exe / mysql.exe.
+# ------------------------------------------------------------------
+$configAxisPath = Join-Path $scriptDir "config_axis.json"
+$global:configAxis = [pscustomobject]@{
+    activo        = $false
+    servidor      = "localhost"
+    puerto        = 3306
+    usuario       = "lector"
+    clave         = ""
+    base          = "axispos"
+    clienteMysql  = ""
+    almacenes     = @(1)
+    columnaPrecio = "PriceOut2"
+    columnaSku    = "Code"
+    cadaSegundos  = 30
+    cerrarPedidosAuto = $true
+    ventasCadaSegundos = 5
+}
+$global:axisUltimaLectura = [datetime]::MinValue
+$global:axisFallosSeguidos = 0
+
+function Cargar-ConfigAxis {
+    if (-not (Test-Path $configAxisPath)) {
+        try { ($global:configAxis | ConvertTo-Json -Depth 5) | Set-Content -Path $configAxisPath -Encoding UTF8 } catch {}
+        return
+    }
+    try {
+        $raw = Get-Content $configAxisPath -Raw -Encoding UTF8
+        if ($raw -and $raw.Trim().Length -gt 0) {
+            $d = $raw | ConvertFrom-Json
+            foreach ($k in @('activo','servidor','puerto','usuario','clave','base','clienteMysql','almacenes','columnaPrecio','columnaSku','cadaSegundos','cerrarPedidosAuto','ventasCadaSegundos')) {
+                if (($d.PSObject.Properties.Name -contains $k) -and ($d.$k -ne $null)) { $global:configAxis.$k = $d.$k }
+            }
+        }
+    } catch { Write-Host "Aviso: no se pudo leer config_axis.json ($_)." }
+    if ($global:configAxis.activo) {
+        $global:catalogoInfo.origen = "axispos"
+        $global:catalogoInfo.mapeoConfigurado = $true
+        $global:catalogoInfo.archivo = "AxisPOS (" + $global:configAxis.servidor + ":" + $global:configAxis.puerto + "/" + $global:configAxis.base + ")"
+    }
+}
+
+Cargar-ConfigAxis
+
+function Buscar-ClienteMysql {
+    $cfgExe = [string]$global:configAxis.clienteMysql
+    if ($cfgExe -and (Test-Path $cfgExe)) { return $cfgExe }
+    foreach ($n in @('mariadb.exe','mysql.exe')) {
+        $c = Get-Command $n -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($c) { return $c.Source }
+    }
+    $patrones = @(
+        'C:\Program Files\MariaDB*\bin\mariadb.exe', 'C:\Program Files\MariaDB*\bin\mysql.exe',
+        'C:\Program Files (x86)\MariaDB*\bin\mysql.exe', 'C:\Program Files\MySQL\MySQL Server*\bin\mysql.exe',
+        'C:\xampp\mysql\bin\mysql.exe', 'C:\wamp64\bin\mariadb\*\bin\mysql.exe', 'C:\laragon\bin\mysql\*\bin\mysql.exe'
+    )
+    foreach ($p in $patrones) {
+        $f = Get-ChildItem -Path $p -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($f) { return $f.FullName }
+    }
+    return $null
+}
+
+function Ejecutar-ConsultaAxis([string]$sql) {
+    $exe = Buscar-ClienteMysql
+    if (-not $exe) { throw "No encuentro mariadb.exe ni mysql.exe. Pon la ruta completa en config_axis.json (clienteMysql)." }
+    $c = $global:configAxis
+    foreach ($v in @([string]$c.servidor, [string]$c.usuario, [string]$c.base)) {
+        if ($v -match '["\r\n]') { throw "config_axis.json tiene caracteres no validos en servidor, usuario o base." }
+    }
+    $sqlUna = ($sql -replace '\s+', ' ').Trim()
+    $argumentos = '--protocol=tcp --connect-timeout=5 --default-character-set=utf8mb4 --init-command="SET SESSION TRANSACTION READ ONLY" -B -N -h "{0}" -P {1} -u "{2}" -D "{3}" -e "{4}"' -f $c.servidor, ([int]$c.puerto), $c.usuario, $c.base, $sqlUna
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $exe
+    $psi.Arguments = $argumentos
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+    $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
+    if ([string]$c.clave) { $psi.EnvironmentVariables["MYSQL_PWD"] = [string]$c.clave }
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    $tareaErr = $proc.StandardError.ReadToEndAsync()
+    $tareaOut = $proc.StandardOutput.ReadToEndAsync()
+    if (-not $proc.WaitForExit(20000)) {
+        try { $proc.Kill() } catch {}
+        throw "AxisPOS no respondio en 20 segundos."
+    }
+    $proc.WaitForExit()
+    $salida = $tareaOut.Result
+    $errTxt = ([string]$tareaErr.Result).Trim()
+    if ($proc.ExitCode -ne 0) {
+        if ($errTxt.Length -gt 200) { $errTxt = $errTxt.Substring(0, 200) }
+        throw "Error de la base: $errTxt"
+    }
+    return $salida
+}
+
+function Leer-ProductosAxis {
+    $c = $global:configAxis
+    $colPrecio = [string]$c.columnaPrecio
+    if ($colPrecio -notmatch '^PriceOut([1-9]|10)$') { throw "columnaPrecio invalida (usa PriceOut1 ... PriceOut10)." }
+    $colSku = [string]$c.columnaSku
+    if (@('Code','BarCode1','ID') -notcontains $colSku) { throw "columnaSku invalida (usa Code, BarCode1 o ID)." }
+    $ids = New-Object System.Collections.ArrayList
+    foreach ($a in @($c.almacenes)) { $n = 0; if ([int]::TryParse([string]$a, [ref]$n)) { [void]$ids.Add($n) } }
+    if ($ids.Count -eq 0) { throw "config_axis.json: 'almacenes' esta vacio." }
+    $lista = ($ids -join ',')
+    $sql = "SELECT g.$colSku, g.Name, g.$colPrecio, CASE WHEN COUNT(s.ID)=0 THEN NULL ELSE ROUND(SUM(s.Qtty),4) END FROM goods g LEFT JOIN store s ON s.GoodID=g.ID AND s.ObjectID IN ($lista) WHERE g.Deleted=0 AND TRIM(g.Name)<>'' GROUP BY g.ID, g.$colSku, g.Name, g.$colPrecio ORDER BY g.Name"
+    $texto = Ejecutar-ConsultaAxis $sql
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $lista2 = New-Object System.Collections.ArrayList
+    foreach ($linea in ($texto -split "`n")) {
+        $linea = $linea.TrimEnd("`r")
+        if ([string]::IsNullOrWhiteSpace($linea)) { continue }
+        $f = $linea -split "`t"
+        if ($f.Count -lt 4) { continue }
+        $nombre = ([string]$f[1]).Replace('\t', ' ').Replace('\n', ' ').Replace('\\', '\').Trim()
+        if ([string]::IsNullOrWhiteSpace($nombre)) { continue }
+        $precio = 0.0
+        [void][double]::TryParse([string]$f[2], [System.Globalization.NumberStyles]::Float, $inv, [ref]$precio)
+        $stock = $null
+        if ($f[3] -ne 'NULL' -and $f[3] -ne '') {
+            $sv = 0.0
+            if ([double]::TryParse([string]$f[3], [System.Globalization.NumberStyles]::Float, $inv, [ref]$sv)) { $stock = $sv }
+        }
+        [void]$lista2.Add([pscustomobject]@{ sku = ([string]$f[0]).Trim(); nombre = $nombre; precio = $precio; stock = $stock })
+    }
+    return @($lista2)
+}
+
+# Aplica una lista de productos {sku,nombre,precio,stock} al catalogo en memoria.
+# La usan por igual el Excel (via el Panel) y AxisPOS. El stock vendido desde los
+# moviles NUNCA se pierde mientras la cifra de origen no cambie (misma regla de siempre).
+function Aplicar-ProductosCatalogo($productos) {
+    $anteriorPorSku = @{}
+    foreach ($pAnt in $global:catalogo) {
+        if ($pAnt.sku) { $anteriorPorSku[[string]$pAnt.sku] = $pAnt }
+    }
+
+    $nuevo = New-Object System.Collections.ArrayList
+    foreach ($p in @($productos)) {
+        $nombre = ([string]$p.nombre).Trim()
+        if ([string]::IsNullOrWhiteSpace($nombre)) { continue }
+        $sku = if ($p.sku) { ([string]$p.sku).Trim() } else { "" }
+        $precio = 0.0
+        if ($p.precio -ne $null) {
+            if (($p.precio -is [double]) -or ($p.precio -is [int]) -or ($p.precio -is [long])) { $precio = [double]$p.precio }
+            else { [double]::TryParse([string]$p.precio, [ref]$precio) | Out-Null }
+        }
+
+        $stockOrigen = $null
+        if ($p.stock -ne $null -and $p.stock -ne "") {
+            if (($p.stock -is [double]) -or ($p.stock -is [int]) -or ($p.stock -is [long])) { $stockOrigen = [double]$p.stock }
+            else {
+                $stockVal = 0.0
+                if ([double]::TryParse([string]$p.stock, [ref]$stockVal)) { $stockOrigen = $stockVal }
+            }
+        }
+
+        $stockBase = $stockOrigen
+        $vendido   = 0.0
+        $stockEfectivo = $stockOrigen
+
+        $anterior = if ($sku) { $anteriorPorSku[$sku] } else { $null }
+        if ($anterior -and $stockOrigen -ne $null -and $anterior.stockBase -ne $null) {
+            if ([math]::Abs([double]$anterior.stockBase - [double]$stockOrigen) -lt 0.0001) {
+                $stockBase = [double]$anterior.stockBase
+                $vendido = [double]$anterior.vendido
+                $stockEfectivo = $stockBase - $vendido
+                if ($stockEfectivo -lt 0) { $stockEfectivo = 0 }
+            }
+        }
+
+        [void]$nuevo.Add([pscustomobject]@{
+            sku = $sku
+            nombre = $nombre
+            precio = [math]::Round($precio,2)
+            stock = $stockEfectivo
+            stockBase = $stockBase
+            vendido = $vendido
+        })
+    }
+
+    Avisar-CambiosCatalogo $anteriorPorSku $nuevo
+    Registrar-ProductosNuevos $nuevo
+    $global:catalogo = $nuevo
+    $global:catalogoInfo.cargado = $true
+    $global:catalogoInfo.ultimaCarga = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+    $global:catalogoInfo.error = $null
+    $global:catalogoInfo.cantidad = $nuevo.Count
+    $global:catalogoInfo.necesitaRecarga = $false
+    if ((-not $global:configAxis.activo) -and $global:configExcel.ruta -and (Test-Path $global:configExcel.ruta)) {
+        $global:catalogoMTimeProcesada = (Get-Item $global:configExcel.ruta).LastWriteTimeUtc
+    }
+}
+
+function Revisar-CatalogoAxis {
+    param([switch]$Forzar)
+    if (-not $global:configAxis.activo) { return }
+    $ahora = Get-Date
+    $espera = [int]$global:configAxis.cadaSegundos
+    if ($espera -lt 5) { $espera = 5 }
+    if ($global:axisFallosSeguidos -gt 0) { $espera = [math]::Min(300, $espera * ($global:axisFallosSeguidos + 1)) }
+    if ((-not $Forzar) -and (($ahora - $global:axisUltimaLectura).TotalSeconds -lt $espera)) { return }
+    $global:axisUltimaLectura = $ahora
+    try {
+        $productos = Leer-ProductosAxis
+        if (@($productos).Count -eq 0) { throw "La consulta no devolvio productos (se conserva el catalogo anterior)." }
+        Aplicar-ProductosCatalogo $productos | Out-Null
+        if ($global:axisFallosSeguidos -gt 0) { Write-Host "AxisPOS: conexion recuperada." }
+        $global:axisFallosSeguidos = 0
+    } catch {
+        $global:axisFallosSeguidos = $global:axisFallosSeguidos + 1
+        $global:catalogoInfo.error = "No se pudo leer AxisPOS: $_"
+        if ($global:axisFallosSeguidos -eq 1) { Write-Host "Aviso: $($global:catalogoInfo.error)" }
+    }
+}
+
+# ------------------------------------------------------------------
+# CIERRE AUTOMATICO DE PEDIDOS CON LAS VENTAS DE AXISPOS - SOLO LECTURA
+# Cuando la cajera cobra en AxisPOS lo mismo que tiene un pedido
+# "pendiente", el servidor lo detecta mirando la tabla de ventas
+# (operations, OperType=2) y marca el pedido como cobrado solo.
+#  - Compara producto por producto y cantidad por cantidad: tiene que
+#    ser EXACTAMENTE lo mismo (si hay dudas, no cierra nada).
+#  - Solo mira ventas nuevas (despues de arrancar el servidor); recuerda
+#    hasta donde leyo en axis_ventas.json.
+#  - Espera a ver la venta completa en dos lecturas seguidas antes de
+#    compararla (para no leerla a medias mientras AxisPOS la guarda).
+#  - Se apaga con "cerrarPedidosAuto": false en config_axis.json.
+# ------------------------------------------------------------------
+$axisVentasPath = Join-Path $scriptDir "axis_ventas.json"
+$global:axisVentasUltimoId = [long]-1
+$global:axisVentasUltima = [datetime]::MinValue
+$global:axisVentasFallos = 0
+$global:axisVentasVistas = @{}
+$global:axisVentasListas = @{}
+
+function Cargar-EstadoVentasAxis {
+    if (Test-Path $axisVentasPath) {
+        try {
+            $raw = Get-Content $axisVentasPath -Raw -Encoding UTF8
+            if ($raw -and $raw.Trim().Length -gt 0) {
+                $d = $raw | ConvertFrom-Json
+                if ($d.PSObject.Properties.Name -contains 'ultimoId') { $global:axisVentasUltimoId = [long]$d.ultimoId }
+            }
+        } catch {}
+    }
+}
+
+Cargar-EstadoVentasAxis
+
+function Guardar-EstadoVentasAxis {
+    Escribir-ArchivoConReintento -ruta $axisVentasPath -contenido (@{ ultimoId = $global:axisVentasUltimoId } | ConvertTo-Json) | Out-Null
+}
+
+function Leer-VentasAxis([long]$desdeId) {
+    $c = $global:configAxis
+    $colSku = [string]$c.columnaSku
+    if (@('Code','BarCode1','ID') -notcontains $colSku) { throw "columnaSku invalida (usa Code, BarCode1 o ID)." }
+    $ids = New-Object System.Collections.ArrayList
+    foreach ($a in @($c.almacenes)) { $n = 0; if ([int]::TryParse([string]$a, [ref]$n)) { [void]$ids.Add($n) } }
+    if ($ids.Count -eq 0) { throw "config_axis.json: 'almacenes' esta vacio." }
+    $lista = ($ids -join ',')
+    $sql = "SELECT o.ID, o.Acct, o.ObjectID, g.$colSku, o.Qtty, DATE_FORMAT(IF(o.UserRealTime IS NULL OR o.UserRealTime < '2000-01-01', o.Timestamp, o.UserRealTime), '%Y-%m-%d %H:%i:%s') FROM operations o JOIN goods g ON g.ID = o.GoodID WHERE o.OperType = 2 AND o.ID > $desdeId AND o.ObjectID IN ($lista) ORDER BY o.ID"
+    $texto = Ejecutar-ConsultaAxis $sql
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $res = New-Object System.Collections.ArrayList
+    foreach ($linea in ($texto -split "`n")) {
+        $linea = $linea.TrimEnd("`r")
+        if ([string]::IsNullOrWhiteSpace($linea)) { continue }
+        $f = $linea -split "`t"
+        if ($f.Count -lt 6) { continue }
+        $idFila = [long]0
+        if (-not [long]::TryParse([string]$f[0], [ref]$idFila)) { continue }
+        $qty = 0.0
+        [void][double]::TryParse([string]$f[4], [System.Globalization.NumberStyles]::Float, $inv, [ref]$qty)
+        [void]$res.Add([pscustomobject]@{ id = $idFila; acct = [string]$f[1]; obj = [string]$f[2]; sku = ([string]$f[3]).Trim(); qty = $qty; fecha = [string]$f[5] })
+    }
+    return @($res)
+}
+
+# Junta los productos de una lista en un diccionario sku -> cantidad total.
+# Devuelve $null si algun producto no tiene SKU o la cantidad no es valida.
+function Juntar-CantidadesPorSku($lineas, [string]$campoSku, [string]$campoCant) {
+    $d = @{}
+    foreach ($l in @($lineas)) {
+        $sku = ([string]$l.$campoSku).Trim()
+        if ([string]::IsNullOrWhiteSpace($sku)) { return $null }
+        $q = 0.0
+        try { $q = [double]$l.$campoCant } catch { return $null }
+        if ($q -le 0) { return $null }
+        if ($d.ContainsKey($sku)) { $d[$sku] = [double]$d[$sku] + $q } else { $d[$sku] = $q }
+    }
+    if ($d.Count -eq 0) { return $null }
+    return $d
+}
+
+function Cerrar-PedidoConVentaAxis($grupo) {
+    $venta = Juntar-CantidadesPorSku $grupo 'sku' 'qty'
+    if ($null -eq $venta) { return }
+    $acct = [string]$grupo[0].acct
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $horaVenta = $null
+    try { $horaVenta = [datetime]::ParseExact([string]$grupo[$grupo.Count - 1].fecha, "yyyy-MM-dd HH:mm:ss", $inv) } catch { $horaVenta = $null }
+
+    $candidatos = @($global:pedidos | Where-Object { [string]$_.estado -eq "pendiente" } | Sort-Object { [string]$_.hora })
+    foreach ($p in $candidatos) {
+        $pedidoItems = Juntar-CantidadesPorSku $p.items 'sku' 'cantidad'
+        if ($null -eq $pedidoItems) { continue }
+        if ($pedidoItems.Count -ne $venta.Count) { continue }
+        $igual = $true
+        foreach ($sku in @($pedidoItems.Keys)) {
+            if (-not $venta.ContainsKey($sku)) { $igual = $false; break }
+            if ([math]::Abs([double]$venta[$sku] - [double]$pedidoItems[$sku]) -gt 0.0001) { $igual = $false; break }
+        }
+        if (-not $igual) { continue }
+        # La venta tiene que ser posterior al pedido (con un minuto de margen por si los relojes no coinciden).
+        if ($horaVenta) {
+            try {
+                $horaPedido = [datetime]::ParseExact([string]$p.hora, "yyyy-MM-dd HH:mm:ss", $inv)
+                if ($horaVenta -lt $horaPedido.AddSeconds(-60)) { continue }
+            } catch {}
+        }
+
+        $metodo = if ($p.metodoPago) { [string]$p.metodoPago } else { "Efectivo" }
+        $baseTotal = [double]$p.totalProductos
+        $p.estado = "cobrado"
+        $totalAuto = if ($metodo -eq "Transferencia") { [math]::Round($baseTotal * 2, 2) } else { $baseTotal }
+        $p | Add-Member -NotePropertyName totalCobrado -NotePropertyValue $totalAuto -Force
+        $p | Add-Member -NotePropertyName cobradoPor -NotePropertyValue "caja" -Force
+        $p | Add-Member -NotePropertyName revisado -NotePropertyValue $true -Force
+        $p | Add-Member -NotePropertyName horaCobro -NotePropertyValue ((Get-Date).ToString("yyyy-MM-dd HH:mm:ss")) -Force
+        $p | Add-Member -NotePropertyName ventaAxis -NotePropertyValue $acct -Force
+        Guardar-Pedidos
+        try { Agregar-AlertaVendedor ([string]$p.vendedor) ("Tu pedido #" + $p.id + " ya se cobro en caja.") $p.id "pedido" } catch {}
+        Write-Host ("[" + (Get-Date).ToString('HH:mm:ss') + "] AxisPOS: la venta " + $acct + " cerro el pedido #" + $p.id + " (" + [string]$p.vendedor + ")")
+        return
+    }
+}
+
+function Revisar-VentasAxis {
+    if (-not $global:configAxis.activo) { return }
+    if (-not [bool]$global:configAxis.cerrarPedidosAuto) { return }
+    $espera = [int]$global:configAxis.ventasCadaSegundos
+    if ($espera -lt 3) { $espera = 3 }
+    if ($global:axisVentasFallos -gt 0) { $espera = [math]::Min(300, $espera * ($global:axisVentasFallos + 1)) }
+    $ahora = Get-Date
+    if (($ahora - $global:axisVentasUltima).TotalSeconds -lt $espera) { return }
+    $global:axisVentasUltima = $ahora
+    try {
+        if ($global:axisVentasUltimoId -lt 0) {
+            # Primera vez: se empieza desde la ultima venta que ya existe, sin tocar las anteriores.
+            $t = ([string](Ejecutar-ConsultaAxis "SELECT IFNULL(MAX(ID),0) FROM operations")).Trim()
+            $n = [long]0
+            if (-not [long]::TryParse($t, [ref]$n)) { throw "No se pudo leer el ultimo movimiento de AxisPOS." }
+            $global:axisVentasUltimoId = $n
+            Guardar-EstadoVentasAxis
+            $global:axisVentasFallos = 0
+            return
+        }
+        $filas = @(Leer-VentasAxis $global:axisVentasUltimoId)
+        $global:axisVentasFallos = 0
+        if ($filas.Count -eq 0) { $global:axisVentasVistas = @{}; $global:axisVentasListas = @{}; return }
+
+        $grupos = [ordered]@{}
+        $maxId = [long]0
+        foreach ($f in $filas) {
+            $k = [string]$f.acct + "|" + [string]$f.obj
+            if (-not $grupos.Contains($k)) { $grupos[$k] = New-Object System.Collections.ArrayList }
+            [void]$grupos[$k].Add($f)
+            if ($f.id -gt $maxId) { $maxId = $f.id }
+        }
+
+        $hayEnEspera = $false
+        $vistasNuevas = @{}
+        foreach ($k in @($grupos.Keys)) {
+            $g = $grupos[$k]
+            $maxG = [long]0
+            foreach ($fg in $g) { if ($fg.id -gt $maxG) { $maxG = $fg.id } }
+            $firma = [string]$g.Count + "|" + [string]$maxG
+            $vistasNuevas[$k] = $firma
+            if ($global:axisVentasListas.ContainsKey($k)) { continue }
+            if ([string]$global:axisVentasVistas[$k] -ne $firma) { $hayEnEspera = $true; continue }
+            Cerrar-PedidoConVentaAxis $g
+            $global:axisVentasListas[$k] = $true
+        }
+        $global:axisVentasVistas = $vistasNuevas
+        if (-not $hayEnEspera) {
+            $global:axisVentasUltimoId = $maxId
+            $global:axisVentasVistas = @{}
+            $global:axisVentasListas = @{}
+            Guardar-EstadoVentasAxis
+        }
+    } catch {
+        $global:axisVentasFallos = $global:axisVentasFallos + 1
+        if ($global:axisVentasFallos -eq 1) { Write-Host "Aviso: no se pudieron revisar las ventas de AxisPOS: $_" }
+    }
+}
 
 # ------------------------------------------------------------------
 # Ajustes generales (config_app.json). Por ahora solo uno:
@@ -1409,6 +1837,236 @@ function Cargar-ConfigApp {
 function Guardar-ConfigApp {
     Escribir-ArchivoConReintento -ruta $configAppPath -contenido ($global:configApp | ConvertTo-Json -Depth 5) | Out-Null
 }
+
+# ------------------------------------------------------------------
+# COMPROBANTE PERSONALIZABLE (recibo_config.json)
+# Textos, logo, QR de pago y opciones del ticket. Se edita desde el Panel
+# (Ajustes -> "Personalizar comprobante y QR"). Los valores de arriba del
+# script ($reciboNombre, $reciboNit...) solo sirven como valores iniciales.
+# Las imagenes (logo y QR) llegan ya convertidas a puntos blanco/negro desde
+# el navegador y aqui solo se mandan a la impresora (ESC/POS raster).
+# ------------------------------------------------------------------
+$reciboCfgPath = Join-Path $scriptDir "recibo_config.json"
+$global:reciboCfg = [pscustomobject]@{
+    nombre                   = [string]$reciboNombre
+    nit                      = [string]$reciboNit
+    direccion                = ""
+    telefono                 = ""
+    encabezadoExtra          = ""
+    pie                      = [string]$reciboPie
+    ancho                    = [int]$reciboAncho
+    estilo                   = [bool]$reciboConEstilo
+    mostrarServicioDescuento = [bool]$reciboMostrarServicioDescuento
+    mostrarVendedor          = $true
+    mostrarFolio             = $true
+    mostrarFecha             = $true
+    mostrarUSD               = $true
+    logo                     = $null
+    qrs                      = @()
+}
+
+function Recortar-Texto($s, [int]$max) {
+    $t = if ($null -eq $s) { "" } else { ([string]$s).Trim() }
+    if ($t.Length -gt $max) { $t = $t.Substring(0, $max) }
+    return $t
+}
+
+# Valida una imagen ya convertida a puntos: ancho multiplo de 8, 1 bit por punto.
+function Normalizar-ImagenRecibo($img, [int]$maxAncho) {
+    if (-not $img) { return $null }
+    try {
+        $w = [int]$img.w
+        $h = [int]$img.h
+        $bits = [string]$img.bits
+        if ($w -lt 8 -or $h -lt 1 -or ($w % 8) -ne 0 -or $w -gt $maxAncho -or $h -gt 1600 -or [string]::IsNullOrWhiteSpace($bits)) { return $null }
+        $raw = [Convert]::FromBase64String($bits)
+        if ($raw.Length -ne (($w / 8) * $h)) { return $null }
+        $png = [string]$img.png
+        if ($png -and (-not $png.StartsWith("data:image/png;base64,") -or $png.Length -gt 600000)) { $png = "" }
+        $activo = $true
+        if ($img.PSObject.Properties.Name -contains 'activo') { $activo = [bool]$img.activo }
+        return [pscustomobject]@{ activo = $activo; w = $w; h = $h; bits = $bits; png = $png }
+    } catch { return $null }
+}
+
+function Aplicar-ReciboCfg($d) {
+    if (-not $d) { return }
+    $c = $global:reciboCfg
+    $props = @($d.PSObject.Properties.Name)
+    $limites = @{ nombre = 60; nit = 40; direccion = 200; telefono = 60; encabezadoExtra = 500; pie = 500 }
+    foreach ($k in $limites.Keys) {
+        if ($props -contains $k) { $c.$k = (Recortar-Texto ($d.$k) ([int]$limites[$k])) }
+    }
+    if ($props -contains 'ancho') {
+        $a = 0
+        try { $a = [int]$d.ancho } catch {}
+        if ($a -eq 32 -or $a -eq 42 -or $a -eq 48) { $c.ancho = $a }
+    }
+    foreach ($k in @('estilo', 'mostrarServicioDescuento', 'mostrarVendedor', 'mostrarFolio', 'mostrarFecha', 'mostrarUSD')) {
+        if ($props -contains $k) { $c.$k = [bool]$d.$k }
+    }
+    if ($props -contains 'logo') {
+        $c.logo = Normalizar-ImagenRecibo $d.logo 576
+    }
+    if ($props -contains 'qrs') {
+        $lista = New-Object System.Collections.ArrayList
+        foreach ($q in @($d.qrs)) {
+            if (-not $q -or $lista.Count -ge 6) { continue }
+            $img = Normalizar-ImagenRecibo $q 576
+            if (-not $img) { continue }
+            $cuando = [string]$q.mostrarEn
+            if (@('transferencia', 'pendiente', 'siempre', 'nunca') -notcontains $cuando) { $cuando = 'transferencia' }
+            [void]$lista.Add([pscustomobject]@{
+                id          = (Recortar-Texto $q.id 40)
+                titulo      = (Recortar-Texto $q.titulo 40)
+                instruccion = (Recortar-Texto $q.instruccion 200)
+                mostrarEn   = $cuando
+                w           = $img.w
+                h           = $img.h
+                bits        = $img.bits
+                png         = $img.png
+            })
+        }
+        $c.qrs = @($lista)
+    }
+}
+
+function Cargar-ReciboCfg {
+    if (Test-Path $reciboCfgPath) {
+        try {
+            $raw = Get-Content $reciboCfgPath -Raw -Encoding UTF8
+            if ($raw -and $raw.Trim().Length -gt 0) { Aplicar-ReciboCfg ($raw | ConvertFrom-Json) }
+        } catch {
+            Write-Host "Aviso: no se pudo leer recibo_config.json, se usan los valores por defecto."
+        }
+    }
+}
+
+function Guardar-ReciboCfg {
+    Escribir-ArchivoConReintento -ruta $reciboCfgPath -contenido ($global:reciboCfg | ConvertTo-Json -Depth 6) | Out-Null
+}
+
+# Decide si un QR se imprime en este comprobante segun su opcion "mostrarEn".
+function Qr-DebeImprimirse($q, $p) {
+    $metodo = [string]$p.metodoPago
+    $pendiente = ([string]$p.estado -ne "cobrado")
+    switch ([string]$q.mostrarEn) {
+        "siempre"       { return $true }
+        "pendiente"     { return $pendiente }
+        "transferencia" { return ($metodo -eq "Transferencia" -or $metodo -eq "Combinado") }
+        default         { return $false }
+    }
+}
+
+# Encabezado comun (recibo y comprobante de devolucion): logo, nombre, NIT, direccion, telefono y texto extra.
+function Agregar-EncabezadoNegocio($sb, [int]$ancho, [string]$grande, [string]$normal) {
+    $rc = $global:reciboCfg
+    if ($rc.logo -and $rc.logo.activo) { [void]$sb.AppendLine(([string][char]1) + "LOGO" + ([string][char]1)) }
+    foreach ($l in @(Partir-Texto ([string]$rc.nombre) $ancho)) { [void]$sb.AppendLine($grande + (Centrar $l $ancho) + $normal) }
+    if ($rc.nit) { [void]$sb.AppendLine($grande + (Centrar ("NIT: " + $rc.nit) $ancho) + $normal) }
+    foreach ($l in @(Partir-Texto ([string]$rc.direccion) $ancho)) { [void]$sb.AppendLine((Centrar $l $ancho)) }
+    if ($rc.telefono) {
+        foreach ($l in @(Partir-Texto ("Tel: " + $rc.telefono) $ancho)) { [void]$sb.AppendLine((Centrar $l $ancho)) }
+    }
+    if ($rc.encabezadoExtra) {
+        foreach ($linea in ([string]$rc.encabezadoExtra -split "`r?`n")) {
+            if ([string]::IsNullOrWhiteSpace($linea)) { [void]$sb.AppendLine(""); continue }
+            foreach ($l in @(Partir-Texto $linea $ancho)) { [void]$sb.AppendLine((Centrar $l $ancho)) }
+        }
+    }
+}
+
+function Escribir-ImagenRaster($ms, $img) {
+    $w = [int]$img.w
+    $h = [int]$img.h
+    $bpr = [int]($w / 8)
+    $data = [Convert]::FromBase64String([string]$img.bits)
+    # Muchas termicas ignoran el "centrar" (ESC a 1) en imagenes. Para que salgan en el centro
+    # siempre, se rellena cada fila con blanco a los lados hasta el ancho completo del papel.
+    $anchoPapel = if ([int]$global:reciboCfg.ancho -le 32) { 384 } else { 576 }
+    $bprPapel = [int]($anchoPapel / 8)
+    if ($bprPapel -gt $bpr) {
+        $izqB = [int][math]::Floor(($bprPapel - $bpr) / 2)
+        $nuevo = New-Object 'byte[]' ($bprPapel * $h)
+        for ($yy = 0; $yy -lt $h; $yy++) { [Array]::Copy($data, $yy * $bpr, $nuevo, $yy * $bprPapel + $izqB, $bpr) }
+        $data = $nuevo
+        $bpr = $bprPapel
+    }
+    $centrar = [byte[]]@(27, 97, 1)
+    $ms.Write($centrar, 0, 3)
+    for ($y = 0; $y -lt $h; $y += 64) {
+        $n = [math]::Min(64, $h - $y)
+        $cab = [byte[]]@(29, 118, 48, 0, ($bpr % 256), [int][math]::Floor($bpr / 256), ($n % 256), [int][math]::Floor($n / 256))
+        $ms.Write($cab, 0, 8)
+        $ms.Write($data, $y * $bpr, $n * $bpr)
+    }
+    $izq = [byte[]]@(27, 97, 0)
+    $ms.Write($izq, 0, 3)
+}
+
+# Convierte el texto del comprobante en bytes para la impresora, cambiando las marcas
+# de logo / QR por la imagen en puntos correspondiente.
+function Bytes-DesdeTexto([string]$texto) {
+    $ms = New-Object System.IO.MemoryStream
+    $partes = [regex]::Split($texto, '\x01(LOGO|QR[0-9]+)\x01')
+    for ($i = 0; $i -lt $partes.Count; $i++) {
+        if (($i % 2) -eq 0) {
+            if ($partes[$i].Length -gt 0) {
+                $b = [System.Text.Encoding]::ASCII.GetBytes($partes[$i])
+                $ms.Write($b, 0, $b.Length)
+            }
+        } else {
+            $marca = [string]$partes[$i]
+            try {
+                if ($marca -eq "LOGO") {
+                    if ($global:reciboCfg.logo -and $global:reciboCfg.logo.activo) { Escribir-ImagenRaster $ms $global:reciboCfg.logo }
+                } else {
+                    $idx = [int]$marca.Substring(2)
+                    $lq = @($global:reciboCfg.qrs)
+                    if ($idx -lt $lq.Count -and $lq[$idx]) { Escribir-ImagenRaster $ms $lq[$idx] }
+                }
+            } catch { Write-Host "Aviso: no se pudo imprimir una imagen del comprobante ($_)." }
+        }
+    }
+    return ,$ms.ToArray()
+}
+
+# Vista previa en texto (sin comandos de la impresora; las imagenes se muestran como [LOGO] / [QR: ...]).
+function Texto-VistaRecibo([string]$t) {
+    $t = [regex]::Replace($t, '\x1b@', '')
+    $t = [regex]::Replace($t, '(?s)\x1b!.', '')
+    $lq = @($global:reciboCfg.qrs)
+    $t = [regex]::Replace($t, '\x01(LOGO|QR[0-9]+)\x01', {
+        param($m)
+        $g = $m.Groups[1].Value
+        if ($g -eq "LOGO") { return "[ LOGO ]" }
+        $i = [int]$g.Substring(2)
+        $lqq = @($global:reciboCfg.qrs)
+        if ($i -lt $lqq.Count -and $lqq[$i]) { return "[ QR: " + $lqq[$i].titulo + " ]" }
+        return "[ QR ]"
+    })
+    return $t
+}
+
+function Pedido-Muestra([string]$metodo, [string]$estado) {
+    $factor = if ($metodo -eq "Transferencia") { 2 } else { 1 }
+    $base = 3700.0
+    return [pscustomobject]@{
+        id             = 123
+        vendedor       = "Vendedor"
+        hora           = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+        estado         = $estado
+        metodoPago     = $metodo
+        totalProductos = $base
+        totalCobrado   = ($base * $factor)
+        montoRecibido  = 0
+        items          = @(
+            [pscustomobject]@{ nombre = "Producto de ejemplo uno"; cantidad = 2; precio = 1200 },
+            [pscustomobject]@{ nombre = "Otro producto con un nombre bastante largo"; cantidad = 1; precio = 1300 }
+        )
+    }
+}
+
 
 # ------------------------------------------------------------------
 # PIN opcional por vendedor. Sin el, cualquiera en la Wi-Fi puede mandar
@@ -1462,9 +2120,11 @@ function Pin-Valido([string]$vendedor, $pinEnviado) {
 }
 
 Cargar-ConfigApp
+Cargar-ReciboCfg
 
 function Revisar-CambioCatalogo {
     try {
+        if ($global:configAxis.activo) { return }
         $ruta = $global:configExcel.ruta
         if (-not $ruta) {
             $global:catalogoInfo.error = "No se ha configurado la ruta del archivo Excel todavia."
@@ -1564,9 +2224,9 @@ if (-not ("RawPrinterHelper" -as [type])) {
 
 function Quitar-Acentos([string]$s) {
     if (-not $s) { return $s }
-    $s = $s.Replace('á','a').Replace('é','e').Replace('í','i').Replace('ó','o').Replace('ú','u')
-    $s = $s.Replace('Á','A').Replace('É','E').Replace('Í','I').Replace('Ó','O').Replace('Ú','U')
-    $s = $s.Replace('ñ','n').Replace('Ñ','N').Replace('ü','u').Replace('Ü','U')
+    $s = $s.Replace([string][char]0xE1,'a').Replace([string][char]0xE9,'e').Replace([string][char]0xED,'i').Replace([string][char]0xF3,'o').Replace([string][char]0xFA,'u')
+    $s = $s.Replace([string][char]0xC1,'A').Replace([string][char]0xC9,'E').Replace([string][char]0xCD,'I').Replace([string][char]0xD3,'O').Replace([string][char]0xDA,'U')
+    $s = $s.Replace([string][char]0xF1,'n').Replace([string][char]0xD1,'N').Replace([string][char]0xFC,'u').Replace([string][char]0xDC,'U')
     return $s
 }
 
@@ -1628,32 +2288,32 @@ function Partir-Texto([string]$texto, [int]$ancho) {
 }
 
 # Comando ESC/POS "modo de impresion": 0 = normal, 24 = negrita + doble alto.
-# Si $reciboConEstilo es $false no se manda ningun comando (solo texto).
+# Si $global:reciboCfg.estilo es $false no se manda ningun comando (solo texto).
 function Modo-Impresora([int]$n) {
-    if (-not $reciboConEstilo) { return "" }
+    if (-not $global:reciboCfg.estilo) { return "" }
     return ([string][char]27) + "!" + ([string][char]$n)
 }
 
 function Generar-TextoRecibo($p) {
-    $ancho = [int]$reciboAncho
+    $rc = $global:reciboCfg
+    $ancho = [int]$rc.ancho
     $inv = [System.Globalization.CultureInfo]::InvariantCulture
     $sb = New-Object System.Text.StringBuilder
     $sep = ("- " * [int][math]::Floor($ancho / 2)).TrimEnd()
     $grande = Modo-Impresora 24
     $normal = Modo-Impresora 0
 
-    if ($reciboConEstilo) { [void]$sb.Append(([string][char]27) + "@") }
+    if ($rc.estilo) { [void]$sb.Append(([string][char]27) + "@") }
 
-    # ---- Encabezado ----
-    [void]$sb.AppendLine($grande + (Centrar $reciboNombre $ancho) + $normal)
-    if ($reciboNit) { [void]$sb.AppendLine($grande + (Centrar ("NIT: " + $reciboNit) $ancho) + $normal) }
+    # ---- Encabezado (logo, nombre, NIT, direccion, telefono, texto extra) ----
+    Agregar-EncabezadoNegocio $sb $ancho $grande $normal
     [void]$sb.AppendLine("")
 
     $fecha = [string]$p.hora
     try { $fecha = ([datetime]::ParseExact([string]$p.hora, "yyyy-MM-dd HH:mm:ss", $inv)).ToString("d/M/yyyy HH:mm", $inv) } catch {}
-    [void]$sb.AppendLine("Vendedor: $($p.vendedor)")
-    [void]$sb.AppendLine("Folio: $($p.id)")
-    [void]$sb.AppendLine("Fecha: $fecha")
+    if ($rc.mostrarVendedor) { [void]$sb.AppendLine("Vendedor: $($p.vendedor)") }
+    if ($rc.mostrarFolio) { [void]$sb.AppendLine("Folio: $($p.id)") }
+    if ($rc.mostrarFecha) { [void]$sb.AppendLine("Fecha: $fecha") }
     if ([string]$p.estado -ne "cobrado") { [void]$sb.AppendLine("Estado: PENDIENTE DE PAGO") }
     [void]$sb.AppendLine($sep)
 
@@ -1682,7 +2342,7 @@ function Generar-TextoRecibo($p) {
     [void]$sb.AppendLine($sep)
     [void]$sb.AppendLine("")
     [void]$sb.AppendLine($grande + (Linea-LR "SUBTOTAL:" (Formato-Monto $total) $ancho) + $normal)
-    if ($reciboMostrarServicioDescuento) {
+    if ($rc.mostrarServicioDescuento) {
         [void]$sb.AppendLine($grande + (Linea-LR "SERVICIO:" "0.0" $ancho) + $normal)
         [void]$sb.AppendLine($grande + "DESCUENTO %:" + $normal)
     }
@@ -1691,7 +2351,7 @@ function Generar-TextoRecibo($p) {
 
     $tasa = 0.0
     try { $tasa = [double]$global:configApp.tasaDolar } catch {}
-    if ($tasa -gt 0) {
+    if ($tasa -gt 0 -and $rc.mostrarUSD) {
         [void]$sb.AppendLine($grande + (Linea-LR "TOTAL USD:" (Formato-Monto ($total / $tasa)) $ancho) + $normal)
     }
     [void]$sb.AppendLine("")
@@ -1713,10 +2373,22 @@ function Generar-TextoRecibo($p) {
         [void]$sb.AppendLine((Linea-LR "Cambio:" (Formato-Monto ($recibido - $total)) $ancho))
     }
 
+    # ---- QR de pago (segun la opcion de cada QR en Ajustes) ----
+    $lq = @($rc.qrs)
+    for ($i = 0; $i -lt $lq.Count; $i++) {
+        $q = $lq[$i]
+        if (-not $q) { continue }
+        if (-not (Qr-DebeImprimirse $q $p)) { continue }
+        [void]$sb.AppendLine($sep)
+        foreach ($l in @(Partir-Texto ([string]$q.titulo) $ancho)) { [void]$sb.AppendLine($grande + (Centrar $l $ancho) + $normal) }
+        foreach ($l in @(Partir-Texto ([string]$q.instruccion) $ancho)) { [void]$sb.AppendLine((Centrar $l $ancho)) }
+        [void]$sb.AppendLine(([string][char]1) + "QR" + $i + ([string][char]1))
+    }
+
     # ---- Pie ----
     [void]$sb.AppendLine($sep)
     [void]$sb.AppendLine("")
-    foreach ($l in @(Partir-Texto $reciboPie $ancho)) { [void]$sb.AppendLine((Centrar $l $ancho)) }
+    foreach ($l in @(Partir-Texto ([string]$rc.pie) $ancho)) { [void]$sb.AppendLine((Centrar $l $ancho)) }
     [void]$sb.Append("`n`n`n`n")
     return (Quitar-Acentos ($sb.ToString()))
 }
@@ -1810,7 +2482,7 @@ function Clave-EnvioGuardar([string]$clave, [string]$resp) {
 }
 
 function Imprimir-Texto([string]$texto) {
-    $bytes = [System.Text.Encoding]::ASCII.GetBytes($texto)
+    $bytes = Bytes-DesdeTexto $texto
     return [RawPrinterHelper]::EnviarBytes($nombreImpresora, $bytes)
 }
 
@@ -2002,15 +2674,15 @@ function Minimo-Efectivo($p) {
 }
 
 function Generar-TextoListaCompras($items) {
-    $ancho = [int]$reciboAncho
+    $ancho = [int]$global:reciboCfg.ancho
     $inv = [System.Globalization.CultureInfo]::InvariantCulture
     $sb = New-Object System.Text.StringBuilder
     $sep = ("- " * [int][math]::Floor($ancho / 2)).TrimEnd()
     $grande = Modo-Impresora 24
     $normal = Modo-Impresora 0
-    if ($reciboConEstilo) { [void]$sb.Append(([string][char]27) + "@") }
+    if ($global:reciboCfg.estilo) { [void]$sb.Append(([string][char]27) + "@") }
     [void]$sb.AppendLine($grande + (Centrar "LISTA DE COMPRAS" $ancho) + $normal)
-    [void]$sb.AppendLine((Centrar $reciboNombre $ancho))
+    [void]$sb.AppendLine((Centrar $global:reciboCfg.nombre $ancho))
     [void]$sb.AppendLine((Centrar (Get-Date).ToString("d/M/yyyy HH:mm", $inv) $ancho))
     [void]$sb.AppendLine($sep)
     $n = 0
@@ -2038,7 +2710,7 @@ function Escribir-Texto($ms, [string]$t) {
 }
 
 function Generar-BytesEtiquetas($items, $o) {
-    $ancho = [int]$reciboAncho
+    $ancho = [int]$global:reciboCfg.ancho
     $maxDots = if ($ancho -le 32) { 384 } else { 576 }
     $ms = New-Object System.IO.MemoryStream
     $feed = 3
@@ -2046,7 +2718,7 @@ function Generar-BytesEtiquetas($items, $o) {
     if ($feed -lt 0) { $feed = 0 }
     if ($feed -gt 20) { $feed = 20 }
     $corte = [bool]($o -and $o.corte)
-    $negocio = if ($o -and $o.negocio) { ([string]$o.negocio).Trim() } else { [string]$reciboNombre }
+    $negocio = if ($o -and $o.negocio) { ([string]$o.negocio).Trim() } else { [string]$global:reciboCfg.nombre }
 
     Escribir-Bytes $ms ([byte[]]@(27, 64))
     foreach ($it in @($items)) {
@@ -2227,16 +2899,15 @@ function Guardar-Devoluciones {
 Cargar-Devoluciones
 
 function Generar-TextoDevolucion($d) {
-    $ancho = [int]$reciboAncho
+    $ancho = [int]$global:reciboCfg.ancho
     $inv = [System.Globalization.CultureInfo]::InvariantCulture
     $sb = New-Object System.Text.StringBuilder
     $sep = ("- " * [int][math]::Floor($ancho / 2)).TrimEnd()
     $grande = Modo-Impresora 24
     $normal = Modo-Impresora 0
-    if ($reciboConEstilo) { [void]$sb.Append(([string][char]27) + "@") }
+    if ($global:reciboCfg.estilo) { [void]$sb.Append(([string][char]27) + "@") }
 
-    [void]$sb.AppendLine($grande + (Centrar $reciboNombre $ancho) + $normal)
-    if ($reciboNit) { [void]$sb.AppendLine((Centrar ("NIT: " + $reciboNit) $ancho)) }
+    Agregar-EncabezadoNegocio $sb $ancho $grande $normal
     [void]$sb.AppendLine("")
     $titulo = switch ([string]$d.tipo) { "garantia" { "GARANTIA" } "cambio" { "CAMBIO" } default { "DEVOLUCION" } }
     [void]$sb.AppendLine($grande + (Centrar ("COMPROBANTE DE " + $titulo) $ancho) + $normal)
@@ -2285,7 +2956,7 @@ function Generar-TextoDevolucion($d) {
     [void]$sb.AppendLine("Autoriza:")
     [void]$sb.AppendLine(("_" * ($ancho - 2)))
     [void]$sb.AppendLine("")
-    if ($reciboPie) { foreach ($l in @(Partir-Texto $reciboPie $ancho)) { [void]$sb.AppendLine((Centrar $l $ancho)) } }
+    if ($global:reciboCfg.pie) { foreach ($l in @(Partir-Texto $global:reciboCfg.pie $ancho)) { [void]$sb.AppendLine((Centrar $l $ancho)) } }
     [void]$sb.Append("`n`n`n`n")
     return (Quitar-Acentos ($sb.ToString()))
 }
@@ -2917,6 +3588,73 @@ $htmlPC = @'
   <div id="banner">Nuevo pedido recibido</div>
   <div id="grid"></div>
 
+  <div id="reciboOverlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.65); align-items:center; justify-content:center; z-index:59;" onclick="if (event.target === this) cerrarRecibo()">
+    <div style="background:#1e293b; padding:20px; border-radius:12px; max-width:780px; width:95%; max-height:92vh; overflow:auto; color:#e2e8f0;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+        <h2 style="font-size:17px; color:#fff;">Personalizar comprobante y QR</h2>
+        <button class="btn-toggle" onclick="cerrarRecibo()">Cerrar</button>
+      </div>
+      <div id="reciboMsg" style="font-size:13px; color:#fbbf24; min-height:18px; margin-bottom:8px;"></div>
+
+      <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:14px;">
+        <div>
+          <h3 style="font-size:14px; margin-bottom:8px; color:#93c5fd;">Datos del negocio</h3>
+          <label class="rc-et">Nombre del negocio</label><input type="text" id="rcNombre" class="rc-in" maxlength="60">
+          <label class="rc-et">NIT</label><input type="text" id="rcNit" class="rc-in" maxlength="40" placeholder="Vacio = no se imprime">
+          <label class="rc-et">Direccion</label><input type="text" id="rcDireccion" class="rc-in" maxlength="200">
+          <label class="rc-et">Telefono</label><input type="text" id="rcTelefono" class="rc-in" maxlength="60">
+          <label class="rc-et">Texto extra bajo el encabezado (una linea por renglon)</label><textarea id="rcExtra" class="rc-in" rows="3" maxlength="500"></textarea>
+          <label class="rc-et">Mensaje del pie (garantia, gracias...)</label><textarea id="rcPie" class="rc-in" rows="3" maxlength="500"></textarea>
+        </div>
+        <div>
+          <h3 style="font-size:14px; margin-bottom:8px; color:#93c5fd;">Papel y que se muestra</h3>
+          <label class="rc-et">Ancho del papel</label>
+          <select id="rcAncho" class="rc-in" onchange="rcPintarImagenes()"><option value="32">58 mm (32 columnas)</option><option value="42">80 mm (42 columnas)</option><option value="48">80 mm (48 columnas)</option></select>
+          <label class="rc-ck"><input type="checkbox" id="rcEstilo"> Letras grandes y negrita (si la impresora imprime simbolos raros, desactivalo)</label>
+          <label class="rc-ck"><input type="checkbox" id="rcVend"> Mostrar vendedor</label>
+          <label class="rc-ck"><input type="checkbox" id="rcFolio"> Mostrar folio</label>
+          <label class="rc-ck"><input type="checkbox" id="rcFecha"> Mostrar fecha y hora</label>
+          <label class="rc-ck"><input type="checkbox" id="rcServ"> Mostrar SERVICIO y DESCUENTO %</label>
+          <label class="rc-ck"><input type="checkbox" id="rcUSD"> Mostrar TOTAL USD (usa la tasa de Ajustes)</label>
+
+          <h3 style="font-size:14px; margin:14px 0 8px; color:#93c5fd;">Logo</h3>
+          <div id="rcLogoCaja" style="background:#fff; border-radius:6px; padding:6px; min-height:40px; text-align:center; margin-bottom:8px;"><span style="color:#64748b; font-size:12px;">Sin logo</span></div>
+          <input type="file" id="rcLogoFile" accept="image/*" onchange="rcElegirLogo(this)" style="font-size:12px; margin-bottom:6px; max-width:100%;">
+          <label class="rc-ck"><input type="checkbox" id="rcLogoActivo" checked> Imprimir el logo</label>
+          <label class="rc-et">Tamano del logo: <span id="rcLogoAnchoTxt"></span> puntos</label>
+          <input type="range" id="rcLogoAncho" min="96" max="384" step="8" value="256" oninput="rcRehacerLogo()" style="width:100%;">
+          <label class="rc-ck"><input type="checkbox" id="rcLogoTramado" onchange="rcRehacerLogo()"> Tramado (para logos con colores o fotos)</label>
+          <button class="btn-toggle" style="margin-top:6px;" onclick="rcQuitarLogo()">Quitar logo</button>
+        </div>
+      </div>
+
+      <h3 style="font-size:14px; margin:16px 0 4px; color:#93c5fd;">QR de pago (transferencia, tarjeta, WhatsApp...)</h3>
+      <p style="font-size:12px; color:#94a3b8; margin-bottom:8px;">Agrega la imagen del QR (recortada, solo el codigo) o escribe el texto/enlace y se genera solo. Cada QR dice cuando se imprime.</p>
+      <div id="rcQrLista"></div>
+      <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:8px;">
+        <label class="btn-toggle" style="cursor:pointer;">+ QR desde imagen<input type="file" accept="image/*" onchange="rcAgregarQrImagen(this)" style="display:none;"></label>
+        <button class="btn-toggle" onclick="rcAgregarQrTexto()">+ QR desde texto o enlace</button>
+      </div>
+
+      <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:16px; align-items:center;">
+        <button class="btn-nuevo-pedido" style="background:#15803d;" onclick="rcGuardar()">Guardar</button>
+        <button class="btn-toggle" onclick="rcImprimirPrueba()">Imprimir prueba</button>
+        <select id="rcVistaMetodo" class="rc-in" style="width:auto; margin:0;" onchange="rcVista()"><option value="Efectivo">Efectivo</option><option value="Transferencia">Transferencia</option></select>
+        <select id="rcVistaEstado" class="rc-in" style="width:auto; margin:0;" onchange="rcVista()"><option value="pendiente">Por cobrar</option><option value="cobrado">Cobrado</option></select>
+      </div>
+      <div style="font-size:12px; color:#94a3b8; margin:10px 0 4px;">Vista previa (lo ultimo que guardaste):</div>
+      <pre id="rcVistaTxt" style="background:#fff; color:#111; border-radius:6px; padding:10px; font-size:12px; line-height:1.25; overflow:auto; white-space:pre; font-family:'Courier New',monospace; max-height:340px;"></pre>
+    </div>
+  </div>
+  <style>
+    .rc-et { display:block; font-size:12px; color:#94a3b8; margin:8px 0 3px; }
+    .rc-in { width:100%; padding:8px; border-radius:6px; border:1px solid #334155; background:#0f172a; color:#e2e8f0; font-size:13px; box-sizing:border-box; }
+    .rc-ck { display:flex; gap:8px; align-items:flex-start; font-size:13px; margin:6px 0; }
+    .rc-qr { background:#0f172a; border:1px solid #334155; border-radius:8px; padding:10px; margin-bottom:8px; display:flex; gap:12px; flex-wrap:wrap; }
+    .rc-qr .rc-img { background:#fff; border-radius:6px; padding:4px; width:120px; height:120px; display:flex; align-items:center; justify-content:center; }
+    .rc-qr .rc-img img { max-width:100%; max-height:100%; image-rendering:pixelated; }
+  </style>
+
   <div id="menuPCOverlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); align-items:center; justify-content:center; z-index:58;" onclick="if (event.target === this) cerrarMenuPC()">
     <div style="background:#1e293b; padding:22px; border-radius:12px; max-width:420px; width:92%; max-height:88vh; overflow:auto;">
       <h2 style="font-size:17px; margin-bottom:14px; color:#fff;">Ajustes</h2>
@@ -2951,6 +3689,7 @@ $htmlPC = @'
       <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="window.open('/etiquetas', '_blank')">Etiquetas y códigos de barra (F4)</button>
       <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="abrirCompras()">Lista de compras (reabastecer) (F6)</button>
       <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="abrirDevolucion()">Ticket de devolución / garantía (F7)</button>
+      <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="abrirRecibo()" title="Nombre, NIT, logo, textos del ticket y QR de pago para imprimir">Personalizar comprobante y QR</button>
       <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="abrirPermisos()">Permisos de vendedores</button>
       <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="abrirRed()">Red / IP fija de la PC</button>
       <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="window.open('/metricas', '_blank')">Ver metricas (F8)</button>
@@ -3156,7 +3895,6 @@ $htmlPC = @'
       </div>
     </div>
   </div>
-
   <script>
     // Libreria QR (qrcode-generator de kazuhikoarase, MIT, sin dependencias
     // externas -- va incrustada aqui mismo, el navegador no descarga nada).
@@ -3237,22 +3975,262 @@ $htmlPC = @'
       } catch (e) { mostrarBanner('No se pudo deshacer (revisa la conexion).'); }
     }
 
-    async function cobrar(id, metodoEsperado, totalCobrado) {
+    async function cobrar(id, metodoEsperado, totalCobrado, metodoCaja) {
       // La caja YA NO escribe cuanto dio el cliente: eso solo lo pone el
       // vendedor cuando el mismo cobra un pedido pendiente desde su movil
       // (para que el cambio en efectivo salga bien en su recibo). Aqui la
       // caja solo confirma que cobro el pedido.
       const totalTxt = (typeof totalCobrado === 'number' && !isNaN(totalCobrado)) ? totalCobrado.toFixed(2) : '';
+      if (metodoCaja && !confirm('¿Cobrar este pedido ' + (metodoCaja === 'Transferencia' ? 'por TRANSFERENCIA' : 'en EFECTIVO') + (totalTxt ? (' por $' + totalTxt) : '') + '?')) return;
      try {
         // La PC (caja) no elige el metodo de pago: cobra con el que el
         // vendedor dejo en el pedido (Efectivo o Transferencia x2). Manda el
         // que tiene en pantalla para que el servidor avise si el vendedor
         // lo cambio justo antes.
-        const res = await fetch('/api/pedidos/' + id + '/cobrar', { method:'POST', body: JSON.stringify({ metodoEsperado }) });
+        const res = await fetch('/api/pedidos/' + id + '/cobrar', { method:'POST', body: JSON.stringify({ metodoEsperado, metodoCaja }) });
         const data = await res.json().catch(() => null);
         if (!res.ok || !data || !data.ok) alert((data && data.error) || 'No se pudo cobrar el pedido.');
         cargarPedidos();
       } catch(e) { alert('No se pudo actualizar el pedido.'); }
+    }
+
+    // ------------------------------------------------------------
+    // Comprobante personalizable: textos, logo, QR de pago y opciones
+    // ------------------------------------------------------------
+    let rc = null;            // configuracion que se esta editando
+    let rcLogoOrigen = null;  // imagen original del logo (solo en memoria, para poder cambiar el tamano)
+    function rcEsc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+    function rcMsg(t) { document.getElementById('reciboMsg').textContent = t || ''; }
+    function rcMaxPuntos() { return Number(document.getElementById('rcAncho').value) <= 32 ? 384 : 576; }
+
+    async function abrirRecibo() {
+      cerrarMenuPC();
+      document.getElementById('reciboOverlay').style.display = 'flex';
+      rcMsg('Cargando...');
+      try {
+        const r = await fetch('/api/recibo/config');
+        rc = await r.json();
+        if (!Array.isArray(rc.qrs)) rc.qrs = rc.qrs ? [rc.qrs] : [];
+        rcLogoOrigen = null;
+        rcPintar();
+        rcMsg('');
+        rcVista();
+      } catch (e) { rcMsg('No se pudo cargar la configuracion del comprobante.'); }
+    }
+    function cerrarRecibo() { document.getElementById('reciboOverlay').style.display = 'none'; }
+
+    function rcPintar() {
+      document.getElementById('rcNombre').value = rc.nombre || '';
+      document.getElementById('rcNit').value = rc.nit || '';
+      document.getElementById('rcDireccion').value = rc.direccion || '';
+      document.getElementById('rcTelefono').value = rc.telefono || '';
+      document.getElementById('rcExtra').value = rc.encabezadoExtra || '';
+      document.getElementById('rcPie').value = rc.pie || '';
+      document.getElementById('rcAncho').value = String(rc.ancho || 32);
+      document.getElementById('rcEstilo').checked = !!rc.estilo;
+      document.getElementById('rcVend').checked = rc.mostrarVendedor !== false;
+      document.getElementById('rcFolio').checked = rc.mostrarFolio !== false;
+      document.getElementById('rcFecha').checked = rc.mostrarFecha !== false;
+      document.getElementById('rcServ').checked = !!rc.mostrarServicioDescuento;
+      document.getElementById('rcUSD').checked = rc.mostrarUSD !== false;
+      rcPintarImagenes();
+    }
+    function rcPintarImagenes() {
+      const max = rcMaxPuntos();
+      const sl = document.getElementById('rcLogoAncho');
+      sl.max = String(max);
+      if (rc && rc.logo) { document.getElementById('rcLogoActivo').checked = rc.logo.activo !== false; sl.value = String(Math.min(rc.logo.w, max)); }
+      document.getElementById('rcLogoAnchoTxt').textContent = sl.value;
+      const caja = document.getElementById('rcLogoCaja');
+      caja.innerHTML = (rc && rc.logo && rc.logo.png) ? ('<img src="' + rc.logo.png + '" style="max-width:100%; image-rendering:pixelated;">') : '<span style="color:#64748b; font-size:12px;">Sin logo</span>';
+      rcPintarQrs();
+    }
+    function rcLeerCampos() {
+      rc.nombre = document.getElementById('rcNombre').value;
+      rc.nit = document.getElementById('rcNit').value;
+      rc.direccion = document.getElementById('rcDireccion').value;
+      rc.telefono = document.getElementById('rcTelefono').value;
+      rc.encabezadoExtra = document.getElementById('rcExtra').value;
+      rc.pie = document.getElementById('rcPie').value;
+      rc.ancho = Number(document.getElementById('rcAncho').value);
+      rc.estilo = document.getElementById('rcEstilo').checked;
+      rc.mostrarVendedor = document.getElementById('rcVend').checked;
+      rc.mostrarFolio = document.getElementById('rcFolio').checked;
+      rc.mostrarFecha = document.getElementById('rcFecha').checked;
+      rc.mostrarServicioDescuento = document.getElementById('rcServ').checked;
+      rc.mostrarUSD = document.getElementById('rcUSD').checked;
+      if (rc.logo) rc.logo.activo = document.getElementById('rcLogoActivo').checked;
+    }
+
+    // ---- Imagenes: se convierten a puntos blanco/negro en el navegador ----
+    function rcB64(u8) { let s = ''; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); }
+    function rcLienzoNuevo(w, h) { const c = document.createElement('canvas'); c.width = w; c.height = h; const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, w, h); return c; }
+    function rcRaster(cv, tramado) {
+      const W = cv.width, H = cv.height, ctx = cv.getContext('2d');
+      const im = ctx.getImageData(0, 0, W, H), d = im.data, g = new Float32Array(W * H);
+      for (let i = 0; i < W * H; i++) g[i] = d[i * 4] * 0.299 + d[i * 4 + 1] * 0.587 + d[i * 4 + 2] * 0.114;
+      const bpr = W / 8, bits = new Uint8Array(bpr * H);
+      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+        const i = y * W + x, viejo = g[i]; let negro;
+        if (tramado) {
+          const nuevo = viejo < 128 ? 0 : 255; negro = nuevo === 0; const e = viejo - nuevo;
+          if (x + 1 < W) g[i + 1] += e * 7 / 16;
+          if (y + 1 < H) { if (x > 0) g[i + W - 1] += e * 3 / 16; g[i + W] += e * 5 / 16; if (x + 1 < W) g[i + W + 1] += e / 16; }
+        } else negro = viejo < 160;
+        if (negro) bits[y * bpr + (x >> 3)] |= 0x80 >> (x & 7);
+        const v = negro ? 0 : 255; d[i * 4] = v; d[i * 4 + 1] = v; d[i * 4 + 2] = v; d[i * 4 + 3] = 255;
+      }
+      ctx.putImageData(im, 0, 0);
+      return { w: W, h: H, bits: rcB64(bits), png: cv.toDataURL('image/png') };
+    }
+    function rcCargarImagen(file) {
+      return new Promise(function (ok, mal) {
+        const fr = new FileReader();
+        fr.onload = function () { const im = new Image(); im.onload = function () { ok(im); }; im.onerror = function () { mal(new Error('No se pudo leer la imagen.')); }; im.src = fr.result; };
+        fr.onerror = function () { mal(new Error('No se pudo leer el archivo.')); };
+        fr.readAsDataURL(file);
+      });
+    }
+    // Dibuja la imagen con fondo blanco al ancho W (multiplo de 8). Si recortar: quita los margenes blancos.
+    function rcLienzo(im, W, recortar) {
+      W = Math.max(8, Math.floor(W / 8) * 8);
+      const sw = im.naturalWidth || im.width, sh = im.naturalHeight || im.height, k = Math.min(1, 1600 / Math.max(sw, sh));
+      let cw = Math.max(1, Math.round(sw * k)), ch = Math.max(1, Math.round(sh * k));
+      let src = rcLienzoNuevo(cw, ch); src.getContext('2d').drawImage(im, 0, 0, cw, ch);
+      if (recortar) {
+        const d = src.getContext('2d').getImageData(0, 0, cw, ch).data; let x0 = cw, y0 = ch, x1 = -1, y1 = -1;
+        for (let y = 0; y < ch; y++) for (let x = 0; x < cw; x++) {
+          const i = (y * cw + x) * 4;
+          if (d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114 < 200) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+        }
+        if (x1 >= x0 && y1 >= y0) {
+          const bw = x1 - x0 + 1, bh = y1 - y0 + 1, m = Math.round(Math.max(bw, bh) * 0.06);
+          const c2 = rcLienzoNuevo(bw + 2 * m, bh + 2 * m); c2.getContext('2d').drawImage(src, x0, y0, bw, bh, m, m, bw, bh);
+          src = c2; cw = c2.width; ch = c2.height;
+        }
+      }
+      const H = Math.max(1, Math.round(ch * W / cw));
+      let cur = src;
+      while (cur.width / 2 > W) { const c = rcLienzoNuevo(Math.ceil(cur.width / 2), Math.ceil(cur.height / 2)); c.getContext('2d').drawImage(cur, 0, 0, c.width, c.height); cur = c; }
+      const out = rcLienzoNuevo(W, H), g = out.getContext('2d');
+      g.imageSmoothingEnabled = true; g.imageSmoothingQuality = 'high'; g.drawImage(cur, 0, 0, W, H);
+      return out;
+    }
+    function rcQrDesdeTexto(texto, W) {
+      if (typeof qrcode !== 'function') throw new Error('No esta disponible el generador de QR.');
+      const qr = qrcode(0, 'M'); qr.addData(texto); qr.make();
+      const n = qr.getModuleCount(), mod = Math.max(2, Math.floor(W / (n + 6))), lado = (n + 6) * mod;
+      const Wc = Math.ceil(lado / 8) * 8, cv = rcLienzoNuevo(Wc, lado), g = cv.getContext('2d'), x0 = Math.floor((Wc - lado) / 2);
+      g.fillStyle = '#000';
+      for (let r = 0; r < n; r++) for (let c = 0; c < n; c++) if (qr.isDark(r, c)) g.fillRect(x0 + 3 * mod + c * mod, 3 * mod + r * mod, mod, mod);
+      return rcRaster(cv, false);
+    }
+
+    // ---- Logo ----
+    async function rcElegirLogo(inp) {
+      const f = inp.files && inp.files[0]; if (!f) return;
+      try { rcLogoOrigen = await rcCargarImagen(f); rcRehacerLogo(); rcMsg(''); }
+      catch (e) { rcMsg((e && e.message) || 'No se pudo cargar el logo.'); }
+      inp.value = '';
+    }
+    function rcRehacerLogo() {
+      const sl = document.getElementById('rcLogoAncho');
+      document.getElementById('rcLogoAnchoTxt').textContent = sl.value;
+      if (!rcLogoOrigen) { if (rc && rc.logo) rcMsg('Para cambiar el tamano vuelve a elegir la imagen del logo.'); return; }
+      const r = rcRaster(rcLienzo(rcLogoOrigen, Number(sl.value), false), document.getElementById('rcLogoTramado').checked);
+      r.activo = document.getElementById('rcLogoActivo').checked; rc.logo = r;
+      rcPintarImagenes();
+    }
+    function rcQuitarLogo() { rc.logo = null; rcLogoOrigen = null; rcPintarImagenes(); }
+
+    // ---- QR ----
+    function rcNuevoQr(r, origen) {
+      return Object.assign({ id: 'qr' + Date.now(), titulo: 'Paga por transferencia', instruccion: 'Escanea el QR para pagar', mostrarEn: 'transferencia', tam: Math.min(256, rcMaxPuntos()), _origen: origen }, r);
+    }
+    function rcRehacerQr(q) {
+      const W = Math.min(Number(q.tam) || 256, rcMaxPuntos());
+      const r = q._origen.tipo === 'texto' ? rcQrDesdeTexto(q._origen.texto, W) : rcRaster(rcLienzo(q._origen.im, W, true), false);
+      q.w = r.w; q.h = r.h; q.bits = r.bits; q.png = r.png;
+    }
+    async function rcAgregarQrImagen(inp) {
+      const f = inp.files && inp.files[0]; if (!f) return;
+      if (rc.qrs.length >= 6) { rcMsg('Maximo 6 QR.'); inp.value = ''; return; }
+      try { const im = await rcCargarImagen(f); const q = rcNuevoQr({}, { tipo: 'imagen', im: im }); rcRehacerQr(q); rc.qrs.push(q); rcPintarQrs(); rcMsg(''); }
+      catch (e) { rcMsg((e && e.message) || 'No se pudo agregar el QR.'); }
+      inp.value = '';
+    }
+    function rcAgregarQrTexto() {
+      if (rc.qrs.length >= 6) { rcMsg('Maximo 6 QR.'); return; }
+      const t = prompt('Texto o enlace del QR (ej. https://wa.me/5350000000 o el numero de tarjeta):');
+      if (!t || !t.trim()) return;
+      try { const q = rcNuevoQr({}, { tipo: 'texto', texto: t.trim() }); rcRehacerQr(q); rc.qrs.push(q); rcPintarQrs(); rcMsg(''); }
+      catch (e) { rcMsg('No se pudo generar el QR (el texto puede ser muy largo).'); }
+    }
+    function rcQrCampo(i, campo, valor) {
+      const q = rc.qrs[i]; if (!q) return;
+      if (campo === 'tam') {
+        q.tam = Number(valor);
+        if (!q._origen) { rcMsg('Para cambiar el tamano vuelve a agregar ese QR.'); rcPintarQrs(); return; }
+        try { rcRehacerQr(q); } catch (e) { rcMsg('No se pudo cambiar el tamano.'); }
+        rcPintarQrs();
+      } else { q[campo] = valor; }
+    }
+    function rcQuitarQr(i) { rc.qrs.splice(i, 1); rcPintarQrs(); }
+    function rcPintarQrs() {
+      const caja = document.getElementById('rcQrLista'); if (!caja) return;
+      if (!rc || !rc.qrs.length) { caja.innerHTML = '<div style="font-size:12px; color:#64748b;">Todavia no hay QR.</div>'; return; }
+      const max = rcMaxPuntos(), tams = [160, 224, 288, 352, 416, 480, 544].filter(function (t) { return t <= max; });
+      caja.innerHTML = rc.qrs.map(function (q, i) {
+        const actual = Math.min(Number(q.tam) || q.w || 256, max);
+        const opcTam = tams.map(function (t) { return '<option value="' + t + '"' + (Math.abs(t - actual) < 32 ? ' selected' : '') + '>' + t + ' puntos</option>'; }).join('');
+        const op = function (v, t) { return '<option value="' + v + '"' + (q.mostrarEn === v ? ' selected' : '') + '>' + t + '</option>'; };
+        return '<div class="rc-qr"><div class="rc-img">' + (q.png ? '<img src="' + q.png + '">' : '') + '</div>' +
+          '<div style="flex:1; min-width:220px;">' +
+          '<label class="rc-et">Titulo (sobre el QR)</label><input class="rc-in" maxlength="40" value="' + rcEsc(q.titulo) + '" onchange="rcQrCampo(' + i + ',\'titulo\',this.value)">' +
+          '<label class="rc-et">Instruccion (bajo el titulo)</label><input class="rc-in" maxlength="200" value="' + rcEsc(q.instruccion) + '" onchange="rcQrCampo(' + i + ',\'instruccion\',this.value)">' +
+          '<label class="rc-et">Imprimir este QR</label><select class="rc-in" onchange="rcQrCampo(' + i + ',\'mostrarEn\',this.value)">' +
+            op('transferencia', 'Cuando el pago es por transferencia') + op('pendiente', 'Solo cuando el pedido esta por cobrar') + op('siempre', 'Siempre') + op('nunca', 'Nunca (guardado)') + '</select>' +
+          '<label class="rc-et">Tamano</label><select class="rc-in" onchange="rcQrCampo(' + i + ',\'tam\',this.value)">' + opcTam + '</select>' +
+          '<button class="btn-toggle" style="margin-top:8px;" onclick="rcQuitarQr(' + i + ')">Quitar este QR</button></div></div>';
+      }).join('');
+    }
+
+    // ---- Guardar, vista previa y prueba ----
+    async function rcGuardar() {
+      rcLeerCampos();
+      const payload = {
+        nombre: rc.nombre, nit: rc.nit, direccion: rc.direccion, telefono: rc.telefono, encabezadoExtra: rc.encabezadoExtra, pie: rc.pie,
+        ancho: rc.ancho, estilo: rc.estilo, mostrarVendedor: rc.mostrarVendedor, mostrarFolio: rc.mostrarFolio, mostrarFecha: rc.mostrarFecha,
+        mostrarServicioDescuento: rc.mostrarServicioDescuento, mostrarUSD: rc.mostrarUSD,
+        logo: rc.logo ? { activo: rc.logo.activo !== false, w: rc.logo.w, h: rc.logo.h, bits: rc.logo.bits, png: rc.logo.png } : null,
+        qrs: rc.qrs.map(function (q) { return { id: q.id, titulo: q.titulo, instruccion: q.instruccion, mostrarEn: q.mostrarEn, w: q.w, h: q.h, bits: q.bits, png: q.png }; })
+      };
+      const cuerpo = JSON.stringify(payload);
+      if (cuerpo.length > 1900000) { rcMsg('Las imagenes pesan demasiado: usa un logo o QR mas pequeno.'); return; }
+      rcMsg('Guardando...');
+      try {
+        const r = await fetch('/api/recibo/config', { method: 'POST', body: cuerpo });
+        const d = await r.json().catch(function () { return null; });
+        if (!r.ok || !d || !d.ok) { rcMsg((d && d.error) || 'No se pudo guardar.'); return; }
+        rcMsg('Guardado. Los comprobantes nuevos ya salen asi (la pagina de etiquetas toma el nombre al reiniciar el servidor).');
+        rcVista();
+      } catch (e) { rcMsg('No se pudo guardar (revisa la conexion con el servidor).'); }
+    }
+    async function rcVista() {
+      const el = document.getElementById('rcVistaTxt');
+      try {
+        const m = document.getElementById('rcVistaMetodo').value, e2 = document.getElementById('rcVistaEstado').value;
+        const r = await fetch('/api/recibo/vista?metodo=' + encodeURIComponent(m) + '&estado=' + encodeURIComponent(e2));
+        const d = await r.json();
+        el.textContent = d.ok ? d.texto : ('No se pudo generar la vista previa: ' + (d.error || ''));
+      } catch (e) { el.textContent = 'No se pudo generar la vista previa.'; }
+    }
+    async function rcImprimirPrueba() {
+      try {
+        const r = await fetch('/api/recibo/prueba', { method: 'POST', body: JSON.stringify({ metodo: document.getElementById('rcVistaMetodo').value, estado: document.getElementById('rcVistaEstado').value }) });
+        const d = await r.json();
+        rcMsg(d.ok ? 'Comprobante de prueba enviado a la impresora (con lo ultimo que guardaste).' : ('No se pudo imprimir: ' + (d.error || 'error desconocido')));
+      } catch (e) { rcMsg('No se pudo imprimir la prueba.'); }
     }
 
     async function imprimir(id) {
@@ -3566,6 +4544,17 @@ $htmlPC = @'
 
     function renderCatalogoInfo(info) {
       const el = document.getElementById('catalogoInfo');
+      if (info.origen === 'axispos') {
+        if (info.error) {
+          el.innerHTML = '<span class="error">AxisPOS: ' + info.error + '</span> <button onclick="recargarCatalogo()">Reintentar</button>';
+          catalogoConError = true;
+        } else {
+          el.innerHTML = 'Catalogo desde AxisPOS: ' + info.cantidad + ' productos (actualizado ' + (info.ultimaCarga || '-') + ') <button onclick="recargarCatalogo()">Recargar ahora</button>';
+          catalogoConError = false;
+        }
+        actualizarAlertaMenuPC();
+        return;
+      }
       if (!info.mapeoConfigurado) {
         el.innerHTML = '<span>Todavia no configuraste el Excel del catalogo.</span> <button onclick="abrirConfig()">Configurar Excel</button>';
         catalogoConError = true;
@@ -3712,6 +4701,7 @@ $htmlPC = @'
       if (p.estado === 'pendiente') {
         accionesPendiente =
           '<button class="btn" onclick="cobrar(' + p.id + ', \'' + (p.metodoPago || 'Efectivo') + '\', ' + totalCobrado + ')">Cobrar en Caja (' + (p.metodoPago || 'Efectivo') + ') — $' + totalCobrado.toFixed(2) + '</button>' +
+          
           (p.metodoPago === 'Combinado' ? '' : '<button class="btn" style="background:#0369a1;" onclick="abrirNuevoPedido(' + p.id + ')">+ Agregar producto</button>') +
           '<button class="btn btn-cancelar" onclick="cancelarPedido(' + p.id + ')">Cancelar pedido</button>';
       }
@@ -3728,7 +4718,9 @@ $htmlPC = @'
         else if (metodo === 'USD') instruccion = 'El vendedor debe entregarte ' + monto + ' en d\u00f3lares' + ((function () { try { return tasaDolarPC; } catch (e) { return 0; } })() > 0 ? (' (\u2248 $' + (totalCobrado / tasaDolarPC).toFixed(2) + ' USD)') : '');
         else instruccion = 'Verifica el pago (' + metodo + ') de ' + monto;
         let detalle = '';
-        if (Number(p.montoRecibido) > 0) {
+        if (Number(p.montoRecibido) > 0 && metodo === 'Transferencia') {
+          detalle += '<div>Llego por transferencia (segun el vendedor): $' + Number(p.montoRecibido).toFixed(2) + '</div>';
+        } else if (Number(p.montoRecibido) > 0) {
           detalle += '<div>Recibido del cliente: $' + Number(p.montoRecibido).toFixed(2) +
             (p.cambio !== null && p.cambio !== undefined && p.cambio !== '' ? ' — Cambio: $' + Number(p.cambio).toFixed(2) : '') + '</div>';
         }
@@ -5354,6 +6346,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
     <h2>Buscar producto</h2>
     <div style="display:flex; gap:8px; align-items:flex-start;">
       <input type="text" id="buscador" placeholder="Nombre o SKU" oninput="buscar()" style="flex:1; min-width:0; width:auto;">
+      <button id="btnEscanear" type="button" onclick="abrirEscaner()" title="Escanear codigo de barras" style="flex:0 0 auto; width:48px; height:44px; border:none; border-radius:8px; background:var(--boton-suave); color:var(--texto); font-size:22px; cursor:pointer;">&#128247;</button>
     </div>
     <div id="resultados"></div>
     <div id="recientes"></div>
@@ -5380,6 +6373,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
     </select>
     <div id="totalCobroTexto"></div>
     <div id="camposCobro">
+      <div id="qrPagoCaja" style="display:none; text-align:center; margin:8px 0;"></div>
       <input type="number" id="montoRecibido" placeholder="Monto recibido" oninput="calcularCambio()">
       <div id="camposCobroCombinado" style="display:none;">
         <input type="number" id="montoEfectivoCombo" placeholder="Parte en efectivo (del pedido)" oninput="calcularCambio()">
@@ -5610,6 +6604,13 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
 
     let catalogo = [];
     let carrito = [];
+    // QR de pago guardado en la PC (Ajustes). Se copia al telefono para ensenarselo al cliente
+    // cuando se cobra por transferencia (y que siga saliendo aunque se caiga la red).
+    let qrPago = [];
+    try { const gq = JSON.parse(localStorage.getItem('qrPagoV1') || '[]'); if (Array.isArray(gq)) qrPago = gq; } catch (e) {}
+    let ultimaCargaQr = 0;
+    let qrPagoPintado = null;
+    let borradorClienteListo = false;   // el borrador del cliente solo se guarda despues de restaurarlo
     // Cuando un pedido "para todos" que tomaste se agrega al carrito, se anota
     // aqui quien lo tomo y cuando, para mandarlo junto con el pedido y que
     // quede visible en la PC cuando se cobre (historial de quien atendio).
@@ -6126,6 +7127,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
         } catch(e) {}
         guardarCatalogoLocal();
         aplicarColaAlStock();
+        if (!autoservicioActivo && Date.now() - ultimaCargaQr > 120000) cargarQrPago();
         info.classList.remove('error');
         document.getElementById('btnMenu').classList.remove('alerta');
         if (ocultandoSinStock()) {
@@ -6138,7 +7140,6 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
       } catch(e) {
         info.classList.add('error');
         document.getElementById('btnMenu').classList.add('alerta');   // punto rojo: hay un problema en Ajustes
-        if (autoservicioActivo) { info.textContent = 'No se pudo cargar el catalogo. Revisa la conexion con la PC.'; return; }
         // MODO SIN PC: se usa el ultimo catalogo guardado en este telefono
         const guardado = leerCatalogoLocal();
         if (guardado) {
@@ -6149,7 +7150,9 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
           permitirDescuentosActual = !!guardado.permitirDescuentosActual;
           aplicarColaAlStock();
           const f = new Date(guardado.t);
-          info.textContent = 'SIN PC: usando el catalogo guardado el ' + f.toLocaleDateString() + ' ' + f.toLocaleTimeString().slice(0, 5) + ' (' + catalogo.length + ' productos). Los pedidos se guardan y se envian solos al volver.';
+          info.textContent = autoservicioActivo
+            ? 'Sin conexion con la PC: puedes seguir armando tu pedido, se enviara solo cuando vuelva la conexion.'
+            : ('SIN PC: usando el catalogo guardado el ' + f.toLocaleDateString() + ' ' + f.toLocaleTimeString().slice(0, 5) + ' (' + catalogo.length + ' productos). Los pedidos se guardan y se envian solos al volver.');
           buscar();
         } else {
           info.textContent = 'No se pudo cargar el catalogo y aun no hay uno guardado en este telefono. Conectate a la PC una vez.';
@@ -6787,6 +7790,8 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
     // ---- Foto ampliada del producto: primero mira si esta guardada en este
     // telefono (local), y si no, la pide a la PC (/foto/grande/<sku>.jpg) ----
     async function verFotoProducto(sku, nombre) {
+      const imgR = document.getElementById('fotoOverlayImg');
+      imgR.style.imageRendering = ''; imgR.style.width = ''; imgR.style.padding = '';
       document.getElementById('fotoOverlayNombre').textContent = nombre;
       document.getElementById('fotoOverlay').style.display = 'flex';
       const img = document.getElementById('fotoOverlayImg');
@@ -6815,6 +7820,172 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
         if (typeof cap.registerPlugin === 'function') return cap.registerPlugin(n);
       } catch (e) {}
       return null;
+    }
+
+    // ================= Escaner de codigos de barras =================
+    // Usa el modelo de ML Kit que viene DENTRO de la APK: abre al instante, sin descargas ni Google Play Services.
+    // La camara se ve detras de la pagina (transparente) y cada codigo leido se agrega solo al pedido.
+    let escanerAgregados = 0, escanerUltimoCodigo = '', escanerUltimoMs = 0, escanerAudio = null, escanerActivo = false, escanerCerrar = null;
+    function esperar(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+    function escanerEstado(texto, ok) {
+      if (!document.body.classList.contains('escaner-nat')) { if (texto) mostrarMensaje(texto, ok !== false); return; }
+      const e = document.getElementById('escanerEstadoNat');
+      if (!e) return;
+      e.textContent = texto || '';
+      e.style.color = ok === true ? '#86efac' : (ok === false ? '#fca5a5' : '#e2e8f0');
+    }
+    function escanerSonido(bien) {
+      try { if (navigator.vibrate) navigator.vibrate(bien ? 70 : [60, 40, 60]); } catch (e) {}
+      try {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) return;
+        escanerAudio = escanerAudio || new AC();
+        const o = escanerAudio.createOscillator(), g = escanerAudio.createGain();
+        o.frequency.value = bien ? 1500 : 300; g.gain.value = 0.15;
+        o.connect(g); g.connect(escanerAudio.destination);
+        o.start(); o.stop(escanerAudio.currentTime + (bien ? 0.09 : 0.25));
+      } catch (e) {}
+    }
+    function escanerClave(s) { return String(s == null ? '' : s).trim().replace(/\s+/g, '').toLowerCase(); }
+    function buscarProductoPorCodigo(codigo) {
+      const c = escanerClave(codigo);
+      if (!c) return null;
+      const variantes = [c];
+      if (/^\d+$/.test(c)) {
+        if (c.length === 13 && c.charAt(0) === '0') variantes.push(c.slice(1));   // EAN-13 que empieza en 0 = UPC-A
+        if (c.length === 12) variantes.push('0' + c);
+      }
+      const exacto = catalogo.find(function (p) { return p.sku && variantes.indexOf(escanerClave(p.sku)) >= 0; });
+      if (exacto) return exacto;
+      if (/^\d+$/.test(c)) {                                                       // SKU numerico guardado sin ceros a la izquierda
+        const sinCeros = c.replace(/^0+/, '');
+        return catalogo.find(function (p) { const k = String(p.sku || ''); return /^\d+$/.test(k) && k.replace(/^0+/, '') === sinCeros; }) || null;
+      }
+      return null;
+    }
+    function escanerCantidadEnCarrito(sku) { const it = carrito.find(function (i) { return i.sku === sku; }); return it ? it.cantidad : 0; }
+    function escanerProcesar(codigo, sinEspera) {
+      codigo = String(codigo || '').trim();
+      if (!codigo) return false;
+      const ahora = Date.now();
+      if (!sinEspera && codigo === escanerUltimoCodigo && ahora - escanerUltimoMs < 2200) return false;   // el mismo codigo seguido: se ignora
+      escanerUltimoCodigo = codigo; escanerUltimoMs = ahora;
+      const p = buscarProductoPorCodigo(codigo);
+      if (!p) { escanerSonido(false); escanerEstado('El codigo ' + codigo + ' no esta en el catalogo.', false); return false; }
+      if (ocultandoSinStock() && productoSinStock(p)) { escanerSonido(false); escanerEstado(p.nombre + ': agotado.', false); return false; }
+      const antes = escanerCantidadEnCarrito(p.sku);
+      agregarAlCarrito(p);
+      const despues = escanerCantidadEnCarrito(p.sku);
+      if (despues <= antes) { escanerSonido(false); escanerEstado(p.nombre + ': no hay mas stock.', false); return false; }
+      escanerAgregados++;
+      escanerSonido(true);
+      escanerEstado('Agregado: ' + p.nombre + ' (en el pedido: ' + despues + ')', true);
+      return true;
+    }
+    function escanerCrearPantalla() {
+      if (!document.getElementById('escanerNatEstilo')) {
+        const st = document.createElement('style'); st.id = 'escanerNatEstilo';
+        st.textContent = 'html.escaner-nat, body.escaner-nat { background: transparent !important; }' +
+          'body.escaner-nat > *:not(#escanerNativoOverlay) { visibility: hidden !important; }' +
+          '#escanerNativoOverlay { visibility: visible !important; }';
+        document.head.appendChild(st);
+      }
+      let ov = document.getElementById('escanerNativoOverlay');
+      if (ov) return ov;
+      ov = document.createElement('div'); ov.id = 'escanerNativoOverlay';
+      ov.style.cssText = 'display:none; position:fixed; inset:0; z-index:99999; flex-direction:column; justify-content:space-between; background:transparent;';
+      ov.innerHTML = '<div style="display:flex; align-items:center; justify-content:space-between; gap:8px; padding:calc(env(safe-area-inset-top,0px) + 10px) 12px 10px; background:rgba(15,23,42,0.88);">' +
+        '<strong style="color:#fff; font-size:16px;">Escanear codigos</strong>' +
+        '<div style="display:flex; gap:8px;"><button type="button" id="escanerNatLuz" style="background:#475569; color:#fff; border:none; border-radius:8px; padding:9px 12px; font-size:16px;">&#128294;</button>' +
+        '<button type="button" id="escanerNatListo" style="background:#2563eb; color:#fff; border:none; border-radius:8px; padding:9px 18px; font-weight:600; font-size:15px;">Listo</button></div></div>' +
+        '<div style="position:absolute; left:8%; right:8%; top:50%; height:2px; background:rgba(239,68,68,0.9); box-shadow:0 0 8px rgba(239,68,68,0.9); pointer-events:none;"></div>' +
+        '<div id="escanerEstadoNat" style="color:#e2e8f0; font-size:15px; text-align:center; padding:12px 14px calc(env(safe-area-inset-bottom,0px) + 16px); background:rgba(15,23,42,0.88); min-height:46px;">Apunta al codigo de barras</div>';
+      document.body.appendChild(ov);
+      return ov;
+    }
+    // Escaner de Google (se abre directo, sin pre-chequeos). Lee un codigo, lo agrega y se vuelve a abrir para el siguiente.
+    let escanerGoogleBloqueo = false;
+    async function escanerGoogle() {
+      const tb = pluginNativo('TotoBg');
+      if (!tb || typeof tb.scan !== 'function') return { tipo: 'sin-plugin' };
+      try {
+        const r = await tb.scan();
+        if (r && r.cancelled) return { tipo: 'cancelado' };
+        const v = r && r.value ? String(r.value) : '';
+        return v ? { tipo: 'codigo', valor: v } : { tipo: 'cancelado' };
+      } catch (e) {
+        const m = String((e && (e.message || e.errorMessage)) || e || '');
+        return /cancel/i.test(m) ? { tipo: 'cancelado' } : { tipo: 'error', msg: m || 'error desconocido' };
+      }
+    }
+    async function abrirEscaner() {
+      if (escanerActivo || escanerGoogleBloqueo) return;
+      if (!catalogo || !catalogo.length) { mostrarMensaje('Todavia no se cargo el catalogo.', false); return; }
+      // 1) Escaner de Google (como otras apps de negocio)
+      let motivoGoogle = '';
+      if (pluginNativo('TotoBg') && typeof pluginNativo('TotoBg').scan === 'function') {
+        escanerGoogleBloqueo = true; escanerAgregados = 0;
+        try {
+          let r = await escanerGoogle();
+          while (r.tipo === 'codigo') {
+            escanerProcesar(r.valor, true);
+            await esperar(450);
+            r = await escanerGoogle();
+          }
+          if (r.tipo === 'cancelado') {
+            if (escanerAgregados > 0) mostrarMensaje(escanerAgregados === 1 ? 'Producto agregado al pedido.' : (escanerAgregados + ' productos agregados al pedido.'), true);
+            return;
+          }
+          if (r.tipo === 'error') motivoGoogle = r.msg;
+        } finally { escanerGoogleBloqueo = false; }
+      }
+      const ml = pluginNativo('BarcodeScanner');
+      if (!ml || typeof ml.startScan !== 'function') {
+        const v = window.prompt('Esta APK no trae el escaner (recompilala). Escribe el codigo de barras o SKU:');
+        if (v) { escanerAgregados = 0; if (!escanerProcesar(v.trim())) mostrarMensaje('Codigo no encontrado en el catalogo.', false); else mostrarMensaje('Producto agregado al pedido.', true); }
+        return;
+      }
+      escanerActivo = true;
+      let handle = null, error = '', hechoHistorial = false;
+      try {
+        const perm = await ml.requestPermissions();
+        if (perm && perm.camera && perm.camera !== 'granted' && perm.camera !== 'limited') throw new Error('Permiso de camara denegado. Activalo en Ajustes > Apps > esta app > Permisos.');
+        const ov = escanerCrearPantalla();
+        escanerAgregados = 0; escanerUltimoCodigo = ''; escanerUltimoMs = 0;
+        escanerEstado('Apunta al codigo de barras', null);
+        const fin = new Promise(function (resolve) { escanerCerrar = resolve; });
+        const alAtras = function () { if (escanerCerrar) escanerCerrar(); };
+        const alOcultar = function () { if (document.visibilityState === 'hidden' && escanerCerrar) escanerCerrar(); };
+        document.getElementById('escanerNatListo').onclick = function () { if (escanerCerrar) escanerCerrar(); };
+        document.getElementById('escanerNatLuz').onclick = function () { try { ml.toggleTorch(); } catch (e) {} };
+        handle = await ml.addListener('barcodesScanned', function (ev) {
+          const b = ev && ev.barcodes && ev.barcodes[0];
+          const v = b ? String(b.rawValue || b.displayValue || '') : '';
+          if (v) { try { escanerProcesar(v); } catch (e) {} }
+        });
+        try { history.pushState({ escaner: 1 }, ''); hechoHistorial = true; } catch (e) {}
+        window.addEventListener('popstate', alAtras);
+        document.addEventListener('visibilitychange', alOcultar);
+        document.documentElement.classList.add('escaner-nat'); document.body.classList.add('escaner-nat');
+        ov.style.display = 'flex';
+        try {
+          await ml.startScan({ lensFacing: 'BACK', formats: ['Ean13', 'Ean8', 'UpcA', 'UpcE', 'Code128', 'Code39', 'Code93', 'Codabar', 'Itf', 'QrCode', 'DataMatrix'] });
+        } catch (e) { error = String((e && (e.message || e.errorMessage)) || e || 'error desconocido'); if (escanerCerrar) escanerCerrar(); }
+        await fin;
+        window.removeEventListener('popstate', alAtras);
+        document.removeEventListener('visibilitychange', alOcultar);
+        ov.style.display = 'none';
+      } catch (e) {
+        error = String((e && (e.message || e.errorMessage)) || e || 'error desconocido');
+      }
+      try { await ml.stopScan(); } catch (e) {}
+      try { if (handle && handle.remove) await handle.remove(); } catch (e) {}
+      try { if (typeof ml.removeAllListeners === 'function') await ml.removeAllListeners(); } catch (e) {}
+      document.documentElement.classList.remove('escaner-nat'); document.body.classList.remove('escaner-nat');
+      try { if (hechoHistorial && history.state && history.state.escaner) history.back(); } catch (e) {}
+      escanerCerrar = null; escanerActivo = false;
+      if (error) mostrarMensaje('No se pudo abrir el escaner' + (motivoGoogle ? ' (Google: ' + motivoGoogle + ')' : '') + ': ' + error, false);
+      else if (escanerAgregados > 0) mostrarMensaje(escanerAgregados === 1 ? 'Producto agregado al pedido.' : (escanerAgregados + ' productos agregados al pedido.'), true);
     }
 
     // ---- Carrito ----
@@ -6890,6 +8061,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
 
     function renderCarrito() {
       const cont = document.getElementById('carrito');
+      if (autoservicioActivo && borradorClienteListo) { try { localStorage.setItem('borradorClienteV1', JSON.stringify(carrito)); } catch (e) {} }
       const factor = factorPagoActual();
       if (carrito.length === 0) {
         cont.innerHTML = '<div style="color:#94a3b8; font-size:13px;">Sin productos aun.</div>';
@@ -6925,7 +8097,64 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
       calcularCambio();
       try { actualizarBotonEnviar(); } catch (e) {}
     }
+    // Autoservicio: si el cliente pierde la conexion (o cierra la pagina) mientras arma el
+    // pedido, lo que ya agrego se queda en su telefono y se recupera al volver.
+    if (autoservicioActivo) {
+      try {
+        const bor = JSON.parse(localStorage.getItem('borradorClienteV1') || '[]');
+        if (Array.isArray(bor)) carrito = bor.filter(function (i) { return i && i.sku && Number(i.cantidad) > 0; });
+      } catch (e) {}
+    }
+    borradorClienteListo = true;
     renderCarrito();
+
+    // ---- QR de pago (transferencia) ----
+    async function cargarQrPago() {
+      ultimaCargaQr = Date.now();
+      try {
+        const res = await fetchConTiempo('/api/qr-pago', {}, 8000);
+        if (!res.ok) return;
+        const d = await res.json();
+        const lista = Array.isArray(d.qrs) ? d.qrs : (d.qrs ? [d.qrs] : []);
+        qrPago = lista.filter(function (q) { return q && q.png; });
+        try { localStorage.setItem('qrPagoV1', JSON.stringify(qrPago)); } catch (e) {}
+        qrPagoPintado = null;
+        try { calcularCambio(); } catch (e) {}
+        document.querySelectorAll('[data-qrpago]').forEach(function (n) {
+          n.innerHTML = htmlQrPago();
+          const sel = n.id ? document.getElementById(n.id.replace('mp-qr-', 'mp-metodo-')) : null;
+          if (sel) n.style.display = (sel.value === 'Transferencia' && qrPago.length) ? 'block' : 'none';
+        });
+      } catch (e) {}
+    }
+    function htmlQrPago() {
+      if (!qrPago.length) return '';
+      return qrPago.map(function (q, i) {
+        return '<div style="margin:6px 0;">' +
+          (q.titulo ? '<div style="font-weight:700; font-size:14px;">' + escaparHtml(q.titulo) + '</div>' : '') +
+          '<img src="' + q.png + '" onclick="verQrPago(' + i + ')" style="width:min(240px,70vw); height:auto; image-rendering:pixelated; background:#fff; padding:8px; border-radius:10px; border:1px solid #cbd5e1;">' +
+          (q.instruccion ? '<div style="font-size:12px; color:#64748b;">' + escaparHtml(q.instruccion) + ' (toca el QR para verlo grande)</div>' : '<div style="font-size:12px; color:#64748b;">Toca el QR para verlo grande</div>') +
+        '</div>';
+      }).join('');
+    }
+    function pintarQrPagoCaja(mostrar) {
+      const cont = document.getElementById('qrPagoCaja');
+      if (!cont) return;
+      const html = (mostrar && qrPago.length) ? htmlQrPago() : '';
+      if (qrPagoPintado === html) return;
+      qrPagoPintado = html;
+      cont.innerHTML = html;
+      cont.style.display = html ? 'block' : 'none';
+    }
+    // Reutiliza la ventana de foto ampliada para mostrar el QR grande.
+    function verQrPago(i) {
+      const q = qrPago[i]; if (!q) return;
+      const img = document.getElementById('fotoOverlayImg');
+      img.src = q.png;
+      img.style.imageRendering = 'pixelated'; img.style.width = 'min(92vw, 70vh)'; img.style.padding = '10px';
+      document.getElementById('fotoOverlayNombre').textContent = q.instruccion || q.titulo || 'QR de pago';
+      document.getElementById('fotoOverlay').style.display = 'flex';
+    }
 
     // ---- Cobro ----
     function toggleCobro() {
@@ -6941,6 +8170,9 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
       const esTransferencia = metodo === 'Transferencia';
       const esCombinado = metodo === 'Combinado';
       const totalCobrar = esTransferencia ? totalProductos * 2 : totalProductos;
+
+      // Transferencia (o combinado con transferencia): se ensena el QR de pago ahi mismo.
+      pintarQrPagoCaja((esTransferencia || esCombinado) && !autoservicioActivo);
 
       document.getElementById('montoRecibido').style.display = esCombinado ? 'none' : 'block';
       document.getElementById('camposCobroCombinado').style.display = esCombinado ? 'block' : 'none';
@@ -6976,7 +8208,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
 
       const montoInput = document.getElementById('montoRecibido');
       const esUSD = metodo === 'USD';
-      montoInput.placeholder = esUSD ? 'Monto recibido en USD' : 'Monto recibido';
+      montoInput.placeholder = esUSD ? 'Monto recibido en USD' : (esTransferencia ? 'Monto que llego (segun el mensaje del banco)' : 'Monto recibido');
       if (esUSD) {
         if (!(tasaDolarActual > 0)) {
           totalTexto.textContent = 'Para cobrar en USD falta la Tasa USD en el Panel de la PC.';
@@ -6988,6 +8220,15 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
         const cambioUsd = recibidoUsd * tasaDolarActual - totalCobrar;
         el.textContent = cambioUsd >= -0.01 ? ('Cambio a devolver: $' + Math.max(0, cambioUsd).toFixed(2) + ' (\u2248 ' + (Math.max(0, cambioUsd) / tasaDolarActual).toFixed(2) + ' USD)') : ('Falta: $' + Math.abs(cambioUsd).toFixed(2) + ' (\u2248 ' + (Math.abs(cambioUsd) / tasaDolarActual).toFixed(2) + ' USD)');
         el.style.color = cambioUsd >= -0.01 ? '#166534' : '#991b1b';
+        return;
+      }
+      if (esTransferencia) {
+        // Transferencia: no hay cambio. Se escribe lo que llego y, si es menos del total, no se cierra la venta.
+        if (montoInput.value === '') { el.textContent = 'Cuando llegue el mensaje del banco, escribe aqui el monto que llego.'; el.style.color = '#64748b'; return; }
+        const llego = parseFloat(montoInput.value) || 0;
+        const faltaTr = totalCobrar - llego;
+        if (faltaTr > 0.01) { el.textContent = 'Llego menos de lo que se cobra: faltan $' + faltaTr.toFixed(2) + '. No se puede cerrar la venta.'; el.style.color = '#991b1b'; }
+        else { el.textContent = 'Transferencia completa. La caja la va a revisar.'; el.style.color = '#166534'; }
         return;
       }
       if (montoInput.value === '') { el.textContent = ''; return; }
@@ -7033,7 +8274,9 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
             return;
           }
         } else if (document.getElementById('montoRecibido').value === '') {
-          alert('Escribe el monto recibido del cliente antes de enviar (o el cambio no va a salir bien en el recibo).');
+          alert(metodoChk === 'Transferencia'
+            ? 'Escribe el monto que llego por transferencia (segun el mensaje del banco) antes de enviar.'
+            : 'Escribe el monto recibido del cliente antes de enviar (o el cambio no va a salir bien en el recibo).');
           document.getElementById('montoRecibido').focus();
           return;
         } else {
@@ -7047,7 +8290,9 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
         }
         const recibidoChk = (parseFloat(document.getElementById('montoRecibido').value) || 0) * (metodoChk === 'USD' ? tasaDolarActual : 1);
         if (recibidoChk < totalCobrarChk - 0.01) {
-          alert('El monto recibido ($' + recibidoChk.toFixed(2) + (metodoChk === 'USD' ? ' en pesos' : '') + ') es menor que el total a cobrar ($' + totalCobrarChk.toFixed(2) + '). Revisa el monto antes de enviar.');
+          alert(metodoChk === 'Transferencia'
+            ? ('Llegaron $' + recibidoChk.toFixed(2) + ' por transferencia y el total a cobrar es $' + totalCobrarChk.toFixed(2) + '. No se puede cerrar la venta hasta que llegue el monto completo.')
+            : ('El monto recibido ($' + recibidoChk.toFixed(2) + (metodoChk === 'USD' ? ' en pesos' : '') + ') es menor que el total a cobrar ($' + totalCobrarChk.toFixed(2) + '). Revisa el monto antes de enviar.'));
           document.getElementById('montoRecibido').focus();
           return;
         }
@@ -7087,11 +8332,11 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
         nota: autoservicioActivo ? '' : ((document.getElementById('notaPedido').value || '').trim())
       };
 
+      const porAutoservicioAVendedor = autoservicioActivo && autoservicioDestino === 'vendedor';
+      const urlEnvio = porAutoservicioAVendedor ? '/api/pedidos/asignar' : '/api/pedidos';
+      const bodyEnvio = porAutoservicioAVendedor ? { todos: true, items: carrito, cliente: (nombreInput.value || '').trim(), claveEnvio: payload.clienteId } : payload;
       try {
-        const porAutoservicioAVendedor = autoservicioActivo && autoservicioDestino === 'vendedor';
-        const urlEnvio = porAutoservicioAVendedor ? '/api/pedidos/asignar' : '/api/pedidos';
-        const bodyEnvio = porAutoservicioAVendedor ? { todos: true, items: carrito, cliente: (nombreInput.value || '').trim(), claveEnvio: payload.clienteId } : payload;
-        const res = await fetch(urlEnvio, { method:'POST', body: JSON.stringify(bodyEnvio) });
+        const res = await fetchConTiempo(urlEnvio, { method:'POST', body: JSON.stringify(bodyEnvio) }, 30000);
         const data = await res.json().catch(() => null);
         if (!res.ok) {
           const msg = (data && data.error) ? data.error : 'No se pudo enviar el pedido.';
@@ -7127,9 +8372,12 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
         } catch (e2) {}
       } catch(e) {
         if (autoservicioActivo) {
-          mostrarMensaje('Sin conexion: no se pudo enviar el pedido. Revisa tu WiFi e intenta de nuevo.', false);
+          // El pedido NO se pierde: queda guardado en el telefono del cliente y se manda solo
+          // cuando vuelva la conexion con la PC (mismo clienteId/claveEnvio: no se duplica).
+          agregarACola(payload, urlEnvio, bodyEnvio);
+          mostrarMensaje('Sin conexion: tu pedido quedo guardado en tu telefono y se enviara solo cuando vuelva la conexion. No hace falta hacerlo de nuevo.', true);
         } else {
-          agregarACola(payload);
+          agregarACola(payload, urlEnvio, bodyEnvio);
           try { document.getElementById('notaPedido').value = ''; } catch (e) {}
           mostrarMensaje('Sin conexion: el pedido se guardo en el telefono y se enviara solo cuando vuelva la red.', true);
           volverAEfectivo();
@@ -7182,10 +8430,20 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
       localStorage.setItem(CLAVE_COLA, JSON.stringify(cola));
       actualizarColaUI();
     }
-    function agregarACola(payload) {
+    function agregarACola(payload, url, body) {
       const cola = leerCola();
-      cola.push({ id: 'off_' + Date.now() + '_' + Math.floor(Math.random() * 1000), payload, error: null });
+      const entrada = { id: 'off_' + Date.now() + '_' + Math.floor(Math.random() * 1000), payload, error: null };
+      if (url) entrada.url = url;            // a donde hay que mandarlo (pedido normal o autoservicio a vendedores)
+      if (body) entrada.body = body;
+      cola.push(entrada);
       guardarCola(cola);
+    }
+    // fetch con limite de espera: si la red se cae a medias, no se queda "Enviando..." para siempre.
+    function fetchConTiempo(url, opciones, ms) {
+      if (typeof AbortController === 'undefined') return fetch(url, opciones);
+      const ctl = new AbortController();
+      const t = setTimeout(function () { try { ctl.abort(); } catch (e) {} }, ms || 20000);
+      return fetch(url, Object.assign({}, opciones, { signal: ctl.signal })).finally(function () { clearTimeout(t); });
     }
     function descartarDeCola(id) {
       if (!confirm('¿Descartar este pedido guardado? No se enviara ni se contara como venta.')) return;
@@ -7217,13 +8475,16 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
       if (cola.length === 0) return;
       enviandoCola = true;
       const restante = [];
+      let enviadosAuto = 0;
       for (const entrada of cola) {
         try {
-          const res = await fetch('/api/pedidos', { method: 'POST', body: JSON.stringify(entrada.payload) });
+          const res = await fetchConTiempo(entrada.url || '/api/pedidos', { method: 'POST', body: JSON.stringify(entrada.body || entrada.payload) }, 30000);
           const data = await res.json().catch(() => null);
           if (!res.ok) {
             entrada.error = (data && data.error) ? data.error : 'El servidor rechazo el pedido.';
             restante.push(entrada);
+          } else if (entrada.payload && entrada.payload.autoservicio) {
+            enviadosAuto++;
           }
           // si res.ok, se envio bien y se descarta de la cola
         } catch (e) {
@@ -7234,7 +8495,8 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
       guardarCola(restante);
       enviandoCola = false;
       cargarCatalogo();
-      cargarMisPedidos();
+      if (enviadosAuto > 0) mostrarMensaje('Tu pedido guardado ya se envio. Gracias, en un momento te atienden.', true);
+      if (!autoservicioActivo) cargarMisPedidos();
     }
 
     window.addEventListener('online', intentarEnviarCola);
@@ -7349,6 +8611,8 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
       metodoMP[id] = nuevo;
       const el = document.getElementById('mp-total-' + id);
       if (el) el.textContent = textoTotalMP(base, nuevo);
+      const elQr = document.getElementById('mp-qr-' + id);
+      if (elQr) { elQr.innerHTML = htmlQrPago(); elQr.style.display = (nuevo === 'Transferencia' && qrPago.length) ? 'block' : 'none'; }
       try {
         const res = await fetch('/api/pedidos/' + id + '/metodo', { method: 'POST', body: JSON.stringify({ metodoPago: nuevo, pin: miPin() }) });
         const data = await res.json().catch(() => null);
@@ -7401,6 +8665,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
       return '<div class="mp-card" data-sig="' + firmaMP(p) + '">' +
         '<div class="mp-top"><span>Folio #' + p.id + ' — ' + horaCorta + '</span><span class="mp-estado ' + p.estado + '">' + p.estado.toUpperCase() + '</span></div>' +
         '<div class="mp-total" id="mp-total-' + p.id + '">' + totalTxt + '</div>' +
+        (p.estado === 'pendiente' ? ('<div data-qrpago="1" id="mp-qr-' + p.id + '" style="text-align:center; display:' + ((((metodoMP[p.id] || p.metodoPago) === 'Transferencia') && qrPago.length) ? 'block' : 'none') + ';">' + htmlQrPago() + '</div>') : '') +
         (p.nota ? '<div style="font-size:12px; color:#0369a1; margin-bottom:6px;">Tu nota: ' + escaparHtml(p.nota) + '</div>' : '') +
         itemsHtml +
         '<div class="mp-acciones">' + acciones + '</div>' +
@@ -7417,7 +8682,9 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
         const totalTxt = (typeof totalCobrar === 'number' && !isNaN(totalCobrar)) ? totalCobrar.toFixed(2) : '';
         const entrada = esUSD
           ? prompt('Monto recibido del cliente en USD (total $' + (totalCobrar / tasaDolarActual).toFixed(2) + ' USD):', (totalCobrar / tasaDolarActual).toFixed(2))
-          : prompt('Monto recibido del cliente' + (totalTxt ? ' (total $' + totalTxt + ')' : '') + ':', totalTxt);
+          : (metodoPago === 'Transferencia'
+              ? prompt('Monto que llego por transferencia (segun el mensaje del banco). Total a cobrar $' + totalTxt + ':', '')
+              : prompt('Monto recibido del cliente' + (totalTxt ? ' (total $' + totalTxt + ')' : '') + ':', totalTxt));
         if (entrada === null) return; // cancelo
         const entradaNum = parseFloat(String(entrada).replace(',', '.'));
         if (isNaN(entradaNum) || entradaNum < 0) { alert('Escribe un monto valido.'); return; }
@@ -7841,7 +9108,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
     // Estado de los plugins nativos de la APK (para saber que trae esta version)
     function diagnosticoPlugins() {
       const q = function (n) { return pluginNativo(n) ? 'si' : 'NO'; };
-      return 'Avisos: ' + q('LocalNotifications') + ' | Segundo plano: ' + (pluginNativo('TotoBg') ? 'si' : (pluginNativo('BackgroundMode') ? 'si (antiguo)' : 'NO'));
+      return 'Escaner: ' + q('BarcodeScanner') + ' | Avisos: ' + q('LocalNotifications') + ' | Segundo plano: ' + (pluginNativo('TotoBg') ? 'si' : (pluginNativo('BackgroundMode') ? 'si (antiguo)' : 'NO'));
     }
     setTimeout(function () {
       const cap = window.Capacitor;
@@ -9051,7 +10318,7 @@ function rasterEtiqueta(it) {
 </body>
 </html>
 '@
-$htmlEtiquetas = $htmlEtiquetas.Replace('__NEGOCIO__', [System.Net.WebUtility]::HtmlEncode([string]$reciboNombre))
+$htmlEtiquetas = $htmlEtiquetas.Replace('__NEGOCIO__', [System.Net.WebUtility]::HtmlEncode([string]$global:reciboCfg.nombre))
 
 $htmlMetricas = @'
 <!DOCTYPE html>
@@ -9271,9 +10538,11 @@ if (@($ips).Count -gt 0) {
 }
 Write-Host " Panel en esta PC -> http://localhost:$port/"
 Write-Host " Impresora configurada: $nombreImpresora"
+Revisar-CatalogoAxis -Forzar
+if ($global:configAxis.activo -and [bool]$global:configAxis.cerrarPedidosAuto) { Write-Host " Cierre automatico: los pedidos pendientes se cierran solos cuando AxisPOS registra la misma venta." }
 if ($global:catalogoInfo.cargado) {
-    Write-Host " Catalogo: $($global:catalogoInfo.cantidad) productos desde $($global:configExcel.ruta)"
-} elseif (-not $global:configExcel.mapeo) {
+    Write-Host " Catalogo: $($global:catalogoInfo.cantidad) productos desde $($global:catalogoInfo.archivo)"
+} elseif ((-not $global:configAxis.activo) -and (-not $global:configExcel.mapeo)) {
     Write-Host " Catalogo: todavia no configurado. Se configura desde el Panel (se abre solo)."
 } else {
     Write-Host " Catalogo: NO se pudo cargar ($($global:catalogoInfo.error))"
@@ -9352,6 +10621,8 @@ while ($listener.IsListening) {
     }
 
     Revisar-CambioCatalogo
+    Revisar-CatalogoAxis
+    Revisar-VentasAxis
 
     # Las consultas de sincronizacion del Gestor de Almacenes (cada ~10 s por telefono) no se anotan en pantalla para no llenar la consola.
     if (-not ($method -eq "GET" -and ($path.StartsWith("/api/almacen/") -or $path -eq "/api/fotos/skus"))) {
@@ -9419,7 +10690,63 @@ while ($listener.IsListening) {
             $context.Response.OutputStream.Close()
 
         } elseif ($method -eq "GET" -and $path -eq "/api/ip") {
-            Enviar-Respuesta -Context $context -Body (@{ ip = $global:ipLan; puerto = $port; anchoPuntos = $(if ([int]$reciboAncho -le 32) { 384 } else { 576 }) } | ConvertTo-Json) -ContentType "application/json; charset=utf-8"
+            Enviar-Respuesta -Context $context -Body (@{ ip = $global:ipLan; puerto = $port; anchoPuntos = $(if ([int]$global:reciboCfg.ancho -le 32) { 384 } else { 576 }) } | ConvertTo-Json) -ContentType "application/json; charset=utf-8"
+
+        } elseif ($method -eq "GET" -and $path -eq "/api/qr-pago") {
+            # QR de pago guardado en Ajustes (Personalizar comprobante y QR). El movil del
+            # vendedor lo usa para ensenarselo al cliente cuando cobra por transferencia.
+            # Solo sale el titulo, la instruccion y la imagen (no los puntos de impresion).
+            $listaQrPago = @()
+            foreach ($qP in @($global:reciboCfg.qrs)) {
+                if ($qP -and $qP.png) {
+                    $listaQrPago += [pscustomobject]@{ titulo = [string]$qP.titulo; instruccion = [string]$qP.instruccion; png = [string]$qP.png }
+                }
+            }
+            Enviar-Json $context @{ ok = $true; qrs = @($listaQrPago) } 200 4
+
+        } elseif ($path -like "/api/recibo/*" -and -not [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)) {
+            Enviar-Json $context @{ ok = $false; error = "El comprobante solo se edita desde la PC." } 403
+
+        } elseif ($method -eq "GET" -and $path -eq "/api/recibo/config") {
+            Enviar-Json $context $global:reciboCfg 200 6
+
+        } elseif ($method -eq "POST" -and $path -eq "/api/recibo/config") {
+            $readerRc = New-Object System.IO.StreamReader($request.InputStream, [System.Text.Encoding]::UTF8)
+            $bodyRc = $readerRc.ReadToEnd()
+            $readerRc.Close()
+            try {
+                Aplicar-ReciboCfg ($bodyRc | ConvertFrom-Json)
+                Guardar-ReciboCfg
+                Enviar-Json $context @{ ok = $true }
+            } catch {
+                Enviar-Json $context @{ ok = $false; error = "No se pudo guardar: $($_.Exception.Message)" } 400
+            }
+
+        } elseif ($method -eq "GET" -and $path -eq "/api/recibo/vista") {
+            $metRc = [string]$request.QueryString["metodo"]; if ($metRc -ne "Transferencia") { $metRc = "Efectivo" }
+            $estRc = [string]$request.QueryString["estado"]; if ($estRc -ne "cobrado") { $estRc = "pendiente" }
+            try {
+                $txtRc = Texto-VistaRecibo (Generar-TextoRecibo (Pedido-Muestra $metRc $estRc))
+                Enviar-Json $context @{ ok = $true; texto = $txtRc; ancho = [int]$global:reciboCfg.ancho }
+            } catch {
+                Enviar-Json $context @{ ok = $false; error = "$($_.Exception.Message)" } 500
+            }
+
+        } elseif ($method -eq "POST" -and $path -eq "/api/recibo/prueba") {
+            $readerRp = New-Object System.IO.StreamReader($request.InputStream, [System.Text.Encoding]::UTF8)
+            $bodyRp = $readerRp.ReadToEnd()
+            $readerRp.Close()
+            $dRp = $null
+            if ($bodyRp -and $bodyRp.Trim().Length -gt 0) { try { $dRp = $bodyRp | ConvertFrom-Json } catch {} }
+            $metRp = if ($dRp -and [string]$dRp.metodo -eq "Transferencia") { "Transferencia" } else { "Efectivo" }
+            $estRp = if ($dRp -and [string]$dRp.estado -eq "cobrado") { "cobrado" } else { "pendiente" }
+            try {
+                $bytesRp = Bytes-DesdeTexto (Generar-TextoRecibo (Pedido-Muestra $metRp $estRp))
+                if ([RawPrinterHelper]::EnviarBytes($nombreImpresora, $bytesRp)) { Enviar-Json $context @{ ok = $true } }
+                else { Enviar-Json $context @{ ok = $false; error = "Windows no confirmo la impresion." } 500 }
+            } catch {
+                Enviar-Json $context @{ ok = $false; error = "$($_.Exception.Message)" } 500
+            }
 
         } elseif ($method -eq "GET" -and $path -eq "/api/config") {
             Enviar-Respuesta -Context $context -Body ($global:configApp | ConvertTo-Json) -ContentType "application/json; charset=utf-8"
@@ -9529,8 +10856,12 @@ while ($listener.IsListening) {
             Enviar-Respuesta -Context $context -Body ($global:catalogoInfo | ConvertTo-Json) -ContentType "application/json; charset=utf-8"
 
         } elseif ($method -eq "POST" -and $path -eq "/api/catalogo/recargar") {
-            $global:catalogoMTimeProcesada = $null
-            Revisar-CambioCatalogo
+            if ($global:configAxis.activo) {
+                Revisar-CatalogoAxis -Forzar
+            } else {
+                $global:catalogoMTimeProcesada = $null
+                Revisar-CambioCatalogo
+            }
             Enviar-Respuesta -Context $context -Body ($global:catalogoInfo | ConvertTo-Json) -ContentType "application/json; charset=utf-8"
 
         } elseif ($method -eq "GET" -and $path -eq "/api/catalogo/config") {
@@ -9587,78 +10918,17 @@ while ($listener.IsListening) {
             $reader = New-Object System.IO.StreamReader($request.InputStream, [System.Text.Encoding]::UTF8)
             $bodyText = $reader.ReadToEnd()
             $reader.Close()
-            try {
-                $data = $bodyText | ConvertFrom-Json
-                $productos = @($data.productos)
-
-                # Indice del catalogo ANTERIOR por SKU, para no perder ventas
-                # ya descontadas cuando el Excel cambia por otro motivo.
-                $anteriorPorSku = @{}
-                foreach ($pAnt in $global:catalogo) {
-                    if ($pAnt.sku) { $anteriorPorSku[[string]$pAnt.sku] = $pAnt }
+            if ($global:configAxis.activo) {
+                Enviar-Respuesta -Context $context -Body (@{ ok = $false; error = "El catalogo viene de AxisPOS (config_axis.json). Para volver al Excel pon activo=false." } | ConvertTo-Json) -ContentType "application/json; charset=utf-8" -StatusCode 409
+            } else {
+                try {
+                    $data = $bodyText | ConvertFrom-Json
+                    Aplicar-ProductosCatalogo @($data.productos) | Out-Null
+                    Write-Host "Catalogo actualizado desde el Panel: $($global:catalogoInfo.cantidad) productos"
+                    Enviar-Respuesta -Context $context -Body ($global:catalogoInfo | ConvertTo-Json) -ContentType "application/json; charset=utf-8"
+                } catch {
+                    Enviar-Respuesta -Context $context -Body (@{ ok = $false; error = "$_" } | ConvertTo-Json) -ContentType "application/json; charset=utf-8" -StatusCode 500
                 }
-
-                $nuevo = New-Object System.Collections.ArrayList
-                foreach ($p in $productos) {
-                    $nombre = ([string]$p.nombre).Trim()
-                    if ([string]::IsNullOrWhiteSpace($nombre)) { continue }
-                    $sku = if ($p.sku) { ([string]$p.sku).Trim() } else { "" }
-                    $precio = 0.0
-                    if ($p.precio -ne $null) { [double]::TryParse([string]$p.precio, [ref]$precio) | Out-Null }
-
-                    $stockExcel = $null
-                    if ($p.stock -ne $null -and $p.stock -ne "") {
-                        $stockVal = 0.0
-                        if ([double]::TryParse([string]$p.stock, [ref]$stockVal)) { $stockExcel = $stockVal }
-                    }
-
-                    # Por defecto: el Excel es la nueva verdad (producto nuevo,
-                    # o sin control de stock).
-                    $stockBase = $stockExcel
-                    $vendido   = 0.0
-                    $stockEfectivo = $stockExcel
-
-                    $anterior = if ($sku) { $anteriorPorSku[$sku] } else { $null }
-                    if ($anterior -and $stockExcel -ne $null -and $anterior.stockBase -ne $null) {
-                        if ([math]::Abs([double]$anterior.stockBase - [double]$stockExcel) -lt 0.0001) {
-                            # La cantidad en el Excel NO cambio -> se preservan
-                            # las ventas hechas desde el movil desde la ultima
-                            # vez que si cambio.
-                            $stockBase = [double]$anterior.stockBase
-                            $vendido = [double]$anterior.vendido
-                            $stockEfectivo = $stockBase - $vendido
-                            if ($stockEfectivo -lt 0) { $stockEfectivo = 0 }
-                        }
-                        # Si SI cambio (reabasteciste / corregiste el conteo),
-                        # esa cifra del Excel se toma como el nuevo punto de
-                        # partida y se reinicia lo "vendido pendiente".
-                    }
-
-                    [void]$nuevo.Add([pscustomobject]@{
-                        sku = $sku
-                        nombre = $nombre
-                        precio = [math]::Round($precio,2)
-                        stock = $stockEfectivo
-                        stockBase = $stockBase
-                        vendido = $vendido
-                    })
-                }
-
-                Avisar-CambiosCatalogo $anteriorPorSku $nuevo
-                Registrar-ProductosNuevos $nuevo
-                $global:catalogo = $nuevo
-                $global:catalogoInfo.cargado = $true
-                $global:catalogoInfo.ultimaCarga = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
-                $global:catalogoInfo.error = $null
-                $global:catalogoInfo.cantidad = $nuevo.Count
-                $global:catalogoInfo.necesitaRecarga = $false
-                if (Test-Path $global:configExcel.ruta) {
-                    $global:catalogoMTimeProcesada = (Get-Item $global:configExcel.ruta).LastWriteTimeUtc
-                }
-                Write-Host "Catalogo actualizado desde el Panel: $($nuevo.Count) productos"
-                Enviar-Respuesta -Context $context -Body ($global:catalogoInfo | ConvertTo-Json) -ContentType "application/json; charset=utf-8"
-            } catch {
-                Enviar-Respuesta -Context $context -Body (@{ ok = $false; error = "$_" } | ConvertTo-Json) -ContentType "application/json; charset=utf-8" -StatusCode 500
             }
 
         } elseif ($method -eq "GET" -and $path -eq "/api/fotos/skus") {
@@ -10085,6 +11355,22 @@ while ($listener.IsListening) {
                 $continuarPedido = $false
             }
 
+            # Cobro por TRANSFERENCIA hecho por un vendedor: el monto que llego (el que
+            # dice el mensaje del banco) tiene que cubrir el total (precio x2). Si es menor
+            # no se cierra la venta. La caja igual lo revisa despues (queda "por revisar").
+            if ($continuarPedido -and (-not $esAutoCli) -and ([string]$data.estado -eq "cobrado") -and ([string]$data.metodoPago -eq "Transferencia")) {
+                $totTrChk = 0.0
+                foreach ($itTr in @($data.items)) { try { $totTrChk += [double]$itTr.precio * [double]$itTr.cantidad } catch {} }
+                $recTrChk = $null
+                try { if ($null -ne $data.montoRecibido) { $recTrChk = [double]$data.montoRecibido } } catch { $recTrChk = $null }
+                $esperadoTrChk = [math]::Round($totTrChk * 2, 2)
+                if (($null -eq $recTrChk) -or ($recTrChk -lt ($esperadoTrChk - 0.01))) {
+                    $msgTrChk = "El monto que llego por transferencia no cubre el total a cobrar ($" + (Formato-Monto $esperadoTrChk) + "). No se puede cerrar la venta."
+                    Enviar-Respuesta -Context $context -Body (@{ ok = $false; error = $msgTrChk } | ConvertTo-Json) -ContentType "application/json; charset=utf-8" -StatusCode 400
+                    $continuarPedido = $false
+                }
+            }
+
             # Si este mismo pedido (mismo clienteId) ya se recibio antes, no se crea
             # de nuevo: se devuelve el que ya existe, como si se acabara de crear.
             # Asi, si el telefono lo reenvia por un corte de red (crea que fallo pero
@@ -10265,6 +11551,20 @@ while ($listener.IsListening) {
                     Enviar-Respuesta -Context $context -Body (@{ ok = $false; error = "PIN incorrecto."; requierePin = $true } | ConvertTo-Json) -ContentType "application/json; charset=utf-8" -StatusCode 403
                 } else {
                 $metodo = if ($data -and $data.metodoPago) { [string]$data.metodoPago } elseif ($pedido.metodoPago) { [string]$pedido.metodoPago } else { "Efectivo" }
+                $metodoAntes = $metodo
+                # La caja NO cambia el metodo de pago: cobra siempre con el que dejo el vendedor.
+                $errMontoTr = ""
+                if ((-not $cobroCaja) -and $metodo -eq "Transferencia") {
+                    $esperadoTr = [math]::Round(([double]$pedido.totalProductos) * 2, 2)
+                    $recTr = $null
+                    try { if ($data -and $null -ne $data.montoRecibido) { $recTr = [double]$data.montoRecibido } } catch { $recTr = $null }
+                    if (($null -eq $recTr) -or ($recTr -lt ($esperadoTr - 0.01))) {
+                        $errMontoTr = "El monto que llego por transferencia no cubre el total a cobrar ($" + (Formato-Monto $esperadoTr) + "). No se puede cerrar la venta."
+                    }
+                }
+                if ($errMontoTr) {
+                    Enviar-Respuesta -Context $context -Body (@{ ok = $false; error = $errMontoTr } | ConvertTo-Json) -ContentType "application/json; charset=utf-8" -StatusCode 400
+                } else {
                 $pedido.estado = "cobrado"
                 $pedido.metodoPago = $metodo
                 $baseTotal = [double]$pedido.totalProductos
@@ -10281,7 +11581,11 @@ while ($listener.IsListening) {
                 $pedido | Add-Member -NotePropertyName revisado -NotePropertyValue ([bool]$cobroCaja) -Force
                 $pedido | Add-Member -NotePropertyName horaCobro -NotePropertyValue ((Get-Date).ToString("yyyy-MM-dd HH:mm:ss")) -Force
                 Guardar-Pedidos
+                if ($metodo -ne $metodoAntes) {
+                    try { Agregar-AlertaVendedor ([string]$pedido.vendedor) ("La caja cobro tu pedido #" + $id + " por " + $metodo.ToLower() + " (lo tenias en " + $metodoAntes.ToLower() + "). Total cobrado: $" + (Formato-Monto $pedido.totalCobrado) + ".") $id "pedido" } catch {}
+                }
                 Enviar-Respuesta -Context $context -Body (@{ ok = $true } | ConvertTo-Json) -ContentType "application/json; charset=utf-8"
+                }   # cierre de "if ($errMontoTr) ... else"
                 }
             }
 
@@ -10909,7 +12213,7 @@ while ($listener.IsListening) {
             } else {
                 try {
                     $texto = Generar-TextoRecibo $pedido
-                    $bytesRecibo = [System.Text.Encoding]::ASCII.GetBytes($texto)
+                    $bytesRecibo = Bytes-DesdeTexto $texto
                     $exito = [RawPrinterHelper]::EnviarBytes($nombreImpresora, $bytesRecibo)
                     if ($exito) {
                         Enviar-Respuesta -Context $context -Body (@{ ok = $true } | ConvertTo-Json) -ContentType "application/json; charset=utf-8"
