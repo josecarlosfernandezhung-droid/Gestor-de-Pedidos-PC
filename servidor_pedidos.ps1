@@ -1426,6 +1426,7 @@ function Cargar-ConfigAxis {
             }
         }
     } catch { Write-Host "Aviso: no se pudo leer config_axis.json ($_)." }
+    $global:axisConfigurado = [bool]$global:configAxis.activo
     if ($global:configAxis.activo) {
         $global:catalogoInfo.origen = "axispos"
         $global:catalogoInfo.mapeoConfigurado = $true
@@ -1670,7 +1671,7 @@ function Leer-VentasAxis([long]$desdeId) {
     foreach ($a in @($c.almacenes)) { $n = 0; if ([int]::TryParse([string]$a, [ref]$n)) { [void]$ids.Add($n) } }
     if ($ids.Count -eq 0) { throw "config_axis.json: 'almacenes' esta vacio." }
     $lista = ($ids -join ',')
-    $sql = "SELECT o.ID, o.Acct, o.ObjectID, g.$colSku, o.Qtty, DATE_FORMAT(IF(o.UserRealTime IS NULL OR o.UserRealTime < '2000-01-01', o.Timestamp, o.UserRealTime), '%Y-%m-%d %H:%i:%s'), o.PriceOut FROM operations o JOIN goods g ON g.ID = o.GoodID WHERE o.OperType = 2 AND o.ID > $desdeId AND o.ObjectID IN ($lista) ORDER BY o.ID"
+    $sql = "SELECT o.ID, o.Acct, o.ObjectID, g.$colSku, o.Qtty, DATE_FORMAT(IF(o.UserRealTime IS NULL OR o.UserRealTime < '2000-01-01', o.Timestamp, o.UserRealTime), '%Y-%m-%d %H:%i:%s'), o.PriceOut, o.Sign FROM operations o JOIN goods g ON g.ID = o.GoodID WHERE o.OperType = 2 AND o.Sign <> 0 AND o.Acct > 0 AND o.ID > $desdeId AND o.ObjectID IN ($lista) ORDER BY o.ID"
     $texto = Ejecutar-ConsultaAxis $sql
     $inv = [System.Globalization.CultureInfo]::InvariantCulture
     $res = New-Object System.Collections.ArrayList
@@ -1685,7 +1686,9 @@ function Leer-VentasAxis([long]$desdeId) {
         [void][double]::TryParse([string]$f[4], [System.Globalization.NumberStyles]::Float, $inv, [ref]$qty)
         $prc = 0.0
         if ($f.Count -ge 7) { [void][double]::TryParse([string]$f[6], [System.Globalization.NumberStyles]::Float, $inv, [ref]$prc) }
-        [void]$res.Add([pscustomobject]@{ id = $idFila; acct = [string]$f[1]; obj = [string]$f[2]; sku = ([string]$f[3]).Trim(); qty = $qty; fecha = [string]$f[5]; precio = $prc })
+        $sgn = 0.0
+        if ($f.Count -ge 8) { [void][double]::TryParse([string]$f[7], [System.Globalization.NumberStyles]::Float, $inv, [ref]$sgn) }
+        [void]$res.Add([pscustomobject]@{ id = $idFila; acct = [string]$f[1]; obj = [string]$f[2]; sku = ([string]$f[3]).Trim(); qty = $qty; fecha = [string]$f[5]; precio = $prc; signo = $sgn })
     }
     return @($res)
 }
@@ -1967,6 +1970,17 @@ function Conciliar-VentaAxis($grupo) {
     $total = 0.0
     foreach ($l in $grupo) { try { $total += [double]$l.qty * [double]$l.precio } catch {} }
     $rec = Registrar-VentaAxisDia $grupo $total
+    $esDev = $false
+    foreach ($l in $grupo) { if (([double]$l.qty -lt 0) -or ([double]$l.signo -gt 0)) { $esDev = $true } }
+    if ($esDev) {
+        # Devolucion hecha en AxisPOS: el stock ya sube solo (se lee de AxisPOS); no cierra ni toca pedidos.
+        Poner-Prop $rec "devolucion" $true
+        Guardar-VentasAxisDia
+        try { Revisar-CatalogoAxis -Forzar } catch {}
+        try { Recalcular-Reservas } catch {}
+        Write-Host ("[" + (Get-Date).ToString('HH:mm:ss') + "] AxisPOS: devolucion registrada (movimiento " + [string]$grupo[0].acct + ")")
+        return
+    }
     if ($null -eq $venta) { Guardar-VentasAxisDia; return }
     $acct = [string]$grupo[0].acct
     $inv = [System.Globalization.CultureInfo]::InvariantCulture
@@ -2054,6 +2068,7 @@ function Evaluar-CuadrePedido($p, $inicio) {
     $pedItems = Juntar-CantidadesPorSku $p.items 'sku' 'cantidad'
     if ($null -ne $pedItems) {
         foreach ($s in $global:ventasAxisDia) {
+            if ($s.devolucion) { continue }
             if ($s.pedidoId -and ([string]$s.pedidoId -ne [string]$p.id)) { continue }
             $hs = $null
             try { $hs = [datetime]::ParseExact([string]$s.fecha, "yyyy-MM-dd HH:mm:ss", $inv) } catch { continue }
@@ -2065,6 +2080,7 @@ function Evaluar-CuadrePedido($p, $inicio) {
     $mejor = $null; $mejorVd = $null; $mejorScore = 0.0; $mejorDif = [double]::MaxValue
     if ($null -ne $pedItems) {
         foreach ($s in $global:ventasAxisDia) {
+            if ($s.devolucion) { continue }
             if ($s.pedidoId) { continue }
             $hs = $null
             try { $hs = [datetime]::ParseExact([string]$s.fecha, "yyyy-MM-dd HH:mm:ss", $inv) } catch { continue }
@@ -2157,12 +2173,18 @@ function Calcular-CuadreAxis([int]$dias) {
         }
     }
     $sinPedidoN = 0; $sinPedidoTotal = 0.0
+    $devN = 0; $devTotal = 0.0
     $inv = [System.Globalization.CultureInfo]::InvariantCulture
     foreach ($s in $global:ventasAxisDia) {
         if ($s.pedidoId) { continue }
         $f = $null
         try { $f = [datetime]::ParseExact([string]$s.fecha, "yyyy-MM-dd HH:mm:ss", $inv) } catch { continue }
         if ($f -lt $desde) { continue }
+        if ($s.devolucion) {
+            $devN++
+            try { $devTotal += [math]::Abs([double]$s.total) } catch {}
+            continue
+        }
         $sinPedidoN++
         try { $sinPedidoTotal += [double]$s.total } catch {}
     }
@@ -2175,6 +2197,7 @@ function Calcular-CuadreAxis([int]$dias) {
         porVendedor = @($lista)
         problemas = @($problemas | Sort-Object { [string]$_.hora })
         axisSinPedido = [pscustomobject]@{ ventas = $sinPedidoN; total = [math]::Round($sinPedidoTotal, 2) }
+        devoluciones = [pscustomobject]@{ cantidad = $devN; total = [math]::Round($devTotal, 2) }
     }
 }
 
@@ -2216,13 +2239,49 @@ function Revisar-TareasPedidos {
 }
 
 # ------------------------------------------------------------------
+# ORIGEN DE LOS DATOS (Ajustes de la PC): base de datos de AxisPOS o catalogo (Excel).
+# AxisPOS tiene que estar configurado en config_axis.json; la eleccion se guarda en
+# config_app.json (origenDatos) y se puede cambiar sin reiniciar el servidor.
+# ------------------------------------------------------------------
+function Config-ParaPanel {
+    $c = $global:configApp | Select-Object *
+    $c | Add-Member -NotePropertyName axisConfigurado -NotePropertyValue ([bool]$global:axisConfigurado) -Force
+    return $c
+}
+
+function Aplicar-OrigenDatos([switch]$Inicio) {
+    $usarAxis = ([bool]$global:axisConfigurado -and ([string]$global:configApp.origenDatos -ne "catalogo"))
+    $global:configAxis.activo = $usarAxis
+    if ($usarAxis) {
+        $global:catalogoInfo.origen = "axispos"
+        $global:catalogoInfo.mapeoConfigurado = $true
+        $global:catalogoInfo.archivo = "AxisPOS (" + $global:configAxis.servidor + ":" + $global:configAxis.puerto + "/" + $global:configAxis.base + ")"
+        $global:catalogoInfo.necesitaRecarga = $false
+        if (-not $Inicio) {
+            try { Revisar-CatalogoAxis -Forzar } catch {}
+            try { Recalcular-Reservas } catch {}
+        }
+    } else {
+        $global:catalogoInfo.origen = "excel"
+        $global:catalogoInfo.mapeoConfigurado = [bool]$global:configExcel.mapeo
+        $global:catalogoInfo.archivo = [string]$global:configExcel.ruta
+        $global:catalogoInfo.error = $null
+        $global:catalogoMTimeProcesada = $null
+        if (-not $Inicio) { try { Revisar-CambioCatalogo } catch {} }
+    }
+    if (-not $Inicio) {
+        Write-Host ("[" + (Get-Date).ToString('HH:mm:ss') + "] Origen de los datos: " + $(if ($usarAxis) { "base de datos de AxisPOS" } else { "catalogo (Excel)" }))
+    }
+}
+
+# ------------------------------------------------------------------
 # Ajustes generales (config_app.json). Por ahora solo uno:
 #   ocultarSinStock -> cuando esta activo, la app de los vendedores no
 #   muestra en el buscador los productos sin existencias.
 # Se cambia desde el Panel de la PC y se recuerda al reiniciar.
 # ------------------------------------------------------------------
 $configAppPath = Join-Path $scriptDir "config_app.json"
-$global:configApp = [pscustomobject]@{ ocultarSinStock = $false; tasaDolar = 0.0; autoservicioDestino = "pc"; wifiSSID = ""; wifiClave = ""; umbralStockBajo = 3; permitirDescuentos = $false }
+$global:configApp = [pscustomobject]@{ ocultarSinStock = $false; tasaDolar = 0.0; autoservicioDestino = "pc"; wifiSSID = ""; wifiClave = ""; umbralStockBajo = 3; permitirDescuentos = $false; origenDatos = "axispos" }
 $global:ipLan = "localhost"
 
 function Cargar-ConfigApp {
@@ -2242,6 +2301,9 @@ function Cargar-ConfigApp {
                 }
                 if ($data.PSObject.Properties.Name -contains 'permitirDescuentos') {
                     $global:configApp.permitirDescuentos = [bool]$data.permitirDescuentos
+                }
+                if ($data.PSObject.Properties.Name -contains 'origenDatos' -and $data.origenDatos -eq 'catalogo') {
+                    $global:configApp.origenDatos = "catalogo"
                 }
                 if ($data.PSObject.Properties.Name -contains 'autoservicioDestino' -and $data.autoservicioDestino -eq 'vendedor') {
                     $global:configApp.autoservicioDestino = "vendedor"
@@ -4094,6 +4156,8 @@ $htmlPC = @'
 
       <button class="btn-toggle" id="btnPermitirDescuentos" style="width:100%; margin-bottom:10px;" onclick="alternarPermitirDescuentos()" title="Cuando esta activado, el vendedor puede editar el precio de cada linea de su pedido (descuento)">Descuentos por producto: ...</button>
 
+      <button class="btn-toggle" id="btnOrigenDatos" style="width:100%; margin-bottom:10px;" onclick="alternarOrigenDatos()" title="De donde salen los productos, precios y existencias: de la base de datos de AxisPOS (en tiempo real) o del catalogo (Excel)">Datos de productos y stock: ...</button>
+
       <button class="btn-toggle" id="btnOcultarSinStock" style="width:100%; margin-bottom:10px;" onclick="alternarOcultarSinStock()" title="Cuando esta activado, a los vendedores no les aparecen en el buscador los productos sin existencias">Ocultar sin stock a vendedores: ...</button>
 
       <button class="btn-toggle" id="btnAutoservicioDestino" style="width:100%; margin-bottom:10px;" onclick="alternarAutoservicioDestino()" title="Adonde caen los pedidos que arman los clientes ellos mismos desde el enlace de autoservicio">Pedidos de clientes (autoservicio): ...</button>
@@ -5305,12 +5369,38 @@ $htmlPC = @'
       } catch (e) { alert('No se pudo guardar el ajuste.'); }
     }
 
+    let origenDatos = 'axispos';
+    let axisConfigurado = false;
+    function pintarBotonOrigen() {
+      const b = document.getElementById('btnOrigenDatos');
+      if (!b) return;
+      const esAxis = axisConfigurado && origenDatos !== 'catalogo';
+      b.classList.toggle('activo', esAxis);
+      b.textContent = 'Datos de productos y stock: ' + (esAxis ? 'BASE DE DATOS DE AXISPOS' : 'CATALOGO (Excel)');
+    }
+    async function alternarOrigenDatos() {
+      if (!axisConfigurado) { alert('AxisPOS no esta configurado en este servidor (revisa config_axis.json).'); return; }
+      const nuevo = (origenDatos === 'catalogo') ? 'axispos' : 'catalogo';
+      try {
+        const res = await fetch('/api/config', { method:'POST', body: JSON.stringify({ origenDatos: nuevo }) });
+        const cfg = await res.json();
+        origenDatos = cfg.origenDatos === 'catalogo' ? 'catalogo' : 'axispos';
+        axisConfigurado = !!cfg.axisConfigurado;
+        pintarBotonOrigen();
+        mostrarBanner(origenDatos === 'catalogo' ? 'Datos desde el catalogo (Excel)' : 'Datos desde la base de datos de AxisPOS');
+        cargarEstadoCatalogo();
+      } catch (e) { alert('No se pudo guardar el ajuste.'); }
+    }
+
     async function cargarConfigApp() {
       try {
         const res = await fetch('/api/config');
         const cfg = await res.json();
         permitirDescuentos = !!cfg.permitirDescuentos;
         pintarBotonDescuentos();
+        origenDatos = cfg.origenDatos === 'catalogo' ? 'catalogo' : 'axispos';
+        axisConfigurado = !!cfg.axisConfigurado;
+        pintarBotonOrigen();
         ocultarSinStock = !!cfg.ocultarSinStock;
         pintarBotonSinStock();
         autoservicioDestino = cfg.autoservicioDestino === 'vendedor' ? 'vendedor' : 'pc';
@@ -10937,6 +11027,7 @@ $htmlMetricas = @'
           }).join('')) : '';
         const sp = c.axisSinPedido || { ventas: 0, total: 0 };
         document.getElementById('cuadreNota').textContent = 'Ventas de AxisPOS sin pedido (mostrador): ' + sp.ventas + ' por $' + Number(sp.total).toFixed(2) +
+          (c.devoluciones && c.devoluciones.cantidad ? ('. Devoluciones hechas en AxisPOS: ' + c.devoluciones.cantidad + ' por $' + Number(c.devoluciones.total).toFixed(2)) : '') +
           '. Un pedido se confirma cuando AxisPOS registra la misma venta; si pasan ' + c.esperaMinutos + ' min sin aparecer se marca. Los montos son los del pedido.' +
           (c.seguimientoDesde ? (' Seguimiento desde ' + c.seguimientoDesde + '.') : '');
       } catch (e) { panel.style.display = 'none'; }
@@ -10981,6 +11072,38 @@ function Enviar-Respuesta {
     $Context.Response.ContentLength64 = $bytes.Length
     $Context.Response.OutputStream.Write($bytes, 0, $bytes.Length)
     $Context.Response.OutputStream.Close()
+}
+
+# ---- Stock en vivo para Arqueo: lista compacta [sku, nombre, stock, precio] ----
+# Se arma una sola vez cada 5 segundos aunque pidan varios telefonos a la vez.
+$global:stockVivoJson = $null
+$global:stockVivoHora = [datetime]::MinValue
+
+function Texto-JsonStockVivo([string]$s) {
+    if ($null -eq $s) { return '""' }
+    $t = $s.Replace('\', '\\').Replace('"', '\"')
+    $t = [regex]::Replace($t, '[\x00-\x1f]', ' ')
+    return '"' + $t + '"'
+}
+
+function Construir-StockVivoJson {
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.Append('{"ok":true,"items":[')
+    $primero = $true
+    foreach ($pr in @($global:catalogo)) {
+        if (-not $primero) { [void]$sb.Append(',') }
+        $primero = $false
+        $stTxt = 'null'
+        if ($null -ne $pr.stock) { $stTxt = ([double]$pr.stock).ToString('0.####', $inv) }
+        $prTxt = '0'
+        if ($null -ne $pr.precio) { $prTxt = ([double]$pr.precio).ToString('0.####', $inv) }
+        $skuTxt = Texto-JsonStockVivo ([string]$pr.sku)
+        $nomTxt = Texto-JsonStockVivo ([string]$pr.nombre)
+        [void]$sb.Append('[' + $skuTxt + ',' + $nomTxt + ',' + $stTxt + ',' + $prTxt + ']')
+    }
+    [void]$sb.Append(']}')
+    return $sb.ToString()
 }
 
 # ------------------------------------------------------------------
@@ -11058,6 +11181,7 @@ if (@($ips).Count -gt 0) {
 }
 Write-Host " Panel en esta PC -> http://localhost:$port/"
 Write-Host " Impresora configurada: $nombreImpresora"
+Aplicar-OrigenDatos -Inicio
 Revisar-CatalogoAxis -Forzar
 if ($global:configAxis.activo -and [bool]$global:configAxis.cerrarPedidosAuto) { Write-Host " Cierre automatico: los pedidos pendientes se cierran solos cuando AxisPOS registra la misma venta." }
 if ($global:catalogoInfo.cargado) {
@@ -11167,6 +11291,18 @@ while ($listener.IsListening) {
 
         } elseif ($method -eq "GET" -and $path -eq "/metricas") {
             Enviar-Respuesta -Context $context -Body (Inyectar-Guardian $htmlMetricas)
+
+        } elseif ($method -eq "GET" -and $path -eq "/api/stock-pos") {
+            # Existencia "como la cuenta el punto de venta" (almacen + piso juntos), para el Gestor de almacen.
+            $lista = New-Object System.Collections.ArrayList
+            foreach ($pr in @($global:catalogo)) {
+                $sp = $null
+                if ($null -ne $pr.stockBase) { $sp = [double]$pr.stockBase } elseif ($null -ne $pr.stock) { $sp = [double]$pr.stock }
+                if ($null -eq $sp) { continue }
+                [void]$lista.Add([pscustomobject]@{ sku = [string]$pr.sku; nombre = [string]$pr.nombre; stock = $sp })
+            }
+            $outSp = [pscustomobject]@{ ok = $true; origen = [string]$global:catalogoInfo.origen; actualizado = [string]$global:catalogoInfo.ultimaCarga; cantidad = $lista.Count; productos = @($lista.ToArray()) }
+            Enviar-Respuesta -Context $context -Body ($outSp | ConvertTo-Json -Depth 4 -Compress) -ContentType "application/json; charset=utf-8"
 
         } elseif ($method -eq "GET" -and $path -eq "/api/cuadre") {
             if (-not [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)) {
@@ -11287,7 +11423,7 @@ while ($listener.IsListening) {
             }
 
         } elseif ($method -eq "GET" -and $path -eq "/api/config") {
-            Enviar-Respuesta -Context $context -Body ($global:configApp | ConvertTo-Json) -ContentType "application/json; charset=utf-8"
+            Enviar-Respuesta -Context $context -Body ((Config-ParaPanel) | ConvertTo-Json) -ContentType "application/json; charset=utf-8"
 
         } elseif ($method -eq "POST" -and $path -eq "/api/config") {
             $reader = New-Object System.IO.StreamReader($request.InputStream, [System.Text.Encoding]::UTF8)
@@ -11321,8 +11457,15 @@ while ($listener.IsListening) {
             if ($data.PSObject.Properties.Name -contains 'wifiClave') {
                 $global:configApp.wifiClave = "$($data.wifiClave)"
             }
+            $cambioOrigen = $false
+            if ($data.PSObject.Properties.Name -contains 'origenDatos') {
+                $nuevoOrigen = if ($data.origenDatos -eq 'catalogo') { "catalogo" } else { "axispos" }
+                if ($nuevoOrigen -eq "axispos" -and -not $global:axisConfigurado) { $nuevoOrigen = "catalogo" }
+                if ($nuevoOrigen -ne [string]$global:configApp.origenDatos) { $global:configApp.origenDatos = $nuevoOrigen; $cambioOrigen = $true }
+            }
             Guardar-ConfigApp
-            Enviar-Respuesta -Context $context -Body ($global:configApp | ConvertTo-Json) -ContentType "application/json; charset=utf-8"
+            if ($cambioOrigen) { try { Aplicar-OrigenDatos } catch {} }
+            Enviar-Respuesta -Context $context -Body ((Config-ParaPanel) | ConvertTo-Json) -ContentType "application/json; charset=utf-8"
 
         } elseif ($method -eq "GET" -and $path -eq "/api/stockbajo") {
             # Productos con existencia por debajo (o igual) del umbral configurado
@@ -11335,6 +11478,14 @@ while ($listener.IsListening) {
                     ForEach-Object { [pscustomobject]@{ sku = $_.sku; nombre = $_.nombre; stock = $_.stock } })
             }
             Enviar-Respuesta -Context $context -Body (@{ umbral = $umbral; productos = $bajos } | ConvertTo-Json -Depth 5) -ContentType "application/json; charset=utf-8"
+
+        } elseif ($method -eq "GET" -and $path -eq "/api/almacen/stockvivo") {
+            $ahoraSv = Get-Date
+            if (($null -eq $global:stockVivoJson) -or (($ahoraSv - $global:stockVivoHora).TotalSeconds -ge 5)) {
+                $global:stockVivoJson = Construir-StockVivoJson
+                $global:stockVivoHora = $ahoraSv
+            }
+            Enviar-Respuesta -Context $context -Body $global:stockVivoJson -ContentType "application/json; charset=utf-8"
 
         } elseif ($method -eq "GET" -and $path -eq "/api/almacen/ping") {
             $ci = $global:catalogoInfo
