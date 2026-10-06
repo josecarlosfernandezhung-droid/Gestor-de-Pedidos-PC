@@ -1265,6 +1265,221 @@ function Obtener-PedidosCobradosDesde([datetime]$desde) {
     })
 }
 
+# ---------------- Cierre del dia: AxisPOS contra la aplicacion (solo lectura, solo cuando se pide) ----------------
+# Lee directamente las ventas de AxisPOS del periodo y las empareja con los pedidos cobrados (mismos productos y cantidades).
+# No depende de las ventas que el servidor haya ido guardando en memoria, y tolera pedidos que llegan tarde.
+$global:cierreCache = @{}
+
+function Leer-VentasAxisPeriodo([datetime]$desde) {
+    $c = $global:configAxis
+    $colSku = [string]$c.columnaSku
+    if (@('Code','BarCode1','ID') -notcontains $colSku) { throw "columnaSku invalida (usa Code, BarCode1 o ID)." }
+    $ids = New-Object System.Collections.ArrayList
+    foreach ($a in @($c.almacenes)) { $n = 0; if ([int]::TryParse([string]$a, [ref]$n)) { [void]$ids.Add($n) } }
+    if ($ids.Count -eq 0) { throw "config_axis.json: 'almacenes' esta vacio." }
+    $lista = ($ids -join ',')
+    $desdeTxt = $desde.ToString("yyyy-MM-dd HH:mm:ss")
+    $preTxt = $desde.AddDays(-1).ToString("yyyy-MM-dd HH:mm:ss")
+    $sql = "SELECT o.ID, o.Acct, o.ObjectID, g.$colSku, o.Qtty, DATE_FORMAT(IF(o.UserRealTime IS NULL OR o.UserRealTime < '2000-01-01', o.Timestamp, o.UserRealTime), '%Y-%m-%d %H:%i:%s'), o.PriceOut, o.Sign FROM operations o JOIN goods g ON g.ID = o.GoodID WHERE o.OperType = 2 AND o.Sign <> 0 AND o.Acct > 0 AND o.ObjectID IN ($lista) AND o.Timestamp >= '$preTxt' AND IF(o.UserRealTime IS NULL OR o.UserRealTime < '2000-01-01', o.Timestamp, o.UserRealTime) >= '$desdeTxt' ORDER BY o.ID"
+    $texto = Ejecutar-ConsultaAxis $sql
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $res = New-Object System.Collections.ArrayList
+    foreach ($linea in ($texto -split "`n")) {
+        $linea = $linea.TrimEnd("`r")
+        if ([string]::IsNullOrWhiteSpace($linea)) { continue }
+        $f = $linea -split "`t"
+        if ($f.Count -lt 8) { continue }
+        $qty = 0.0
+        [void][double]::TryParse([string]$f[4], [System.Globalization.NumberStyles]::Float, $inv, [ref]$qty)
+        $prc = 0.0
+        [void][double]::TryParse([string]$f[6], [System.Globalization.NumberStyles]::Float, $inv, [ref]$prc)
+        $sgn = 0.0
+        [void][double]::TryParse([string]$f[7], [System.Globalization.NumberStyles]::Float, $inv, [ref]$sgn)
+        [void]$res.Add([pscustomobject]@{ acct = [string]$f[1]; obj = [string]$f[2]; sku = ([string]$f[3]).Trim(); qty = $qty; fecha = [string]$f[5]; precio = $prc; signo = $sgn })
+    }
+    return @($res)
+}
+
+# Texto que identifica unos productos y cantidades (para comparar rapido pedido contra venta).
+function Firma-Items($mapa) {
+    if ($null -eq $mapa) { return "" }
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $partes = New-Object System.Collections.ArrayList
+    foreach ($kk in ($mapa.Keys | Sort-Object)) { [void]$partes.Add([string]$kk + ":" + ([double]$mapa[$kk]).ToString("0.####", $inv)) }
+    return ($partes -join ";")
+}
+
+function Armar-TicketsAxis($filas) {
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $grupos = [ordered]@{}
+    foreach ($f in @($filas)) {
+        if (([double]$f.qty -lt 0) -or ([double]$f.signo -gt 0)) { continue }
+        $k = [string]$f.acct + "|" + [string]$f.obj
+        if (-not $grupos.Contains($k)) { $grupos[$k] = New-Object System.Collections.ArrayList }
+        [void]$grupos[$k].Add($f)
+    }
+    $res = New-Object System.Collections.ArrayList
+    foreach ($k in @($grupos.Keys)) {
+        $g = $grupos[$k]
+        $tot = 0.0
+        $fmax = ""
+        foreach ($fg in $g) {
+            $tot = $tot + ([double]$fg.qty * [double]$fg.precio)
+            if ([string]$fg.fecha -gt $fmax) { $fmax = [string]$fg.fecha }
+        }
+        $dt = $null
+        try { $dt = [datetime]::ParseExact($fmax, "yyyy-MM-dd HH:mm:ss", $inv) } catch { $dt = $null }
+        if ($null -eq $dt) { continue }
+        $mapa = Juntar-CantidadesPorSku $g 'sku' 'qty'
+        [void]$res.Add([pscustomobject]@{ acct = [string]$g[0].acct; fecha = $dt; total = [math]::Round($tot, 2); mapa = $mapa; firma = (Firma-Items $mapa); usado = $false; parecidaA = $null })
+    }
+    return @($res)
+}
+
+function Resumen-MapaProductos($mapa, $nombres) {
+    if ($null -eq $mapa) { return "(venta con productos sin codigo)" }
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $partes = New-Object System.Collections.ArrayList
+    foreach ($kk in ($mapa.Keys | Sort-Object)) {
+        $nom = [string]$kk
+        if ($nombres.ContainsKey([string]$kk)) { $nom = [string]$nombres[[string]$kk] }
+        [void]$partes.Add($nom + " x" + ([double]$mapa[$kk]).ToString("0.##", $inv))
+        if ($partes.Count -ge 3) { break }
+    }
+    $txt = $partes -join ", "
+    if ($mapa.Count -gt 3) { $txt = $txt + " y " + [string]($mapa.Count - 3) + " mas" }
+    return $txt
+}
+
+function Calcular-CierreDia([int]$dias) {
+    if (-not $global:configAxis.activo) { throw "AxisPOS no esta activo (config_axis.json)." }
+    $desde = (Get-Date).Date.AddDays(-($dias - 1))
+    $tickets = @(Armar-TicketsAxis (Leer-VentasAxisPeriodo $desde))
+    $nombres = @{}
+    foreach ($pc in @($global:catalogo)) { if ($pc.sku) { $nombres[[string]$pc.sku] = [string]$pc.nombre } }
+
+    # Pedidos cobrados del periodo (sin repetidos).
+    $vistos = @{}
+    $pedidos = New-Object System.Collections.ArrayList
+    foreach ($p in @(Obtener-PedidosCobradosDesde $desde)) {
+        $kid = [string]$p.id + "|" + [string]$p.hora
+        if ($vistos.ContainsKey($kid)) { continue }
+        $vistos[$kid] = $true
+        $h = Hora-Pedido $p
+        if ($null -eq $h) { continue }
+        $monto = 0.0
+        try { if ($p.totalCobrado) { $monto = [double]$p.totalCobrado } else { $monto = [double]$p.totalProductos } } catch { $monto = 0.0 }
+        $mapaP = Juntar-CantidadesPorSku $p.items 'sku' 'cantidad'
+        [void]$pedidos.Add([pscustomobject]@{ id = $p.id; vendedor = [string]$p.vendedor; h = $h; monto = $monto; mapa = $mapaP; firma = (Firma-Items $mapaP) })
+    }
+
+    # Ventas agrupadas por productos: pedido y venta cuadran si tienen exactamente los mismos productos y cantidades
+    # y la venta esta entre 90 minutos antes y 12 horas despues de la hora del pedido (el pedido puede llegar tarde).
+    $porFirma = @{}
+    foreach ($tk in @($tickets | Sort-Object fecha)) {
+        if (-not $tk.firma) { continue }
+        if (-not $porFirma.ContainsKey($tk.firma)) { $porFirma[$tk.firma] = New-Object System.Collections.ArrayList }
+        [void]$porFirma[$tk.firma].Add($tk)
+    }
+    $cuadran = 0
+    $cuadranAxis = 0.0
+    $cuadranApp = 0.0
+    $sinVenta = New-Object System.Collections.ArrayList
+    foreach ($o in @($pedidos | Sort-Object h)) {
+        $mejor = $null
+        $mejorDif = [double]::MaxValue
+        if ($o.firma -and $porFirma.ContainsKey($o.firma)) {
+            foreach ($tk in $porFirma[$o.firma]) {
+                if ($tk.usado) { continue }
+                $difMin = ($tk.fecha - $o.h).TotalMinutes
+                if (($difMin -lt -90) -or ($difMin -gt 720)) { continue }
+                if ([math]::Abs($difMin) -lt $mejorDif) { $mejor = $tk; $mejorDif = [math]::Abs($difMin) }
+            }
+        }
+        if ($null -ne $mejor) {
+            $mejor.usado = $true
+            $cuadran = $cuadran + 1
+            $cuadranAxis = $cuadranAxis + [double]$mejor.total
+            $cuadranApp = $cuadranApp + [double]$o.monto
+        } else {
+            [void]$sinVenta.Add($o)
+        }
+    }
+
+    # Pedidos sin venta exacta: se busca una venta parecida (mismos productos, otra cantidad) todavia sin emparejar.
+    $parecN = 0
+    $parecAxis = 0.0
+    $parecApp = 0.0
+    $parecLista = New-Object System.Collections.ArrayList
+    $faltan = New-Object System.Collections.ArrayList
+    foreach ($o in @($sinVenta)) {
+        $mejorT = $null
+        $mejorScore = 0.0
+        $mejorDif2 = [double]::MaxValue
+        if ($null -ne $o.mapa) {
+            foreach ($tk in $tickets) {
+                if ($tk.usado -or ($null -eq $tk.mapa)) { continue }
+                $difMin = ($tk.fecha - $o.h).TotalMinutes
+                if (($difMin -lt -90) -or ($difMin -gt 720)) { continue }
+                $comunes = 0
+                foreach ($kk in $o.mapa.Keys) { if ($tk.mapa.ContainsKey($kk)) { $comunes = $comunes + 1 } }
+                $union = $o.mapa.Count + $tk.mapa.Count - $comunes
+                if ($union -le 0) { continue }
+                $score = [double]$comunes / [double]$union
+                if ($score -lt 0.5) { continue }
+                $adif = [math]::Abs($difMin)
+                if (($score -gt $mejorScore) -or (($score -eq $mejorScore) -and ($adif -lt $mejorDif2))) { $mejorT = $tk; $mejorScore = $score; $mejorDif2 = $adif }
+            }
+        }
+        if ($null -ne $mejorT) {
+            $mejorT.usado = $true
+            $mejorT.parecidaA = $o.id
+            $parecN = $parecN + 1
+            $parecAxis = $parecAxis + [double]$mejorT.total
+            $parecApp = $parecApp + [double]$o.monto
+            [void]$parecLista.Add([pscustomobject]@{ id = $o.id; vendedor = $o.vendedor; acct = $mejorT.acct; totalApp = [math]::Round([double]$o.monto, 2); totalAxis = $mejorT.total; detalleApp = (Resumen-MapaProductos $o.mapa $nombres); detalleAxis = (Resumen-MapaProductos $mejorT.mapa $nombres) })
+        } else {
+            [void]$faltan.Add($o)
+        }
+    }
+
+    $soloN = 0
+    $soloTotal = 0.0
+    $soloFilas = New-Object System.Collections.ArrayList
+    $axisTotal = 0.0
+    foreach ($tk in $tickets) {
+        $axisTotal = $axisTotal + [double]$tk.total
+        if (-not $tk.usado) {
+            $soloN = $soloN + 1
+            $soloTotal = $soloTotal + [double]$tk.total
+            [void]$soloFilas.Add([pscustomobject]@{ acct = $tk.acct; hora = $tk.fecha.ToString("yyyy-MM-dd HH:mm"); total = $tk.total; detalle = (Resumen-MapaProductos $tk.mapa $nombres) })
+        }
+    }
+    $faltanTotal = 0.0
+    $faltanFilas = New-Object System.Collections.ArrayList
+    foreach ($o in $faltan) {
+        $faltanTotal = $faltanTotal + [double]$o.monto
+        [void]$faltanFilas.Add([pscustomobject]@{ id = $o.id; vendedor = $o.vendedor; hora = $o.h.ToString("yyyy-MM-dd HH:mm"); total = [math]::Round([double]$o.monto, 2); detalle = (Resumen-MapaProductos $o.mapa $nombres) })
+    }
+    $appTotal = 0.0
+    foreach ($o in $pedidos) { $appTotal = $appTotal + [double]$o.monto }
+
+    $soloTop = @($soloFilas | Sort-Object @{ Expression = { [double]$_.total }; Descending = $true } | Select-Object -First 15)
+    $faltanTop = @($faltanFilas | Sort-Object hora | Select-Object -First 30)
+    return @{
+        ok = $true
+        dias = $dias
+        desde = $desde.ToString("yyyy-MM-dd")
+        generado = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+        axis = @{ ventas = $tickets.Count; total = [math]::Round($axisTotal, 2) }
+        app = @{ pedidos = $pedidos.Count; total = [math]::Round($appTotal, 2) }
+        cuadran = @{ n = $cuadran; axis = [math]::Round($cuadranAxis, 2); app = [math]::Round($cuadranApp, 2) }
+        soloAxis = @{ n = $soloN; total = [math]::Round($soloTotal, 2); lista = @($soloTop) }
+        sinVenta = @{ n = $faltan.Count; total = [math]::Round($faltanTotal, 2); lista = @($faltanTop) }
+        parecidas = @{ n = $parecN; axis = [math]::Round($parecAxis, 2); app = [math]::Round($parecApp, 2); lista = @($parecLista | Select-Object -First 30) }
+    }
+}
+
 function Calcular-Metricas([int]$dias) {
     $desde = (Get-Date).Date.AddDays( - ($dias - 1))
     $pedidos = Obtener-PedidosCobradosDesde $desde
@@ -1558,6 +1773,14 @@ function Aplicar-ProductosCatalogo($productos) {
         $stockEfectivo = $stockOrigen
 
         $anterior = if ($sku) { $anteriorPorSku[$sku] } else { $null }
+        if ($anterior -and $sku -and $stockOrigen -ne $null -and $anterior.stockBase -ne $null) {
+            $dBaja = [double]$anterior.stockBase - [double]$stockOrigen
+            if ($dBaja -gt 0.0001) {
+                $exAb = $global:stockAbsorber[$sku]
+                if ($exAb -and ($exAb.hasta -gt (Get-Date))) { $dBaja = $dBaja + [double]$exAb.delta }
+                $global:stockAbsorber[$sku] = @{ delta = $dBaja; hasta = (Get-Date).AddSeconds(20) }
+            }
+        }
         if ($anterior -and $stockOrigen -ne $null -and $anterior.stockBase -ne $null) {
             if ([math]::Abs([double]$anterior.stockBase - [double]$stockOrigen) -lt 0.0001) {
                 $stockBase = [double]$anterior.stockBase
@@ -1636,6 +1859,7 @@ $global:axisVentasVistas = @{}
 $global:axisVentasListas = @{}
 $global:axisSeguimientoDesde = ""
 $global:axisBaseCambio = $false
+$global:stockAbsorber = @{}
 
 function Cargar-EstadoVentasAxis {
     if (Test-Path $axisVentasPath) {
@@ -1732,7 +1956,7 @@ function Cerrar-PedidoConVentaAxis($grupo) {
         if ($horaVenta) {
             try {
                 $horaPedido = [datetime]::ParseExact([string]$p.hora, "yyyy-MM-dd HH:mm:ss", $inv)
-                if ($horaVenta -lt $horaPedido.AddSeconds(-60)) { continue }
+                if ($horaVenta -lt $horaPedido.AddSeconds(-(Margen-VentaAntesSeg))) { continue }
             } catch {}
         }
 
@@ -1756,7 +1980,7 @@ function Revisar-VentasAxis {
     if (-not $global:configAxis.activo) { return }
     if (-not [bool]$global:configAxis.cerrarPedidosAuto) { return }
     $espera = [int]$global:configAxis.ventasCadaSegundos
-    if ($espera -lt 3) { $espera = 3 }
+    if ($espera -lt 1) { $espera = 1 }
     if ($global:axisVentasFallos -gt 0) { $espera = [math]::Min(300, $espera * ($global:axisVentasFallos + 1)) }
     $ahora = Get-Date
     if (($ahora - $global:axisVentasUltima).TotalSeconds -lt $espera) { return }
@@ -1788,6 +2012,7 @@ function Revisar-VentasAxis {
         }
 
         $hayEnEspera = $false
+        $procesados = 0
         $vistasNuevas = @{}
         foreach ($k in @($grupos.Keys)) {
             $g = $grupos[$k]
@@ -1796,11 +2021,21 @@ function Revisar-VentasAxis {
             $firma = [string]$g.Count + "|" + [string]$maxG
             $vistasNuevas[$k] = $firma
             if ($global:axisVentasListas.ContainsKey($k)) { continue }
-            if ([string]$global:axisVentasVistas[$k] -ne $firma) { $hayEnEspera = $true; continue }
+            $listoPorEdad = $false
+            try {
+                $fMaxG = ""
+                foreach ($fg2 in $g) { if ([string]$fg2.fecha -gt $fMaxG) { $fMaxG = [string]$fg2.fecha } }
+                $dtMaxG = [datetime]::ParseExact($fMaxG, "yyyy-MM-dd HH:mm:ss", [System.Globalization.CultureInfo]::InvariantCulture)
+                $edadG = ($ahora - $dtMaxG).TotalSeconds
+                if (($edadG -ge 2) -and ($edadG -le 600)) { $listoPorEdad = $true }
+            } catch { $listoPorEdad = $false }
+            if ((-not $listoPorEdad) -and ([string]$global:axisVentasVistas[$k] -ne $firma)) { $hayEnEspera = $true; continue }
             Conciliar-VentaAxis $g
             $global:axisVentasListas[$k] = $true
+            $procesados = $procesados + 1
         }
         $global:axisVentasVistas = $vistasNuevas
+        if ($procesados -gt 0) { try { Actualizar-CuadreAxis } catch {} }
         if (-not $hayEnEspera) {
             $global:axisVentasUltimoId = $maxId
             $global:axisVentasVistas = @{}
@@ -1834,6 +2069,17 @@ function Poner-Prop($o, [string]$n, $v) { $o | Add-Member -NotePropertyName $n -
 
 function Hora-Pedido($p) {
     try { return [datetime]::ParseExact([string]$p.hora, "yyyy-MM-dd HH:mm:ss", [System.Globalization.CultureInfo]::InvariantCulture) } catch { return $null }
+}
+
+# Cuantos segundos ANTES de la hora en que llego el pedido puede estar la venta de AxisPOS y seguir contando como suya.
+# Si el pedido se atrasa en llegar (mala red, movil sin senal), la caja ya pudo cobrar la venta antes de que llegue.
+# Se puede cambiar con "ventaAntesMinutos" en config_axis.json (20 por defecto, entre 1 y 120).
+function Margen-VentaAntesSeg {
+    $min = 20
+    try { if ($null -ne $global:configAxis.ventaAntesMinutos) { $min = [int]$global:configAxis.ventaAntesMinutos } } catch { $min = 20 }
+    if ($min -lt 1) { $min = 1 }
+    if ($min -gt 120) { $min = 120 }
+    return [int]($min * 60)
 }
 
 function Inicio-Seguimiento {
@@ -1950,6 +2196,10 @@ function Aplicar-ReservasALista($lista) {
             if ($null -eq $pr.stockBase) { continue }
             $r = 0.0
             if ($pr.sku -and $res.ContainsKey([string]$pr.sku)) { $r = [double]$res[[string]$pr.sku] }
+            if (($r -gt 0) -and $pr.sku -and $global:stockAbsorber.ContainsKey([string]$pr.sku)) {
+                $abSku = $global:stockAbsorber[[string]$pr.sku]
+                if ($abSku.hasta -gt $ahora) { $r = [math]::Max(0.0, $r - [double]$abSku.delta) } else { $global:stockAbsorber.Remove([string]$pr.sku) }
+            }
             $pr.vendido = $r
             $pr.reservado = $r
             $s = [double]$pr.stockBase - $r
@@ -1962,6 +2212,55 @@ function Aplicar-ReservasALista($lista) {
 function Recalcular-Reservas {
     if (-not $global:configAxis.activo) { return }
     Aplicar-ReservasALista $global:catalogo
+}
+
+# ---- Pedido que llega DESPUES de que la caja ya cobro la venta en AxisPOS ----
+# Se busca esa venta entre las ya leidas (axis_ventas_dia.json); si los productos coinciden exactamente,
+# el pedido se cierra solo como cobrado en caja y al vendedor le sale el aviso.
+function Conciliar-PedidoConVentasPrevias($p) {
+    if (-not $global:configAxis.activo) { return $false }
+    if (-not [bool]$global:configAxis.cerrarPedidosAuto) { return $false }
+    if ([string]$p.estado -ne "pendiente") { return $false }
+    $h = Hora-Pedido $p
+    if ($null -eq $h) { return $false }
+    $pedItems = Juntar-CantidadesPorSku $p.items 'sku' 'cantidad'
+    if ($null -eq $pedItems) { return $false }
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $limite = $h.AddSeconds(-(Margen-VentaAntesSeg))
+    $mejor = $null
+    $mejorDif = [double]::MaxValue
+    foreach ($s in $global:ventasAxisDia) {
+        if ($s.devolucion) { continue }
+        if ($s.pedidoId) { continue }
+        $hs = $null
+        try { $hs = [datetime]::ParseExact([string]$s.fecha, "yyyy-MM-dd HH:mm:ss", $inv) } catch { continue }
+        if ($hs -lt $limite) { continue }
+        $vd = Juntar-CantidadesPorSku $s.items 'sku' 'qty'
+        if (-not (Items-IgualesAVenta $pedItems $vd)) { continue }
+        $dif = [math]::Abs(($h - $hs).TotalSeconds)
+        if ($dif -lt $mejorDif) { $mejor = $s; $mejorDif = $dif }
+    }
+    if ($null -eq $mejor) { return $false }
+    $metodo = if ($p.metodoPago) { [string]$p.metodoPago } else { "Efectivo" }
+    $baseTotal = [double]$p.totalProductos
+    $totalAuto = if ($metodo -eq "Transferencia") { [math]::Round($baseTotal * 2, 2) } else { $baseTotal }
+    $p.estado = "cobrado"
+    Poner-Prop $p "totalCobrado" $totalAuto
+    Poner-Prop $p "cobradoPor" "caja"
+    Poner-Prop $p "revisado" $true
+    Poner-Prop $p "horaCobro" ((Get-Date).ToString("yyyy-MM-dd HH:mm:ss"))
+    Poner-Prop $p "ventaAxis" ([string]$mejor.acct)
+    Poner-Prop $p "ventaAxisTotal" ([math]::Round([double]$mejor.total, 2))
+    Poner-Prop $p "cuadreAxis" "ok"
+    Poner-Prop $p "cuadreDetalle" ""
+    $mejor.pedidoId = $p.id
+    Guardar-Pedidos
+    Guardar-VentasAxisDia
+    try { Agregar-AlertaVendedor ([string]$p.vendedor) ("Tu pedido #" + $p.id + " ya se cobro en caja.") $p.id "pedido" } catch {}
+    Write-Host ("[" + (Get-Date).ToString('HH:mm:ss') + "] AxisPOS: el pedido #" + $p.id + " llego despues y ya estaba cobrado (venta " + [string]$mejor.acct + ")")
+    try { Revisar-CatalogoAxis -Forzar } catch {}
+    try { Recalcular-Reservas } catch {}
+    return $true
 }
 
 # ---- Conciliar una venta de AxisPOS con los pedidos ----
@@ -1995,7 +2294,7 @@ function Conciliar-VentaAxis($grupo) {
         if (-not (Items-IgualesAVenta $pedidoItems $venta)) { continue }
         if ($horaVenta) {
             $horaPedido = Hora-Pedido $p
-            if ($horaPedido -and ($horaVenta -lt $horaPedido.AddSeconds(-60))) { continue }
+            if ($horaPedido -and ($horaVenta -lt $horaPedido.AddSeconds(-(Margen-VentaAntesSeg)))) { continue }
         }
         $metodo = if ($p.metodoPago) { [string]$p.metodoPago } else { "Efectivo" }
         $baseTotal = [double]$p.totalProductos
@@ -2025,7 +2324,7 @@ function Conciliar-VentaAxis($grupo) {
             if (-not (Items-IgualesAVenta $pedidoItems $venta)) { continue }
             if ($horaVenta) {
                 $horaPedido = Hora-Pedido $p
-                if ($horaPedido -and ($horaVenta -lt $horaPedido.AddSeconds(-60))) { continue }
+                if ($horaPedido -and ($horaVenta -lt $horaPedido.AddSeconds(-(Margen-VentaAntesSeg)))) { continue }
             }
             Poner-Prop $p "ventaAxis" $acct
             Poner-Prop $p "ventaAxisTotal" ([math]::Round($total, 2))
@@ -2034,6 +2333,31 @@ function Conciliar-VentaAxis($grupo) {
             $rec.pedidoId = $p.id
             Guardar-Pedidos
             Write-Host ("[" + (Get-Date).ToString('HH:mm:ss') + "] AxisPOS: la venta " + $acct + " confirma el pedido cobrado #" + $p.id + " (" + [string]$p.vendedor + ")")
+            $hecho = $true
+            break
+        }
+    }
+
+    # 3) Pedido que la PC le mando al vendedor y el todavia no lo ha tomado: si la caja ya lo cobro,
+    #    se retira solo y al movil le sale "ya se cobro en caja" (en vez de dejarle un pedido que ya no vale).
+    if (-not $hecho) {
+        foreach ($asigC in @($global:pedidosAsignados)) {
+            if ($asigC.retirado -or $asigC.tomadoPor) { continue }
+            try { if ($asigC.vence -and ([datetime]$asigC.vence -lt (Get-Date))) { continue } } catch {}
+            $itemsAsigC = Juntar-CantidadesPorSku $asigC.items 'sku' 'cantidad'
+            if (-not (Items-IgualesAVenta $itemsAsigC $venta)) { continue }
+            if ($horaVenta) {
+                $horaAsigC = $null
+                try { $horaAsigC = [datetime]::ParseExact([string]$asigC.hora, "yyyy-MM-dd HH:mm:ss", $inv) } catch { $horaAsigC = $null }
+                if ($horaAsigC -and ($horaVenta -lt $horaAsigC.AddSeconds(-(Margen-VentaAntesSeg)))) { continue }
+            }
+            $asigC.retirado = $true
+            $asigC.horaRetirado = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+            Poner-Prop $asigC "cobradoAxis" $acct
+            $rec.pedidoId = "A" + [string]$asigC.id
+            Guardar-Asignados
+            if ($asigC.vendedor) { try { Agregar-AlertaVendedor ([string]$asigC.vendedor) ("El pedido que te armo la caja ya se cobro (venta #" + $acct + ").") $null "pedido" } catch {} }
+            Write-Host ("[" + (Get-Date).ToString('HH:mm:ss') + "] AxisPOS: la venta " + $acct + " cobro el pedido asignado #" + $asigC.id + " antes de que el vendedor lo tomara")
             $hecho = $true
             break
         }
@@ -2072,7 +2396,7 @@ function Evaluar-CuadrePedido($p, $inicio) {
             if ($s.pedidoId -and ([string]$s.pedidoId -ne [string]$p.id)) { continue }
             $hs = $null
             try { $hs = [datetime]::ParseExact([string]$s.fecha, "yyyy-MM-dd HH:mm:ss", $inv) } catch { continue }
-            if ($hs -lt $h.AddSeconds(-60)) { continue }
+            if ($hs -lt $h.AddSeconds(-(Margen-VentaAntesSeg))) { continue }
             $vd = Juntar-CantidadesPorSku $s.items 'sku' 'qty'
             if (Items-IgualesAVenta $pedItems $vd) { $r.estado = "ok"; $r.acct = [string]$s.acct; $r.total = [double]$s.total; return $r }
         }
@@ -2084,7 +2408,7 @@ function Evaluar-CuadrePedido($p, $inicio) {
             if ($s.pedidoId) { continue }
             $hs = $null
             try { $hs = [datetime]::ParseExact([string]$s.fecha, "yyyy-MM-dd HH:mm:ss", $inv) } catch { continue }
-            if ($hs -lt $h.AddSeconds(-60)) { continue }
+            if ($hs -lt $h.AddSeconds(-(Margen-VentaAntesSeg))) { continue }
             if ($hs -gt $h.AddHours(8)) { continue }
             $vd = Juntar-CantidadesPorSku $s.items 'sku' 'qty'
             if ($null -eq $vd) { continue }
@@ -2116,10 +2440,20 @@ function Actualizar-CuadreAxis {
     $inicio = Inicio-Seguimiento
     if ($null -eq $inicio) { return }
     $cambio = $false
+    $vincul = $false
     foreach ($p in @($global:pedidos)) {
         if ([string]$p.estado -ne "cobrado") { continue }
         $e = Evaluar-CuadrePedido $p $inicio
         if ($e.estado -eq "sin_datos") { continue }
+        # Si la venta de AxisPOS si existe (aunque se paso antes de que llegara el pedido), se vincula y deja de aparecer como "sin pedido".
+        if (($e.estado -eq "ok") -and $e.acct -and (-not $p.ventaAxis)) {
+            Poner-Prop $p "ventaAxis" ([string]$e.acct)
+            Poner-Prop $p "ventaAxisTotal" ([math]::Round([double]$e.total, 2))
+            foreach ($sv in $global:ventasAxisDia) {
+                if (([string]$sv.acct -eq [string]$e.acct) -and (-not $sv.pedidoId)) { $sv.pedidoId = $p.id; $vincul = $true; break }
+            }
+            $cambio = $true
+        }
         if (([string]$p.cuadreAxis -ne [string]$e.estado) -or ([string]$p.cuadreDetalle -ne [string]$e.detalle)) {
             Poner-Prop $p "cuadreAxis" ([string]$e.estado)
             Poner-Prop $p "cuadreDetalle" ([string]$e.detalle)
@@ -2127,6 +2461,7 @@ function Actualizar-CuadreAxis {
         }
     }
     if ($cambio) { Guardar-Pedidos }
+    if ($vincul) { Guardar-VentasAxisDia }
 }
 
 function Calcular-CuadreAxis([int]$dias) {
@@ -2281,7 +2616,7 @@ function Aplicar-OrigenDatos([switch]$Inicio) {
 # Se cambia desde el Panel de la PC y se recuerda al reiniciar.
 # ------------------------------------------------------------------
 $configAppPath = Join-Path $scriptDir "config_app.json"
-$global:configApp = [pscustomobject]@{ ocultarSinStock = $false; tasaDolar = 0.0; autoservicioDestino = "pc"; wifiSSID = ""; wifiClave = ""; umbralStockBajo = 3; permitirDescuentos = $false; origenDatos = "axispos" }
+$global:configApp = [pscustomobject]@{ ocultarSinStock = $false; tasaDolar = 0.0; autoservicioDestino = "pc"; wifiSSID = ""; wifiClave = ""; umbralStockBajo = 3; permitirDescuentos = $false; permitirBorradores = $false; reposPiso = 0; reposOrigen = ""; origenDatos = "axispos" }
 $global:ipLan = "localhost"
 
 function Cargar-ConfigApp {
@@ -2301,6 +2636,17 @@ function Cargar-ConfigApp {
                 }
                 if ($data.PSObject.Properties.Name -contains 'permitirDescuentos') {
                     $global:configApp.permitirDescuentos = [bool]$data.permitirDescuentos
+                }
+                if ($data.PSObject.Properties.Name -contains 'permitirBorradores') {
+                    $global:configApp.permitirBorradores = [bool]$data.permitirBorradores
+                }
+                if ($data.PSObject.Properties.Name -contains 'reposPiso') {
+                    $rpArch = 0
+                    if ([int]::TryParse([string]$data.reposPiso, [ref]$rpArch) -and $rpArch -ge 0) { $global:configApp.reposPiso = $rpArch }
+                }
+                if ($data.PSObject.Properties.Name -contains 'reposOrigen') {
+                    $roArch = [string]$data.reposOrigen
+                    if ($roArch -match '^[0-9,]{0,60}$') { $global:configApp.reposOrigen = $roArch }
                 }
                 if ($data.PSObject.Properties.Name -contains 'origenDatos' -and $data.origenDatos -eq 'catalogo') {
                     $global:configApp.origenDatos = "catalogo"
@@ -3988,6 +4334,7 @@ $htmlPC = @'
   #banner { display:none; background:#16a34a; color:#fff; padding:12px 16px; border-radius:8px; margin-bottom:16px; font-weight:bold; text-align:center; box-shadow:0 4px 12px rgba(22,163,74,0.35); }
   #grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(270px,1fr)); gap:16px; }
   .card { border-radius:12px; padding:16px; color:#0f172a; box-shadow:0 3px 10px rgba(0,0,0,0.25); }
+  .card.pedSel { outline:4px solid #facc15; outline-offset:3px; }
   .pendiente { background:#fde047; }
   .cobrado { background:#86efac; }
   .cancelado { background:#cbd5e1; opacity:0.75; }
@@ -4073,6 +4420,7 @@ $htmlPC = @'
     <div id="listaStockBajo" style="font-size:13px; color:#e2e8f0;"></div>
   </div>
   <div id="banner">Nuevo pedido recibido</div>
+  <div style="margin:0 0 10px;"><input type="text" id="filtroPedidos" class="np-input" placeholder="Filtrar pedidos por folio, vendedor o producto (tecla /)" autocomplete="off"></div>
   <div id="grid"></div>
 
   <div id="reciboOverlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.65); align-items:center; justify-content:center; z-index:59;" onclick="if (event.target === this) cerrarRecibo()">
@@ -4150,11 +4498,17 @@ $htmlPC = @'
 
       <button class="btn-toggle" style="width:100%; margin-bottom:10px; text-align:left;" onclick="cerrarMenuPC(); abrirConfig();">Cargar / cambiar el Excel del catalogo</button>
 
+      <button class="btn-toggle" style="width:100%; margin-bottom:10px; text-align:left;" onclick="cerrarMenuPC(); abrirConsulta();">Consultar precio y stock (Alt+C)</button>
+
+      <button class="btn-toggle" style="width:100%; margin-bottom:10px; text-align:left;" onclick="cerrarMenuPC(); abrirRepos();">Que bajar del almacen (Alt+B)</button>
+
       <label style="font-size:14px; display:flex; align-items:center; gap:8px; margin-bottom:14px;" title="Se imprime como TOTAL USD en los recibos. Deja vacio o 0 para no imprimirlo.">Tasa USD: <input type="number" id="tasaDolar" min="0" step="any" placeholder="0" style="width:90px; padding:6px 8px; border-radius:6px; border:1px solid #334155; background:#0f172a; color:#e2e8f0;" onchange="guardarTasaDolar()"></label>
 
       <label style="font-size:14px; display:flex; align-items:center; gap:8px; margin-bottom:14px;" title="Cuando un producto queda con esta cantidad o menos, avisa en el Panel y se marca en el buscador de vendedores y clientes. Deja 0 para desactivar el aviso.">Alerta stock bajo (unid.): <input type="number" id="umbralStockBajo" min="0" step="1" placeholder="3" style="width:70px; padding:6px 8px; border-radius:6px; border:1px solid #334155; background:#0f172a; color:#e2e8f0;" onchange="guardarUmbralStockBajo()"></label>
 
       <button class="btn-toggle" id="btnPermitirDescuentos" style="width:100%; margin-bottom:10px;" onclick="alternarPermitirDescuentos()" title="Cuando esta activado, el vendedor puede editar el precio de cada linea de su pedido (descuento)">Descuentos por producto: ...</button>
+
+      <button class="btn-toggle" id="btnPermitirBorradores" style="width:100%; margin-bottom:10px;" onclick="alternarPermitirBorradores()" title="Cuando esta activado, el vendedor puede guardar el pedido que esta armando como borrador y retomarlo despues (se guarda en su telefono)">Borradores del vendedor: ...</button>
 
       <button class="btn-toggle" id="btnOrigenDatos" style="width:100%; margin-bottom:10px;" onclick="alternarOrigenDatos()" title="De donde salen los productos, precios y existencias: de la base de datos de AxisPOS (en tiempo real) o del catalogo (Excel)">Datos de productos y stock: ...</button>
 
@@ -4233,6 +4587,34 @@ $htmlPC = @'
       <input type="text" id="minBuscador" class="np-input" placeholder="Buscar producto (nombre o SKU)" oninput="buscarMinimo()">
       <div id="minResultados"></div>
       <button class="btn" style="background:#475569; margin-top:12px;" onclick="cerrarCompras()">Cerrar</button>
+    </div>
+  </div>
+
+  <div id="reposOverlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); align-items:flex-start; justify-content:center; z-index:60; padding-top:4vh;" onclick="if (event.target === this) cerrarRepos()">
+    <div style="background:#1e293b; padding:22px; border-radius:12px; max-width:780px; width:96%; max-height:92vh; overflow:auto;">
+      <h2 style="font-size:17px; margin-bottom:4px; color:#fff;">Que bajar del almacen</h2>
+      <p id="reposInfo" style="font-size:12px; color:#94a3b8; margin-bottom:10px;">Mira las ventas recientes del piso y dice cuanto conviene bajar de cada producto. Solo lee AxisPOS; no cambia nada.</p>
+      <div id="reposAlmacenes"></div>
+      <div style="display:flex; gap:14px; flex-wrap:wrap; margin:10px 0; font-size:13px; color:#cbd5e1;">
+        <label>Ventas de los ultimos <input type="number" id="reposDias" class="np-input" min="1" max="60" value="7" style="width:70px; display:inline-block;" onkeydown="if (event.key === 'Enter') calcularRepos(true)"> dias</label>
+        <label>Cubrir <input type="number" id="reposCob" class="np-input" min="1" max="60" value="7" style="width:70px; display:inline-block;" onkeydown="if (event.key === 'Enter') calcularRepos(true)"> dias de venta</label>
+      </div>
+      <div style="display:flex; gap:8px; flex-wrap:wrap;">
+        <button class="btn" id="reposBtnCalc" style="flex:1; width:auto;" onclick="calcularRepos(true)">Calcular</button>
+        <button class="btn" style="flex:1; width:auto; background:#0369a1;" onclick="copiarRepos()">Copiar lista</button>
+        <button class="btn" style="flex:1; width:auto; background:#475569;" onclick="cerrarRepos()">Cerrar</button>
+      </div>
+      <div id="reposResultado" style="margin-top:12px;"></div>
+    </div>
+  </div>
+
+  <div id="consultaOverlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); align-items:flex-start; justify-content:center; z-index:60; padding-top:6vh;" onclick="if (event.target === this) cerrarConsulta()">
+    <div style="background:#1e293b; padding:22px; border-radius:12px; max-width:560px; width:94%; max-height:86vh; overflow:auto;">
+      <h2 style="font-size:17px; margin-bottom:4px; color:#fff;">Consultar precio y stock</h2>
+      <p id="consultaInfo" style="font-size:12px; color:#94a3b8; margin-bottom:10px;">Escribe el nombre o el SKU. No arma ningun pedido.</p>
+      <input type="text" id="consultaBuscador" class="np-input" placeholder="Nombre o SKU del producto" autocomplete="off">
+      <div id="consultaResultados"></div>
+      <button class="btn" style="background:#475569; margin-top:12px;" onclick="cerrarConsulta()">Cerrar</button>
     </div>
   </div>
 
@@ -5320,6 +5702,7 @@ $htmlPC = @'
         } else {
           ponerHtmlSiCambio(grid, visibles.map(renderCard).join(''));
         }
+        try { aplicarVistaPedidos(); } catch (e2) {}
 
         const maxId = pedidos.reduce((m,p) => Math.max(m, p.id), 0);
         if (nuevoRevisar) {
@@ -5369,6 +5752,22 @@ $htmlPC = @'
       } catch (e) { alert('No se pudo guardar el ajuste.'); }
     }
 
+    let permitirBorradores = false;
+    function pintarBotonBorradores() {
+      const b = document.getElementById('btnPermitirBorradores');
+      if (!b) return;
+      b.classList.toggle('activo', permitirBorradores);
+      b.textContent = 'Borradores del vendedor: ' + (permitirBorradores ? 'ACTIVADOS' : 'DESACTIVADOS');
+    }
+    async function alternarPermitirBorradores() {
+      try {
+        const res = await fetch('/api/config', { method:'POST', body: JSON.stringify({ permitirBorradores: !permitirBorradores }) });
+        const cfg = await res.json();
+        permitirBorradores = !!cfg.permitirBorradores;
+        pintarBotonBorradores();
+      } catch (e) { alert('No se pudo guardar el ajuste.'); }
+    }
+
     let origenDatos = 'axispos';
     let axisConfigurado = false;
     function pintarBotonOrigen() {
@@ -5398,6 +5797,8 @@ $htmlPC = @'
         const cfg = await res.json();
         permitirDescuentos = !!cfg.permitirDescuentos;
         pintarBotonDescuentos();
+        permitirBorradores = !!cfg.permitirBorradores;
+        pintarBotonBorradores();
         origenDatos = cfg.origenDatos === 'catalogo' ? 'catalogo' : 'axispos';
         axisConfigurado = !!cfg.axisConfigurado;
         pintarBotonOrigen();
@@ -5783,10 +6184,220 @@ $htmlPC = @'
 
     document.getElementById('soloPendientes').addEventListener('change', cargarPedidos);
 
+    // ---- Que bajar del almacen (Alt+B): sugerencia segun las ventas recientes del piso ----
+    let reposAlmacenes = [];
+    let reposTexto = '';
+    function reposLeerGuardado() {
+      try { return JSON.parse(localStorage.getItem('reposCfgV1') || '{}') || {}; } catch (e) { return {}; }
+    }
+    function cerrarRepos() { document.getElementById('reposOverlay').style.display = 'none'; }
+    function reposCambioPiso() {
+      const r = document.querySelector('input[name="reposPiso"]:checked');
+      const pid = r ? r.value : '';
+      document.querySelectorAll('.reposOrig').forEach(function (c) {
+        if (c.value === pid) { c.checked = false; c.disabled = true; } else { c.disabled = false; }
+      });
+    }
+    function pintarAlmacenesRepos(piso, orig) {
+      const cont = document.getElementById('reposAlmacenes');
+      if (reposAlmacenes.length < 2) {
+        cont.innerHTML = '<div class="np-vacio" style="color:#fbbf24;">En AxisPOS solo aparece ' +
+          (reposAlmacenes.length ? 'un almacen (ID ' + reposAlmacenes[0].id + ')' : 'ningun almacen con productos') +
+          '. Para sugerir que bajar hace falta otro almacen de donde bajar.</div>';
+        return;
+      }
+      let h = '<div style="font-size:13px; color:#cbd5e1; margin-bottom:6px;">Marca cual es el <b>piso de venta</b> y de cuales almacenes se <b>baja</b> la mercancia:</div>' +
+        '<table style="width:100%; border-collapse:collapse; font-size:13px;"><tr style="color:#94a3b8; text-align:left;"><th>Almacen</th><th>Con stock</th><th>Unidades</th><th>Piso</th><th>Bajar de</th></tr>';
+      reposAlmacenes.forEach(function (a) {
+        h += '<tr style="border-top:1px solid #334155;"><td style="padding:6px 4px;">ID ' + a.id + (a.nombre ? ' &middot; ' + escaparHtml(a.nombre) : '') + '</td>' +
+          '<td>' + a.productos + '</td><td>' + Math.round(a.unidades) + '</td>' +
+          '<td><input type="radio" name="reposPiso" value="' + a.id + '"' + (a.id === piso ? ' checked' : '') + ' onchange="reposCambioPiso()"></td>' +
+          '<td><input type="checkbox" class="reposOrig" value="' + a.id + '"' + ((orig.indexOf(a.id) >= 0 && a.id !== piso) ? ' checked' : '') + '></td></tr>';
+      });
+      cont.innerHTML = h + '</table>';
+      reposCambioPiso();
+    }
+    async function abrirRepos() {
+      document.getElementById('reposOverlay').style.display = 'flex';
+      document.getElementById('reposResultado').innerHTML = '';
+      const cont = document.getElementById('reposAlmacenes');
+      cont.innerHTML = '<div class="np-vacio">Buscando los almacenes en AxisPOS...</div>';
+      try {
+        const res = await fetch('/api/reposicion/almacenes');
+        const d = await res.json();
+        if (!d.ok) throw new Error(d.error || 'Error');
+        reposAlmacenes = d.almacenes || [];
+        const g = reposLeerGuardado();
+        document.getElementById('reposDias').value = g.dias || 7;
+        document.getElementById('reposCob').value = g.cob || 7;
+        const piso = d.pisoGuardado > 0 ? d.pisoGuardado : (d.pisoDefecto || (reposAlmacenes[0] ? reposAlmacenes[0].id : 0));
+        const orig = String(d.origenGuardado || '').split(',').map(function (x) { return parseInt(x, 10); }).filter(function (x) { return x > 0; });
+        pintarAlmacenesRepos(piso, orig);
+      } catch (e) {
+        cont.innerHTML = '<div class="np-vacio" style="color:#f87171;">No se pudo leer AxisPOS: ' + escaparHtml(e.message || e) + '</div>';
+      }
+    }
+    function pintarResultadoRepos(d) {
+      const out = document.getElementById('reposResultado');
+      const items = d.items || [];
+      reposTexto = 'Bajar del almacen (ventas de ' + d.dias + ' dias, cubrir ' + d.cobertura + ' dias) - ' + d.generado + '\n' +
+        items.map(function (x) { return x.bajar + ' x ' + x.nombre + (x.sku ? ' [' + x.sku + ']' : ''); }).join('\n');
+      if (!items.length) {
+        out.innerHTML = '<div class="np-vacio">No hace falta bajar nada: el piso alcanza para ' + d.cobertura + ' dias segun las ventas de los ultimos ' + d.dias + ' dias.</div>';
+        return;
+      }
+      out.innerHTML = '<div style="font-size:12px; color:#94a3b8; margin-bottom:6px;">' + items.length + ' productos &middot; calculado ' + escaparHtml(d.generado) + '</div>' +
+        '<div style="overflow-x:auto;"><table style="width:100%; border-collapse:collapse; font-size:13px;">' +
+        '<tr style="color:#94a3b8; text-align:left;"><th>Producto</th><th>Piso</th><th>Almacen</th><th>Vendido</th><th>Alcanza</th><th>Bajar</th></tr>' +
+        items.map(function (x) {
+          return '<tr style="border-top:1px solid #334155;"><td style="padding:6px 4px;">' + escaparHtml(x.nombre) + '</td><td>' + x.piso + '</td><td>' + x.origen + '</td><td>' + x.vendido + '</td><td>' + x.diasPiso + ' d</td><td style="color:#86efac; font-weight:700;">' + x.bajar + '</td></tr>';
+        }).join('') + '</table></div>';
+    }
+    async function calcularRepos(forzar) {
+      const r = document.querySelector('input[name="reposPiso"]:checked');
+      const piso = r ? parseInt(r.value, 10) : 0;
+      const origen = Array.prototype.slice.call(document.querySelectorAll('.reposOrig:checked')).map(function (c) { return parseInt(c.value, 10); });
+      const dias = Math.min(60, Math.max(1, parseInt(document.getElementById('reposDias').value, 10) || 7));
+      const cob = Math.min(60, Math.max(1, parseInt(document.getElementById('reposCob').value, 10) || 7));
+      const out = document.getElementById('reposResultado');
+      if (!piso) { out.innerHTML = '<div class="np-vacio" style="color:#fbbf24;">Marca cual almacen es el piso de venta.</div>'; return; }
+      if (!origen.length) { out.innerHTML = '<div class="np-vacio" style="color:#fbbf24;">Marca al menos un almacen de donde se baja la mercancia.</div>'; return; }
+      try { localStorage.setItem('reposCfgV1', JSON.stringify({ dias: dias, cob: cob })); } catch (e) {}
+      const btn = document.getElementById('reposBtnCalc');
+      btn.disabled = true;
+      out.innerHTML = '<div class="np-vacio">Consultando AxisPOS... puede tardar unos segundos.</div>';
+      try {
+        // La eleccion se guarda en el servidor para que el Gestor del almacen use la misma.
+        await fetch('/api/config', { method: 'POST', body: JSON.stringify({ reposPiso: piso, reposOrigen: origen.join(',') }) });
+        const res = await fetch('/api/reposicion?piso=' + piso + '&origen=' + origen.join(',') + '&dias=' + dias + '&cob=' + cob + (forzar ? '&fresco=1' : ''));
+        const d = await res.json();
+        if (!d.ok) throw new Error(d.error || 'Error');
+        pintarResultadoRepos(d);
+      } catch (e) {
+        out.innerHTML = '<div class="np-vacio" style="color:#f87171;">' + escaparHtml(e.message || e) + '</div>';
+      } finally { btn.disabled = false; }
+    }
+    function reposCopiarAlterno() {
+      const t = document.createElement('textarea');
+      t.value = reposTexto; t.style.position = 'fixed'; t.style.opacity = '0';
+      document.body.appendChild(t); t.select();
+      try { document.execCommand('copy'); } catch (e) {}
+      document.body.removeChild(t);
+    }
+    function copiarRepos() {
+      if (!reposTexto) return;
+      const fin = function () { mostrarBanner('Lista copiada.', 2000); };
+      if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(reposTexto).then(fin, function () { reposCopiarAlterno(); fin(); });
+        return;
+      }
+      reposCopiarAlterno(); fin();
+    }
+
+    // ---- Consulta rapida de precio y stock (Alt+C): no arma ningun pedido ----
+    let consultaLista = [];
+    let consultaHora = 0;
+    async function cargarConsulta() {
+      const info = document.getElementById('consultaInfo');
+      try {
+        const res = await fetch('/api/almacen/stockvivo');
+        const d = await res.json();
+        consultaLista = (d && Array.isArray(d.items)) ? d.items : [];
+        consultaHora = Date.now();
+        info.textContent = 'Escribe el nombre o el SKU. No arma ningun pedido. Actualizado ' + new Date().toLocaleTimeString() + '.';
+        buscarConsulta();
+      } catch (e) {
+        info.textContent = 'No se pudo leer el stock del servidor. Cierra y vuelve a abrir con Alt+C.';
+      }
+    }
+    async function abrirConsulta() {
+      document.getElementById('consultaOverlay').style.display = 'flex';
+      const b = document.getElementById('consultaBuscador');
+      b.value = '';
+      document.getElementById('consultaResultados').innerHTML = '';
+      setTimeout(function () { b.focus(); }, 50);
+      if (Date.now() - consultaHora > 10000) await cargarConsulta();
+    }
+    function cerrarConsulta() { document.getElementById('consultaOverlay').style.display = 'none'; }
+    function buscarConsulta() {
+      const q = normalizar(document.getElementById('consultaBuscador').value).trim();
+      const cont = document.getElementById('consultaResultados');
+      if (q.length < 2) { cont.innerHTML = ''; return; }
+      const palabras = q.split(' ').filter(Boolean);
+      const hallados = consultaLista.filter(function (x) {
+        const texto = normalizar((x[1] || '') + ' ' + (x[0] || ''));
+        return palabras.every(function (w) { return texto.indexOf(w) >= 0; });
+      }).slice(0, 8);
+      cont.innerHTML = hallados.map(function (x) {
+        const st = (x[2] === null || x[2] === undefined) ? null : Number(x[2]);
+        const color = st === null ? '#94a3b8' : (st <= 0 ? '#f87171' : '#86efac');
+        return '<div class="np-resultado"><span style="flex:1; min-width:0;">' + escaparHtml(x[1]) + '<br><small style="color:#94a3b8;">' + escaparHtml(x[0] || 'sin SKU') + '</small></span>' +
+          '<span style="text-align:right;"><b>$' + Number(x[3] || 0).toFixed(2) + '</b><br><small style="color:' + color + ';">' + (st === null ? 'sin dato' : ('Stock: ' + st)) + '</small></span></div>';
+      }).join('') || '<div class="np-vacio">Sin resultados.</div>';
+    }
+
+    // ---- Lista de pedidos con teclado: flechas eligen, Ctrl+Enter cobra, Alt+I imprime, / filtra ----
+    let pedSelId = null;
+    function enCampoTexto() {
+      var a = document.activeElement;
+      if (!a) return false;
+      if (a.tagName === 'TEXTAREA' || a.tagName === 'SELECT' || a.isContentEditable) return true;
+      return a.tagName === 'INPUT' && !/^(checkbox|radio|button|submit)$/.test(a.type);
+    }
+    function todasCardsPed() { return Array.prototype.slice.call(document.querySelectorAll('#grid .card')); }
+    function cardsPedVisibles() { return todasCardsPed().filter(function (c) { return c.style.display !== 'none'; }); }
+    function idDeCard(c) {
+      var h = c.querySelector('.hora');
+      var m = h ? /Folio #(\d+)/.exec(h.textContent) : null;
+      return m ? parseInt(m[1], 10) : null;
+    }
+    function aplicarVistaPedidos() {
+      var fi = document.getElementById('filtroPedidos');
+      var palabras = normalizar(fi ? fi.value : '').split(' ').filter(Boolean);
+      var hallada = false;
+      todasCardsPed().forEach(function (c) {
+        var texto = normalizar(c.textContent);
+        var ok = palabras.every(function (w) { return texto.indexOf(w) >= 0; });
+        c.style.display = ok ? '' : 'none';
+        var sel = ok && pedSelId !== null && idDeCard(c) === pedSelId;
+        c.classList.toggle('pedSel', sel);
+        if (sel) hallada = true;
+      });
+      if (!hallada) pedSelId = null;
+    }
+    function moverPedidoSel(delta) {
+      var cs = cardsPedVisibles();
+      if (!cs.length) return false;
+      var i = -1;
+      cs.forEach(function (c, k) { if (idDeCard(c) === pedSelId) i = k; });
+      var n = i < 0 ? (delta > 0 ? 0 : cs.length - 1) : Math.min(cs.length - 1, Math.max(0, i + delta));
+      pedSelId = idDeCard(cs[n]);
+      aplicarVistaPedidos();
+      cs[n].scrollIntoView({ block: 'nearest' });
+      return true;
+    }
+    function cardSel() { return cardsPedVisibles().filter(function (c) { return c.classList.contains('pedSel'); })[0] || null; }
+    function cobrarSeleccionado() {
+      var c = cardSel();
+      if (!c) return false;
+      var b = c.querySelector('button[onclick^="cobrar("]');
+      if (!b) { mostrarBanner('Ese pedido no tiene cobro pendiente en caja.', 2500); return true; }
+      if (!confirm('Pedido #' + idDeCard(c) + '\n' + b.textContent.trim() + '?')) return true;
+      b.click();
+      return true;
+    }
+    function imprimirSeleccionado() {
+      var c = cardSel();
+      if (!c) return false;
+      var b = c.querySelector('button.btn-imprimir');
+      if (b) b.click(); else mostrarBanner('Ese pedido no se puede imprimir.', 2500);
+      return true;
+    }
+
     // ---- Atajos de teclado del Panel de la PC ----
     // Sin botones ni ventanas nuevas: las teclas estan en las etiquetas de los botones que ya existian
     // y F1 muestra la lista completa en el banner verde de arriba.
-    const ATAJOS_PC_AYUDA = 'ATAJOS: F2 Nuevo pedido | F3 Buscar producto | F4 Etiquetas | F6 Compras | F7 Devolucion | F8 Metricas | F9 Solo pendientes | F10 Ajustes | Alt+S Stock bajo | Alt+E Excel | Alt+P Permisos | Alt+V PIN vendedores | Alt+R Red | Alt+Q QR vendedor | Ctrl+Enter Enviar pedido | Esc Cerrar';
+    const ATAJOS_PC_AYUDA = 'ATAJOS: F2 Nuevo pedido | F3 Buscar producto | F4 Etiquetas | F6 Compras | F7 Devolucion | F8 Metricas | F9 Solo pendientes | F10 Ajustes | Alt+S Stock bajo | Alt+E Excel | Alt+P Permisos | Alt+V PIN vendedores | Alt+R Red | Alt+Q QR vendedor | Flechas Elegir pedido | Ctrl+Enter Cobrar el elegido (o Enviar pedido / Guardar devolucion) | Alt+I Imprimir el elegido | Alt+C Consultar precio y stock | Alt+B Que bajar del almacen | / Filtrar pedidos | Esc Cerrar';
     const PC_OVERLAYS = [
       ['fotoOverlayNP', function () { cerrarFotoProductoNP(); }],
       ['qrOverlay', function () { cerrarQRCliente(); }],
@@ -5797,7 +6408,9 @@ $htmlPC = @'
       ['devOverlay', function () { cerrarDevolucion(); }],
       ['permOverlay', function () { cerrarPermisos(); }],
       ['redOverlay', function () { var e = document.getElementById('redOverlay'); if (e) e.style.display = 'none'; }],
-      ['configOverlay', function () { cerrarConfig(); }]
+      ['configOverlay', function () { cerrarConfig(); }],
+      ['consultaOverlay', function () { cerrarConsulta(); }],
+      ['reposOverlay', function () { cerrarRepos(); }]
     ];
     function pcVisible(id) { var e = document.getElementById(id); return !!e && e.style.display !== 'none' && getComputedStyle(e).display !== 'none'; }
     function pcOverlayArriba() {
@@ -5820,11 +6433,20 @@ $htmlPC = @'
         var top = pcOverlayArriba();
         if (top) top[1]();
         else if (pcVisible('panelStockBajo')) togglePanelStockBajo();
+        else if (document.activeElement && document.activeElement.id === 'filtroPedidos') {
+          var fpe = document.activeElement;
+          if (fpe.value) { fpe.value = ''; aplicarVistaPedidos(); } else fpe.blur();
+        }
+        else if (pedSelId !== null) { pedSelId = null; aplicarVistaPedidos(); }
         else hecho = false;
       } else if (k === 'F1') {
         mostrarBanner(ATAJOS_PC_AYUDA, 14000);
       } else if (e.ctrlKey && k === 'Enter') {
-        if (npAbierto) { var bEnv = document.getElementById('npBtnEnviar'); if (bEnv) bEnv.click(); } else hecho = false;
+        var topEnter = pcOverlayArriba();
+        if (npAbierto) { var bEnv = document.getElementById('npBtnEnviar'); if (bEnv) bEnv.click(); }
+        else if (topEnter && topEnter[0] === 'devOverlay') { pcAtajo(devGuardar); }
+        else if (!topEnter && cardSel()) { cobrarSeleccionado(); }
+        else hecho = false;
       } else if (k === 'F2') {
         if (npAbierto) { var bq = document.getElementById('npBuscador'); if (bq) bq.focus(); }
         else if (!pcOverlayArriba()) abrirNuevoPedido();
@@ -5836,6 +6458,11 @@ $htmlPC = @'
       } else if (npAbierto) {
         // con un pedido a medio armar no se abre nada mas (para no perderlo): solo Esc, F2, F3, Ctrl+Enter
         hecho = false;
+      } else if ((k === 'ArrowDown' || k === 'ArrowUp') && !e.ctrlKey && !e.altKey && !e.shiftKey && !e.metaKey && !pcOverlayArriba() && !enCampoTexto()) {
+        hecho = moverPedidoSel(k === 'ArrowDown' ? 1 : -1);
+      } else if (k === '/' && !e.ctrlKey && !e.altKey && !e.metaKey && !pcOverlayArriba() && !enCampoTexto()) {
+        var fpi = document.getElementById('filtroPedidos');
+        if (fpi) { fpi.focus(); fpi.select(); } else hecho = false;
       } else if (k === 'F4') {
         window.open('/etiquetas', '_blank');
       } else if (k === 'F6') {
@@ -5854,6 +6481,12 @@ $htmlPC = @'
         togglePanelStockBajo();
       } else if (e.altKey && !e.ctrlKey && !e.metaKey && kl === 'e') {
         cerrarMenuPC(); abrirConfig();
+      } else if (e.altKey && !e.ctrlKey && !e.metaKey && kl === 'i') {
+        if (!pcOverlayArriba() && cardSel()) imprimirSeleccionado(); else hecho = false;
+      } else if (e.altKey && !e.ctrlKey && !e.metaKey && kl === 'b') {
+        if (pcVisible('reposOverlay')) cerrarRepos(); else if (!pcOverlayArriba()) pcAtajo(abrirRepos); else hecho = false;
+      } else if (e.altKey && !e.ctrlKey && !e.metaKey && kl === 'c') {
+        if (pcVisible('consultaOverlay')) cerrarConsulta(); else if (!pcOverlayArriba()) pcAtajo(abrirConsulta); else hecho = false;
       } else if (e.altKey && !e.ctrlKey && !e.metaKey && kl === 'p') {
         pcAtajo(abrirPermisos);
       } else if (e.altKey && !e.ctrlKey && !e.metaKey && kl === 'v') {
@@ -5876,6 +6509,52 @@ $htmlPC = @'
         var primero = document.querySelector('#npResultados .np-resultado button');
         if (primero) { e.preventDefault(); primero.click(); b.select(); }
       });
+    })();
+    // Enter en formularios: pasa al campo siguiente o hace la accion principal (igual que tocar el boton).
+    // Nunca envia pedidos ni cobra ni cancela solo con Enter; eso sigue siendo Ctrl+Enter o el boton.
+    (function () {
+      function alEnter(id, accion) {
+        var el = document.getElementById(id);
+        if (!el) return;
+        el.addEventListener('keydown', function (e) {
+          if (e.key !== 'Enter' || e.ctrlKey || e.shiftKey || e.altKey || e.isComposing) return;
+          e.preventDefault();
+          try { accion(); } catch (err) {}
+        });
+      }
+      function irA(id) {
+        return function () { var n = document.getElementById(id); if (n) { n.focus(); if (n.select) n.select(); } };
+      }
+      alEnter('pinVendedorNombre', irA('pinVendedorValor'));
+      alEnter('pinVendedorValor', function () { guardarPin(); });
+      alEnter('posClaveAdmin', function () { guardarClavePOS(); });
+      alEnter('devPedido', function () { devCargarPedido(); });
+      alEnter('devCliente', irA('devBuscar'));
+      alEnter('devBuscar', function () {
+        var b = document.getElementById('devBuscar');
+        if (devResultadosLista && devResultadosLista.length) { devAgregar(0); if (b) b.focus(); }
+      });
+      alEnter('devDif', irA('devEntregado'));
+      alEnter('devEntregado', irA('devMotivo'));
+    })();
+    (function () {
+      var fi = document.getElementById('filtroPedidos');
+      if (fi) {
+        fi.addEventListener('input', aplicarVistaPedidos);
+        fi.addEventListener('keydown', function (e) {
+          if (e.key !== 'Enter' || e.ctrlKey || e.isComposing) return;
+          e.preventDefault();
+          var cs = cardsPedVisibles();
+          if (cs.length) { pedSelId = idDeCard(cs[0]); fi.blur(); aplicarVistaPedidos(); cs[0].scrollIntoView({ block: 'nearest' }); }
+        });
+      }
+      var cb = document.getElementById('consultaBuscador');
+      if (cb) {
+        cb.addEventListener('input', buscarConsulta);
+        cb.addEventListener('keydown', function (e) {
+          if (e.key === 'Enter') { e.preventDefault(); cb.select(); }
+        });
+      }
     })();
     cargarPedidos();
     cargarEstadoCatalogo();
@@ -6924,6 +7603,10 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
       <div id="cambioTexto"></div>
     </div>
     <input type="text" id="notaPedido" maxlength="200" placeholder="Nota para la caja (opcional)" oninput="actualizarBotonEnviar()">
+    <div id="borradoresBox" style="display:none; gap:8px; margin:0 0 8px;">
+      <button class="btn" style="flex:1; width:auto; background:#475569;" onclick="guardarBorrador()">&#128190; Guardar borrador</button>
+      <button class="btn" id="btnVerBorradores" style="flex:1; width:auto; background:#0369a1;" onclick="verBorradores()">&#128194; Borradores (0)</button>
+    </div>
     <button class="btn" id="btnEnviarPedido" onclick="enviarPedido()">Enviar pedido</button>
   </div>
 
@@ -7165,6 +7848,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
     let ocultarSinStock = false;   // lo decide la PC (/api/config)
     let tasaDolarActual = 0;       // idem, tasa USD configurada en la PC (0 = no mostrar)
     let permitirDescuentosActual = false; // idem, lo activa la PC en Ajustes (por defecto no se pueden editar precios)
+    let permitirBorradoresActual = false; // idem, lo activa la PC en Ajustes (guardar el pedido a medias como borrador)
     let umbralStockBajoActual = 0; // idem, marca en el buscador cuando queda poco (0 = desactivado)
     let autoservicioDestino = 'pc';   // idem, decide adonde caen los pedidos de autoservicio (/api/config)
 
@@ -7669,6 +8353,8 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
             umbralStockBajoActual = parseInt(cfg.umbralStockBajo, 10) || 0;
             const descNuevo = !!cfg.permitirDescuentos;
             if (descNuevo !== permitirDescuentosActual) { permitirDescuentosActual = descNuevo; renderCarrito(); }
+            const borNuevo = !!cfg.permitirBorradores;
+            if (borNuevo !== permitirBorradoresActual) { permitirBorradoresActual = borNuevo; pintarBorradores(); }
             autoservicioDestino = cfg.autoservicioDestino === 'vendedor' ? 'vendedor' : 'pc';
           }
         } catch(e) {}
@@ -7695,6 +8381,8 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
           tasaDolarActual = guardado.tasaDolarActual || 0;
           umbralStockBajoActual = guardado.umbralStockBajoActual || 0;
           permitirDescuentosActual = !!guardado.permitirDescuentosActual;
+          permitirBorradoresActual = !!guardado.permitirBorradoresActual;
+          try { pintarBorradores(); } catch (e) {}
           aplicarColaAlStock();
           const f = new Date(guardado.t);
           info.textContent = autoservicioActivo
@@ -7712,7 +8400,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
     function guardarCatalogoLocal() {
       try {
         localStorage.setItem(CLAVE_CATALOGO_LOCAL, JSON.stringify({ t: Date.now(), catalogo: catalogo, ocultarSinStock: ocultarSinStock,
-          tasaDolarActual: tasaDolarActual, umbralStockBajoActual: umbralStockBajoActual, permitirDescuentosActual: permitirDescuentosActual }));
+          tasaDolarActual: tasaDolarActual, umbralStockBajoActual: umbralStockBajoActual, permitirDescuentosActual: permitirDescuentosActual, permitirBorradoresActual: permitirBorradoresActual }));
       } catch (e) {}
     }
     function leerCatalogoLocal() {
@@ -8658,6 +9346,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
       }
       calcularCambio();
       try { actualizarBotonEnviar(); } catch (e) {}
+      try { pintarBorradores(); } catch (e) {}
     }
     // Autoservicio: si el cliente pierde la conexion (o cierra la pagina) mientras arma el
     // pedido, lo que ya agrego se queda en su telefono y se recupera al volver.
@@ -8805,6 +9494,123 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
 
     let enviandoPedido = false;   // evita que un doble toque en "Enviar pedido" duplique el pedido
 
+    // ---- Borradores: guardar el pedido a medias y retomarlo despues (lo activa la PC en Ajustes) ----
+    let borradorAbiertoId = null;
+    function claveBorradores() { return 'borradoresVendedorV1:' + String(nombreInput.value || '').trim().toLowerCase(); }
+    function leerBorradores() {
+      try { const l = JSON.parse(localStorage.getItem(claveBorradores()) || '[]'); return Array.isArray(l) ? l : []; } catch (e) { return []; }
+    }
+    function escribirBorradores(l) {
+      try { localStorage.setItem(claveBorradores(), JSON.stringify(l.slice(0, 20))); return true; }
+      catch (e) { alert('No se pudo guardar el borrador en este telefono.'); return false; }
+    }
+    function pintarBorradores() {
+      const box = document.getElementById('borradoresBox');
+      if (!box) return;
+      const visible = permitirBorradoresActual && !autoservicioActivo;
+      box.style.display = visible ? 'flex' : 'none';
+      const b = document.getElementById('btnVerBorradores');
+      if (b) b.textContent = '\uD83D\uDCC2 Borradores (' + (visible ? leerBorradores().length : 0) + ')';
+    }
+    function guardarBorrador() {
+      if (carrito.length === 0) { alert('No hay productos en el pedido para guardar.'); return; }
+      if (origenesAsignadosCarrito && origenesAsignadosCarrito.length) {
+        alert('Este pedido incluye uno tomado "para todos". Envialo o cancelalo primero: ese no se puede guardar como borrador.');
+        return;
+      }
+      const lista = leerBorradores();
+      const previo = borradorAbiertoId === null ? null : lista.find(function (x) { return x.id === borradorAbiertoId; });
+      const r = prompt('Nombre del borrador (por ejemplo, el cliente). Se guarda solo en este telefono:', previo ? previo.etiqueta : '');
+      if (r === null) return;
+      const nota = document.getElementById('notaPedido');
+      const datos = { etiqueta: r.trim() || (previo ? previo.etiqueta : 'Borrador'), hora: new Date().toISOString(), items: JSON.parse(JSON.stringify(carrito)), nota: nota ? nota.value : '' };
+      if (previo) { Object.assign(previo, datos); } else {
+        let nid = Date.now();
+        while (lista.some(function (x) { return x.id === nid; })) nid++;   // id unico aunque se guarden dos en el mismo instante
+        lista.unshift(Object.assign({ id: nid }, datos));
+      }
+      if (!escribirBorradores(lista)) return;
+      borradorAbiertoId = null;
+      carrito = [];
+      if (nota) nota.value = '';
+      renderCarrito();
+      pintarBorradores();
+    }
+    function cerrarBorradores() { const ov = document.getElementById('borradoresOverlay'); if (ov) ov.style.display = 'none'; }
+    function verBorradores() {
+      const lista = leerBorradores();
+      let ov = document.getElementById('borradoresOverlay');
+      if (!ov) {
+        ov = document.createElement('div');
+        ov.id = 'borradoresOverlay';
+        ov.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:9000; align-items:center; justify-content:center; padding:12px;';
+        ov.addEventListener('click', function (e) { if (e.target === ov) cerrarBorradores(); });
+        document.body.appendChild(ov);
+      }
+      const filas = lista.map(function (b) {
+        const unidades = (b.items || []).reduce(function (s, i) { return s + (Number(i.cantidad) || 0); }, 0);
+        const total = (b.items || []).reduce(function (s, i) { return s + (Number(i.precio) || 0) * (Number(i.cantidad) || 0); }, 0);
+        let hora = '';
+        try { hora = new Date(b.hora).toLocaleString(); } catch (e) {}
+        return '<div style="background:#0f172a; border-radius:8px; padding:10px; margin-bottom:8px;">' +
+          '<div style="font-weight:700;">' + escaparHtml(b.etiqueta || 'Borrador') + (b.id === borradorAbiertoId ? ' <span style="color:#fbbf24; font-weight:400;">(abierto)</span>' : '') + '</div>' +
+          '<div style="font-size:12px; color:#94a3b8; margin:2px 0 8px;">' + escaparHtml(hora) + ' &middot; ' + unidades + ' unid. &middot; $' + total.toFixed(2) + '</div>' +
+          '<div style="display:flex; gap:8px;">' +
+          '<button class="btn" style="flex:1; width:auto;" onclick="abrirBorrador(' + Number(b.id) + ')">Abrir</button>' +
+          '<button class="btn" style="flex:0 0 auto; width:auto; background:#7f1d1d;" onclick="borrarBorrador(' + Number(b.id) + ')">Borrar</button>' +
+          '</div></div>';
+      }).join('');
+      ov.innerHTML = '<div style="background:#1e293b; color:#e2e8f0; padding:18px; border-radius:12px; max-width:480px; width:100%; max-height:85vh; overflow:auto;">' +
+        '<h3 style="margin:0 0 4px; color:#fff;">Borradores</h3>' +
+        '<p style="font-size:12px; color:#94a3b8; margin:0 0 10px;">Se guardan solo en este telefono. Al abrir uno se revisan precio y existencia con el catalogo actual.</p>' +
+        (filas || '<div style="color:#94a3b8; font-size:13px; padding:8px 0;">No hay borradores guardados.</div>') +
+        '<button class="btn" style="background:#475569; margin-top:6px;" onclick="cerrarBorradores()">Cerrar</button></div>';
+      ov.style.display = 'flex';
+    }
+    function abrirBorrador(id) {
+      const lista = leerBorradores();
+      const b = lista.find(function (x) { return x.id === id; });
+      if (!b) return;
+      if (carrito.length > 0 && !confirm('Ya tienes un pedido armado. Si abres el borrador, ese pedido se reemplaza y se pierde. ¿Continuar?')) return;
+      const items = (b.items || []).filter(function (i) { return i && i.sku && Number(i.cantidad) > 0; });
+      items.forEach(function (i) {
+        const p = Array.isArray(catalogo) ? catalogo.find(function (c) { return c.sku === i.sku; }) : null;
+        if (!p) return;
+        const editado = i.precioLista !== undefined && Number(i.precio) !== Number(i.precioLista);
+        i.precioLista = p.precio;
+        if (!editado) i.precio = p.precio;
+        i.stock = (p.stock === undefined ? null : p.stock);
+      });
+      carrito = items;
+      origenesAsignadosCarrito = [];
+      const nota = document.getElementById('notaPedido');
+      if (nota) nota.value = b.nota || '';
+      borradorAbiertoId = id;
+      cerrarBorradores();
+      renderCarrito();
+      pintarBorradores();
+    }
+    function borrarBorrador(id) {
+      if (!confirm('¿Borrar este borrador?')) return;
+      escribirBorradores(leerBorradores().filter(function (x) { return x.id !== id; }));
+      if (borradorAbiertoId === id) borradorAbiertoId = null;
+      pintarBorradores();
+      verBorradores();
+    }
+    // Al enviar el pedido, si salio de un borrador abierto (mismos productos), ese borrador se quita solo.
+    function quitarBorradorAbierto() {
+      if (borradorAbiertoId === null) return;
+      const lista = leerBorradores();
+      const b = lista.find(function (x) { return x.id === borradorAbiertoId; });
+      if (b) {
+        const a = (b.items || []).map(function (i) { return i.sku; }).sort().join('|');
+        const c = carrito.map(function (i) { return i.sku; }).sort().join('|');
+        if (a === c) escribirBorradores(lista.filter(function (x) { return x.id !== borradorAbiertoId; }));
+      }
+      borradorAbiertoId = null;
+      pintarBorradores();
+    }
+
     async function enviarPedido() {
       // Si el vendedor esta escribiendo una cantidad, se confirma antes de enviar.
       const activo = document.activeElement;
@@ -8912,6 +9718,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
           document.getElementById('accionesPostEnvio').style.display = 'block';
           expandidosMP.add(data.id);   // se muestra desplegado para que el vendedor lo repase
         }
+        try { quitarBorradorAbierto(); } catch (e) {}
         carrito = [];
         origenesAsignadosCarrito = [];
         try { document.getElementById('notaPedido').value = ''; } catch (e) {}
@@ -8944,6 +9751,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
           mostrarMensaje('Sin conexion: el pedido se guardo en el telefono y se enviara solo cuando vuelva la red.', true);
           volverAEfectivo();
         }
+        try { quitarBorradorAbierto(); } catch (e) {}
         carrito = [];
         renderCarrito();
       } finally {
@@ -9597,7 +10405,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
           if (loTomoOtro || e.retirado) {
             const idx = asignadosPendientes.findIndex(x => x.id === a.id);
             if (idx !== -1) { asignadosPendientes.splice(idx, 1); cambio = true; }
-            if (e.retirado) mostrarMensaje('La caja retiro un pedido que te habia armado.', false);
+            if (e.retirado) mostrarMensaje(e.cobradoAxis ? ('Ese pedido ya se cobro en caja (venta #' + e.cobradoAxis + ').') : 'La caja retiro un pedido que te habia armado.', false);
           }
         }
         if (cambio) renderAsignados();
@@ -10939,6 +11747,12 @@ $htmlMetricas = @'
       <h2>Facturado por vendedor</h2>
       <div id="listaVendedores"></div>
     </div>
+    <div class="panel" id="panelCierre" style="display:none;">
+      <h2>Cierre: AxisPOS contra la aplicacion <button style="float:right; font-size:12px; padding:4px 10px; border-radius:6px; border:none; background:#334155; color:#e2e8f0; cursor:pointer;" onclick="cargarCierre(true)">Actualizar</button></h2>
+      <div id="cierreResumen"></div>
+      <div id="cierreListas"></div>
+      <div class="nota" id="cierreNota"></div>
+    </div>
     <div class="panel" id="panelCuadre" style="display:none;">
       <h2>Cuadre contra AxisPOS</h2>
       <div id="cuadreTabla"></div>
@@ -10990,12 +11804,60 @@ $htmlMetricas = @'
         document.getElementById('cargando').style.display = 'none';
         document.getElementById('contenido').style.display = 'block';
         cargarCuadre();
+        cargarCierre(false);
       } catch (e) {
         document.getElementById('cargando').textContent = 'No se pudieron cargar las metricas.';
       }
     }
     function escHtml(x) {
       return String(x === null || x === undefined ? '' : x).replace(/[&<>"]/g, function (ch) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]; });
+    }
+    function dinero(x) { return '$' + Number(x || 0).toFixed(2); }
+    async function cargarCierre(fresco) {
+      const panel = document.getElementById('panelCierre');
+      const resumen = document.getElementById('cierreResumen');
+      const listas = document.getElementById('cierreListas');
+      try {
+        panel.style.display = 'block';
+        resumen.innerHTML = '<div class="vacio">Calculando el cierre...</div>';
+        listas.innerHTML = '';
+        const res = await fetch('/api/cierre?dias=' + Math.min(rangoActual, 7) + (fresco ? '&fresco=1' : ''));
+        if (!res.ok) { panel.style.display = 'none'; return; }
+        const c = await res.json();
+        if (!c.ok) { resumen.innerHTML = '<div class="vacio">' + escHtml(c.error || 'No se pudo calcular el cierre.') + '</div>'; return; }
+        const fila = function (rotulo, n, din, extra, resaltar) {
+          const e = resaltar ? ' style="font-weight:700;color:#fbbf24;"' : '';
+          return '<tr' + e + '><td>' + rotulo + '</td><td>' + n + '</td><td>' + din + '</td><td>' + (extra || '') + '</td></tr>';
+        };
+        resumen.innerHTML = '<table class="cuadre"><tr><th></th><th>Ventas</th><th>Dinero</th><th></th></tr>' +
+          fila('Pasado por AxisPOS (todo)', c.axis.ventas, dinero(c.axis.total)) +
+          fila('Pasado por la aplicacion (pedidos cobrados)', c.app.pedidos, dinero(c.app.total)) +
+          fila('Cuadran (la misma venta en los dos)', c.cuadran.n, dinero(c.cuadran.axis), 'en la app: ' + dinero(c.cuadran.app)) +
+          fila('SOLO en AxisPOS (no paso por la aplicacion)', c.soloAxis.n, dinero(c.soloAxis.total), '', true) +
+          fila('Dicen cobrado en la app pero NO aparecen en AxisPOS', c.sinVenta.n, dinero(c.sinVenta.total), 'segun la app') +
+          fila('Parecidas (mismos productos, otra cantidad)', c.parecidas.n, dinero(c.parecidas.axis), 'en la app: ' + dinero(c.parecidas.app)) +
+          '</table>';
+        let h = '';
+        if (c.soloAxis.lista.length) {
+          h += '<div style="margin-top:12px;font-size:13px;"><b>Ventas solo en AxisPOS (las mas grandes)</b></div>' + c.soloAxis.lista.map(function (v) {
+            return '<div class="fila" style="margin-top:6px;"><div style="flex:1;">venta #' + escHtml(v.acct) + ' &middot; ' + escHtml(v.hora) + ' &middot; <b>' + dinero(v.total) + '</b><br><span style="color:#94a3b8;font-size:12px;">' + escHtml(v.detalle) + '</span></div></div>';
+          }).join('');
+          if (c.soloAxis.n > c.soloAxis.lista.length) h += '<div class="vacio" style="padding:6px 0;">... y ' + (c.soloAxis.n - c.soloAxis.lista.length) + ' mas</div>';
+        }
+        if (c.sinVenta.lista.length) {
+          h += '<div style="margin-top:12px;font-size:13px;"><b>Pedidos cobrados que no aparecen en AxisPOS</b></div>' + c.sinVenta.lista.map(function (p) {
+            return '<div class="fila" style="margin-top:6px;"><div style="flex:1;"><span class="mal">pedido #' + escHtml(p.id) + '</span> &middot; ' + escHtml(p.vendedor) + ' &middot; ' + escHtml(p.hora) + ' &middot; <b>' + dinero(p.total) + '</b><br><span style="color:#94a3b8;font-size:12px;">' + escHtml(p.detalle) + '</span></div></div>';
+          }).join('');
+          if (c.sinVenta.n > c.sinVenta.lista.length) h += '<div class="vacio" style="padding:6px 0;">... y ' + (c.sinVenta.n - c.sinVenta.lista.length) + ' mas</div>';
+        }
+        if (c.parecidas.lista.length) {
+          h += '<div style="margin-top:12px;font-size:13px;"><b>Pedidos con una venta parecida (revisar)</b></div>' + c.parecidas.lista.map(function (p) {
+            return '<div class="fila" style="margin-top:6px;"><div style="flex:1;">pedido #' + escHtml(p.id) + ' (' + escHtml(p.vendedor) + ') ' + dinero(p.totalApp) + ' &harr; venta #' + escHtml(p.acct) + ' ' + dinero(p.totalAxis) + '<br><span style="color:#94a3b8;font-size:12px;">App: ' + escHtml(p.detalleApp) + '<br>AxisPOS: ' + escHtml(p.detalleAxis) + '</span></div></div>';
+          }).join('');
+        }
+        listas.innerHTML = h;
+        document.getElementById('cierreNota').textContent = 'Se lee directo de AxisPOS desde ' + c.desde + (c.dias < rangoActual ? ' (maximo 7 dias)' : '') + '. Un pedido cuadra con una venta cuando tienen exactamente los mismos productos y cantidades y la venta esta entre 90 min antes y 12 h despues del pedido. Calculado ' + c.generado + '.';
+      } catch (e) { panel.style.display = 'none'; }
     }
     async function cargarCuadre() {
       const panel = document.getElementById('panelCuadre');
@@ -11104,6 +11966,111 @@ function Construir-StockVivoJson {
     }
     [void]$sb.Append(']}')
     return $sb.ToString()
+}
+
+# ---------------- Reposicion: que bajar del almacen al piso (solo lectura, solo cuando se pide) ----------------
+# Lee de AxisPOS las existencias de cada almacen (tabla store) y las ventas recientes del piso (operations).
+# No consulta nada por su cuenta: solo corre cuando alguien abre la pantalla o pide la lista, y guarda el resultado 5 minutos.
+$global:reposCache = @{}
+
+function Texto-LimpioAxis([string]$s) {
+    return ([string]$s).Replace('\t', ' ').Replace('\n', ' ').Replace('\\', '\').Trim()
+}
+
+function Leer-AlmacenesAxisLista {
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    # Solo almacenes que existen (no borrados) y con existencia. "productos" = cuantos productos tienen algo en ese almacen.
+    $sqlNombre = "SELECT s.ObjectID, o.Name, COUNT(DISTINCT CASE WHEN s.Qtty > 0 THEN s.GoodID END), ROUND(SUM(s.Qtty), 0) FROM store s JOIN goods g ON g.ID = s.GoodID JOIN objects o ON o.ID = s.ObjectID WHERE g.Deleted = 0 AND o.Deleted = 0 GROUP BY s.ObjectID, o.Name HAVING SUM(s.Qtty) <> 0 ORDER BY s.ObjectID"
+    $sqlSimple = "SELECT s.ObjectID, '', COUNT(DISTINCT CASE WHEN s.Qtty > 0 THEN s.GoodID END), ROUND(SUM(s.Qtty), 0) FROM store s JOIN goods g ON g.ID = s.GoodID WHERE g.Deleted = 0 GROUP BY s.ObjectID HAVING SUM(s.Qtty) <> 0 ORDER BY s.ObjectID"
+    $texto = $null
+    try { $texto = Ejecutar-ConsultaAxis $sqlNombre } catch { $texto = Ejecutar-ConsultaAxis $sqlSimple }
+    $res = New-Object System.Collections.ArrayList
+    foreach ($linea in ($texto -split "`n")) {
+        $linea = $linea.TrimEnd("`r")
+        if ([string]::IsNullOrWhiteSpace($linea)) { continue }
+        $f = $linea -split "`t"
+        if ($f.Count -lt 4) { continue }
+        $idAl = 0
+        if (-not [int]::TryParse([string]$f[0], [ref]$idAl)) { continue }
+        $nProd = 0
+        [void][int]::TryParse([string]$f[2], [ref]$nProd)
+        $nUni = 0.0
+        [void][double]::TryParse([string]$f[3], [System.Globalization.NumberStyles]::Float, $inv, [ref]$nUni)
+        [void]$res.Add([pscustomobject]@{ id = $idAl; nombre = (Texto-LimpioAxis ([string]$f[1])); productos = $nProd; unidades = $nUni })
+    }
+    return @($res)
+}
+
+function Calcular-Reposicion([int]$piso, $origenes, [int]$dias, [int]$cobertura) {
+    $c = $global:configAxis
+    $colSku = [string]$c.columnaSku
+    if (@('Code','BarCode1','ID') -notcontains $colSku) { throw "columnaSku invalida (usa Code, BarCode1 o ID)." }
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $listaOrigen = (@($origenes) | ForEach-Object { [string][int]$_ }) -join ','
+    $todos = [string]$piso + ',' + $listaOrigen
+    $diasPre = $dias + 2
+
+    # 1) Existencia de cada producto en el piso y en los almacenes de origen.
+    $sql1 = "SELECT g.$colSku, g.Name, s.ObjectID, ROUND(SUM(s.Qtty), 4) FROM goods g JOIN store s ON s.GoodID = g.ID WHERE g.Deleted = 0 AND TRIM(g.Name) <> '' AND s.ObjectID IN ($todos) GROUP BY g.ID, g.$colSku, g.Name, s.ObjectID"
+    $texto1 = Ejecutar-ConsultaAxis $sql1
+    $prods = @{}
+    foreach ($linea in ($texto1 -split "`n")) {
+        $linea = $linea.TrimEnd("`r")
+        if ([string]::IsNullOrWhiteSpace($linea)) { continue }
+        $f = $linea -split "`t"
+        if ($f.Count -lt 4) { continue }
+        $sku = ([string]$f[0]).Trim()
+        if ([string]::IsNullOrWhiteSpace($sku) -or $sku -eq 'NULL') { continue }
+        $obj = 0
+        if (-not [int]::TryParse([string]$f[2], [ref]$obj)) { continue }
+        $qty = 0.0
+        [void][double]::TryParse([string]$f[3], [System.Globalization.NumberStyles]::Float, $inv, [ref]$qty)
+        if (-not $prods.ContainsKey($sku)) {
+            $prods[$sku] = [pscustomobject]@{ sku = $sku; nombre = (Texto-LimpioAxis ([string]$f[1])); piso = 0.0; origen = 0.0; vendido = 0.0 }
+        }
+        if ($obj -eq $piso) { $prods[$sku].piso = [double]$prods[$sku].piso + $qty } else { $prods[$sku].origen = [double]$prods[$sku].origen + $qty }
+    }
+
+    # 2) Lo vendido en el piso en los ultimos dias. Las devoluciones (tipo 34 en esta base) restan.
+    $sql2 = "SELECT g.$colSku, ROUND(SUM(CASE WHEN o.OperType = 34 OR o.Qtty < 0 OR o.Sign > 0 THEN -ABS(o.Qtty) ELSE ABS(o.Qtty) END), 4) FROM operations o JOIN goods g ON g.ID = o.GoodID WHERE o.OperType IN (2, 34) AND o.Sign <> 0 AND o.Acct > 0 AND o.ObjectID = $piso AND o.Timestamp >= DATE_SUB(NOW(), INTERVAL $diasPre DAY) AND IF(o.UserRealTime IS NULL OR o.UserRealTime < '2000-01-01', o.Timestamp, o.UserRealTime) >= DATE_SUB(NOW(), INTERVAL $dias DAY) GROUP BY g.ID, g.$colSku"
+    $texto2 = Ejecutar-ConsultaAxis $sql2
+    foreach ($linea in ($texto2 -split "`n")) {
+        $linea = $linea.TrimEnd("`r")
+        if ([string]::IsNullOrWhiteSpace($linea)) { continue }
+        $f = $linea -split "`t"
+        if ($f.Count -lt 2) { continue }
+        $sku = ([string]$f[0]).Trim()
+        if (-not $prods.ContainsKey($sku)) { continue }
+        $vq = 0.0
+        [void][double]::TryParse([string]$f[1], [System.Globalization.NumberStyles]::Float, $inv, [ref]$vq)
+        $prods[$sku].vendido = $vq
+    }
+
+    # 3) Cuanto conviene bajar: lo que se vende en "cobertura" dias, menos lo que ya hay en el piso, sin pasar de lo que hay en el almacen.
+    $items = New-Object System.Collections.ArrayList
+    foreach ($p in $prods.Values) {
+        $vend = [double]$p.vendido
+        $org = [double]$p.origen
+        if (($vend -le 0) -or ($org -lt 1)) { continue }
+        $pisoStock = [math]::Max(0.0, [double]$p.piso)
+        $porDia = $vend / $dias
+        $falta = ($porDia * $cobertura) - $pisoStock
+        if ($falta -le 0) { continue }
+        $sug = [math]::Min([math]::Ceiling($falta), [math]::Floor($org))
+        if ($sug -lt 1) { continue }
+        [void]$items.Add([pscustomobject]@{
+            sku = [string]$p.sku
+            nombre = [string]$p.nombre
+            piso = [math]::Round([double]$p.piso, 2)
+            origen = [math]::Round($org, 2)
+            vendido = [math]::Round($vend, 2)
+            porDia = [math]::Round($porDia, 2)
+            diasPiso = [math]::Round($pisoStock / $porDia, 1)
+            bajar = [double]$sug
+        })
+    }
+    $orden = @($items | Sort-Object @{ Expression = { [double]$_.diasPiso } }, @{ Expression = { [double]$_.vendido }; Descending = $true } | Select-Object -First 200)
+    return $orden
 }
 
 # ------------------------------------------------------------------
@@ -11321,6 +12288,32 @@ while ($listener.IsListening) {
                 }
             }
 
+        } elseif ($method -eq "GET" -and $path -eq "/api/cierre") {
+            if (-not [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)) {
+                Enviar-Json $context @{ ok = $false; error = "El cierre solo se consulta desde la PC." } 403
+            } else {
+                try {
+                    $diasCi = 1
+                    $tmpCi = 0
+                    if ([int]::TryParse([string]$request.QueryString["dias"], [ref]$tmpCi)) { $diasCi = $tmpCi }
+                    if ($diasCi -lt 1) { $diasCi = 1 }
+                    if ($diasCi -gt 7) { $diasCi = 7 }
+                    $claveCi = [string]$diasCi
+                    $ahoraCi = Get-Date
+                    $enCacheCi = $null
+                    if ($global:cierreCache.ContainsKey($claveCi)) { $enCacheCi = $global:cierreCache[$claveCi] }
+                    if (($null -ne $enCacheCi) -and (([string]$request.QueryString["fresco"]) -ne "1") -and (($ahoraCi - $enCacheCi.hora).TotalSeconds -lt 60)) {
+                        Enviar-Json $context $enCacheCi.resp
+                    } else {
+                        $respCi = Calcular-CierreDia $diasCi
+                        $global:cierreCache[$claveCi] = @{ hora = $ahoraCi; resp = $respCi }
+                        Enviar-Json $context $respCi
+                    }
+                } catch {
+                    Enviar-Json $context @{ ok = $false; error = [string]$_.Exception.Message }
+                }
+            }
+
         } elseif ($method -eq "GET" -and $path -eq "/api/metricas") {
             $diasQ = 1
             if ($request.QueryString["dias"]) { try { $diasQ = [int]$request.QueryString["dias"] } catch { $diasQ = 1 } }
@@ -11442,6 +12435,17 @@ while ($listener.IsListening) {
             if ($data.PSObject.Properties.Name -contains 'permitirDescuentos') {
                 $global:configApp.permitirDescuentos = [bool]$data.permitirDescuentos
             }
+            if ($data.PSObject.Properties.Name -contains 'permitirBorradores') {
+                $global:configApp.permitirBorradores = [bool]$data.permitirBorradores
+            }
+            if ($data.PSObject.Properties.Name -contains 'reposPiso') {
+                $rpNuevo = 0
+                if ([int]::TryParse([string]$data.reposPiso, [ref]$rpNuevo) -and $rpNuevo -ge 0) { $global:configApp.reposPiso = $rpNuevo }
+            }
+            if ($data.PSObject.Properties.Name -contains 'reposOrigen') {
+                $roNuevo = [string]$data.reposOrigen
+                if ($roNuevo -match '^[0-9,]{0,60}$') { $global:configApp.reposOrigen = $roNuevo }
+            }
             if ($data.PSObject.Properties.Name -contains 'umbralStockBajo') {
                 $umbralNuevo = 3
                 try { $umbralNuevo = [int]$data.umbralStockBajo } catch { $umbralNuevo = 3 }
@@ -11478,6 +12482,67 @@ while ($listener.IsListening) {
                     ForEach-Object { [pscustomobject]@{ sku = $_.sku; nombre = $_.nombre; stock = $_.stock } })
             }
             Enviar-Respuesta -Context $context -Body (@{ umbral = $umbral; productos = $bajos } | ConvertTo-Json -Depth 5) -ContentType "application/json; charset=utf-8"
+
+        } elseif ($method -eq "GET" -and $path -eq "/api/reposicion/almacenes") {
+            try {
+                if (-not $global:configAxis.activo) { throw "AxisPOS no esta activo (config_axis.json)." }
+                $listaAl = Leer-AlmacenesAxisLista
+                $pisoDef = 0
+                foreach ($aDef in @($global:configAxis.almacenes)) {
+                    $nDef = 0
+                    if ([int]::TryParse([string]$aDef, [ref]$nDef)) { $pisoDef = $nDef; break }
+                }
+                Enviar-Json $context @{ ok = $true; pisoDefecto = $pisoDef; pisoGuardado = [int]$global:configApp.reposPiso; origenGuardado = [string]$global:configApp.reposOrigen; almacenes = @($listaAl) }
+            } catch {
+                Enviar-Json $context @{ ok = $false; error = [string]$_.Exception.Message }
+            }
+
+        } elseif ($method -eq "GET" -and $path -eq "/api/reposicion") {
+            try {
+                if (-not $global:configAxis.activo) { throw "AxisPOS no esta activo (config_axis.json)." }
+                $tmpQ = 0
+                $pisoQ = 0
+                if ([int]::TryParse([string]$request.QueryString["piso"], [ref]$tmpQ)) { $pisoQ = $tmpQ }
+                if ($pisoQ -le 0) { $pisoQ = [int]$global:configApp.reposPiso }
+                if ($pisoQ -le 0) {
+                    foreach ($aQ in @($global:configAxis.almacenes)) {
+                        $nQ = 0
+                        if ([int]::TryParse([string]$aQ, [ref]$nQ)) { $pisoQ = $nQ; break }
+                    }
+                }
+                $origTxt = [string]$request.QueryString["origen"]
+                if ([string]::IsNullOrWhiteSpace($origTxt)) { $origTxt = [string]$global:configApp.reposOrigen }
+                $origQ = New-Object System.Collections.ArrayList
+                foreach ($tQ in $origTxt.Split(',')) {
+                    $oQ = 0
+                    if ([int]::TryParse($tQ.Trim(), [ref]$oQ) -and ($oQ -ne $pisoQ) -and (-not $origQ.Contains($oQ)) -and ($origQ.Count -lt 8)) { [void]$origQ.Add($oQ) }
+                }
+                $diasQ = 7
+                if ([int]::TryParse([string]$request.QueryString["dias"], [ref]$tmpQ)) { $diasQ = $tmpQ }
+                if ($diasQ -lt 1) { $diasQ = 1 }
+                if ($diasQ -gt 60) { $diasQ = 60 }
+                $cobQ = 7
+                if ([int]::TryParse([string]$request.QueryString["cob"], [ref]$tmpQ)) { $cobQ = $tmpQ }
+                if ($cobQ -lt 1) { $cobQ = 1 }
+                if ($cobQ -gt 60) { $cobQ = 60 }
+                if ($pisoQ -le 0) { throw "No se sabe cual es el almacen del piso de venta." }
+                if ($origQ.Count -eq 0) { throw "Falta elegir de que almacen se baja la mercancia (en la PC: Alt+B)." }
+                $claveR = [string]$pisoQ + "|" + ($origQ -join ',') + "|" + [string]$diasQ + "|" + [string]$cobQ
+                $ahoraR = Get-Date
+                $enCache = $null
+                if ($global:reposCache.ContainsKey($claveR)) { $enCache = $global:reposCache[$claveR] }
+                if (($null -ne $enCache) -and (([string]$request.QueryString["fresco"]) -ne "1") -and (($ahoraR - $enCache.hora).TotalSeconds -lt 300)) {
+                    Enviar-Json $context $enCache.resp
+                } else {
+                    $filasR = Calcular-Reposicion $pisoQ @($origQ) $diasQ $cobQ
+                    $respR = @{ ok = $true; piso = $pisoQ; origen = @($origQ); dias = $diasQ; cobertura = $cobQ; generado = $ahoraR.ToString("yyyy-MM-dd HH:mm:ss"); items = @($filasR) }
+                    if ($global:reposCache.Count -gt 20) { $global:reposCache = @{} }
+                    $global:reposCache[$claveR] = @{ hora = $ahoraR; resp = $respR }
+                    Enviar-Json $context $respR
+                }
+            } catch {
+                Enviar-Json $context @{ ok = $false; error = [string]$_.Exception.Message }
+            }
 
         } elseif ($method -eq "GET" -and $path -eq "/api/almacen/stockvivo") {
             $ahoraSv = Get-Date
@@ -11961,7 +13026,7 @@ while ($listener.IsListening) {
             }
             $todos = @($global:pedidosAsignados | ForEach-Object {
                 $vencido = ($_.todos -and (-not $_.tomadoPor) -and (-not $_.retirado) -and (($ahora - [datetime]$_.hora).TotalMinutes -ge $global:minutosAvisoSinTomar))
-                [pscustomobject]@{ id = $_.id; vendedor = $_.vendedor; todos = [bool]$_.todos; tomadoPor = $_.tomadoPor; hora = $_.hora; entregado = [bool]$_.entregado; visto = [bool]$_.visto; retirado = [bool]$_.retirado; vencido = [bool]$vencido }
+                [pscustomobject]@{ id = $_.id; vendedor = $_.vendedor; todos = [bool]$_.todos; tomadoPor = $_.tomadoPor; hora = $_.hora; entregado = [bool]$_.entregado; visto = [bool]$_.visto; retirado = [bool]$_.retirado; cobradoAxis = [string]$_.cobradoAxis; vencido = [bool]$vencido }
             })
             Enviar-Respuesta -Context $context -Body (@{ ok = $true; asignados = $todos } | ConvertTo-Json -Depth 5) -ContentType "application/json; charset=utf-8"
 
@@ -12172,6 +13237,10 @@ while ($listener.IsListening) {
                 Guardar-Pedidos
                 try { Recalcular-Reservas } catch {}
                 try {
+                    $pNuevoObj = $global:pedidos | Where-Object { [int]$_.id -eq [int]$pedido.id } | Select-Object -First 1
+                    if ($pNuevoObj) { [void](Conciliar-PedidoConVentasPrevias $pNuevoObj) }
+                } catch {}
+                try {
                     $agotadosVenta = @()
                     foreach ($skB in @($stockAntesPorSku.Keys)) {
                         $pB = $global:catalogo | Where-Object { $_.sku -eq $skB } | Select-Object -First 1
@@ -12271,6 +13340,7 @@ while ($listener.IsListening) {
                 $pedido | Add-Member -NotePropertyName revisado -NotePropertyValue ([bool]$cobroCaja) -Force
                 $pedido | Add-Member -NotePropertyName horaCobro -NotePropertyValue ((Get-Date).ToString("yyyy-MM-dd HH:mm:ss")) -Force
                 Guardar-Pedidos
+                try { Actualizar-CuadreAxis } catch {}
                 if ($metodo -ne $metodoAntes) {
                     try { Agregar-AlertaVendedor ([string]$pedido.vendedor) ("La caja cobro tu pedido #" + $id + " por " + $metodo.ToLower() + " (lo tenias en " + $metodoAntes.ToLower() + "). Total cobrado: $" + (Formato-Monto $pedido.totalCobrado) + ".") $id "pedido" } catch {}
                 }
