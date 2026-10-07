@@ -1623,6 +1623,7 @@ $global:configAxis = [pscustomobject]@{
     reservaMinutos = 180
     avisoPedidoMinutos = 15
     cuadreEsperaMinutos = 30
+    socioTransferencia = "Transferencia"
 }
 $global:axisUltimaLectura = [datetime]::MinValue
 $global:axisFallosSeguidos = 0
@@ -1636,7 +1637,7 @@ function Cargar-ConfigAxis {
         $raw = Get-Content $configAxisPath -Raw -Encoding UTF8
         if ($raw -and $raw.Trim().Length -gt 0) {
             $d = $raw | ConvertFrom-Json
-            foreach ($k in @('activo','servidor','puerto','usuario','clave','base','clienteMysql','almacenes','columnaPrecio','columnaSku','cadaSegundos','cerrarPedidosAuto','ventasCadaSegundos','reservaMinutos','avisoPedidoMinutos','cuadreEsperaMinutos')) {
+            foreach ($k in @('activo','servidor','puerto','usuario','clave','base','clienteMysql','almacenes','columnaPrecio','columnaSku','cadaSegundos','cerrarPedidosAuto','ventasCadaSegundos','reservaMinutos','avisoPedidoMinutos','cuadreEsperaMinutos','socioTransferencia')) {
                 if (($d.PSObject.Properties.Name -contains $k) -and ($d.$k -ne $null)) { $global:configAxis.$k = $d.$k }
             }
         }
@@ -1888,6 +1889,10 @@ function Guardar-EstadoVentasAxis {
 }
 
 function Leer-VentasAxis([long]$desdeId) {
+    # Un borrador de AxisPOS guarda sus filas con el ID del momento en que se creo; al cobrarlo se actualizan esas
+    # mismas filas (ID viejo). Por eso tambien se miran las filas tocadas en los ultimos 30 minutos aunque su ID
+    # ya haya quedado atras; las ventas ya vistas se descartan en Revisar-VentasAxis.
+    $desdeMinimo = [math]::Max([long]0, $desdeId - 3000)
     $c = $global:configAxis
     $colSku = [string]$c.columnaSku
     if (@('Code','BarCode1','ID') -notcontains $colSku) { throw "columnaSku invalida (usa Code, BarCode1 o ID)." }
@@ -1895,7 +1900,7 @@ function Leer-VentasAxis([long]$desdeId) {
     foreach ($a in @($c.almacenes)) { $n = 0; if ([int]::TryParse([string]$a, [ref]$n)) { [void]$ids.Add($n) } }
     if ($ids.Count -eq 0) { throw "config_axis.json: 'almacenes' esta vacio." }
     $lista = ($ids -join ',')
-    $sql = "SELECT o.ID, o.Acct, o.ObjectID, g.$colSku, o.Qtty, DATE_FORMAT(IF(o.UserRealTime IS NULL OR o.UserRealTime < '2000-01-01', o.Timestamp, o.UserRealTime), '%Y-%m-%d %H:%i:%s'), o.PriceOut, o.Sign FROM operations o JOIN goods g ON g.ID = o.GoodID WHERE o.OperType = 2 AND o.Sign <> 0 AND o.Acct > 0 AND o.ID > $desdeId AND o.ObjectID IN ($lista) ORDER BY o.ID"
+    $sql = "SELECT o.ID, o.Acct, o.ObjectID, g.$colSku, o.Qtty, DATE_FORMAT(IF(o.UserRealTime IS NULL OR o.UserRealTime < '2000-01-01', o.Timestamp, o.UserRealTime), '%Y-%m-%d %H:%i:%s'), o.PriceOut, o.Sign, o.OperatorID FROM operations o JOIN goods g ON g.ID = o.GoodID WHERE o.OperType = 2 AND o.Sign <> 0 AND o.Acct > 0 AND o.ID > $desdeMinimo AND (o.ID > $desdeId OR o.Timestamp >= DATE_SUB(NOW(), INTERVAL 30 MINUTE) OR o.UserRealTime >= DATE_SUB(NOW(), INTERVAL 30 MINUTE)) AND o.ObjectID IN ($lista) ORDER BY o.ID"
     $texto = Ejecutar-ConsultaAxis $sql
     $inv = [System.Globalization.CultureInfo]::InvariantCulture
     $res = New-Object System.Collections.ArrayList
@@ -1912,7 +1917,9 @@ function Leer-VentasAxis([long]$desdeId) {
         if ($f.Count -ge 7) { [void][double]::TryParse([string]$f[6], [System.Globalization.NumberStyles]::Float, $inv, [ref]$prc) }
         $sgn = 0.0
         if ($f.Count -ge 8) { [void][double]::TryParse([string]$f[7], [System.Globalization.NumberStyles]::Float, $inv, [ref]$sgn) }
-        [void]$res.Add([pscustomobject]@{ id = $idFila; acct = [string]$f[1]; obj = [string]$f[2]; sku = ([string]$f[3]).Trim(); qty = $qty; fecha = [string]$f[5]; precio = $prc; signo = $sgn })
+        $opId = ""
+        if ($f.Count -ge 9) { $opId = ([string]$f[8]).Trim() }
+        [void]$res.Add([pscustomobject]@{ id = $idFila; acct = [string]$f[1]; obj = [string]$f[2]; sku = ([string]$f[3]).Trim(); qty = $qty; fecha = [string]$f[5]; precio = $prc; signo = $sgn; op = $opId })
     }
     return @($res)
 }
@@ -2000,6 +2007,11 @@ function Revisar-VentasAxis {
         if (-not $global:axisSeguimientoDesde) { $global:axisSeguimientoDesde = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss"); Guardar-EstadoVentasAxis }
         $filas = @(Leer-VentasAxis $global:axisVentasUltimoId)
         $global:axisVentasFallos = 0
+        # Filas con ID viejo (borradores que se cobraron ahora): solo cuentan si esa venta aun no se habia registrado.
+        $desdeIdAct = $global:axisVentasUltimoId
+        $yaRegistradas = @{}
+        foreach ($rvd in @($global:ventasAxisDia)) { $yaRegistradas[[string]$rvd.clave] = $true }
+        $filas = @($filas | Where-Object { ($_.id -gt $desdeIdAct) -or (-not $yaRegistradas.ContainsKey([string]$_.acct + "|" + [string]$_.obj)) })
         if ($filas.Count -eq 0) { $global:axisVentasVistas = @{}; $global:axisVentasListas = @{}; return }
 
         $grupos = [ordered]@{}
@@ -2037,7 +2049,7 @@ function Revisar-VentasAxis {
         $global:axisVentasVistas = $vistasNuevas
         if ($procesados -gt 0) { try { Actualizar-CuadreAxis } catch {} }
         if (-not $hayEnEspera) {
-            $global:axisVentasUltimoId = $maxId
+            if ($maxId -gt $global:axisVentasUltimoId) { $global:axisVentasUltimoId = $maxId }
             $global:axisVentasVistas = @{}
             $global:axisVentasListas = @{}
             Guardar-EstadoVentasAxis
@@ -2046,6 +2058,219 @@ function Revisar-VentasAxis {
         $global:axisVentasFallos = $global:axisVentasFallos + 1
         if ($global:axisVentasFallos -eq 1) { Write-Host "Aviso: no se pudieron revisar las ventas de AxisPOS: $_" }
     }
+}
+
+# ---- Avisos al vendedor cuando la caja arma (borrador) o cobra algo distinto a lo que el mando en su pedido ----
+$global:avisosDifCaja = @{}
+$global:axisOperadores = @{}
+$global:axisOperadoresHora = [datetime]::MinValue
+$global:axisReintentoUltima = [datetime]::MinValue
+
+# Nombre del usuario de AxisPOS que hizo la venta (para saber quien la paso; no para acusar a nadie).
+function Nombre-OperadorAxis([string]$id) {
+    if ([string]::IsNullOrWhiteSpace($id)) { return "" }
+    try {
+        if ((((Get-Date) - $global:axisOperadoresHora).TotalMinutes -gt 10) -or (-not $global:axisOperadores.ContainsKey($id))) {
+            $t = Ejecutar-ConsultaAxis "SELECT ID, Name FROM users"
+            $m = @{}
+            foreach ($lin in ($t -split "`n")) {
+                $lin = $lin.TrimEnd("`r")
+                if ([string]::IsNullOrWhiteSpace($lin)) { continue }
+                $ff = $lin -split "`t"
+                if ($ff.Count -ge 2) { $m[([string]$ff[0]).Trim()] = (Texto-LimpioAxis ([string]$ff[1])) }
+            }
+            if ($m.Count -gt 0) { $global:axisOperadores = $m; $global:axisOperadoresHora = Get-Date }
+        }
+    } catch {}
+    if ($global:axisOperadores.ContainsKey($id)) { return [string]$global:axisOperadores[$id] }
+    return ("usuario " + $id)
+}
+
+function Texto-VentaCompleta($venta) {
+    $partes = @()
+    foreach ($k in @($venta.Keys | Sort-Object)) { $partes += ((Formato-Cantidad ([double]$venta[$k])) + " x " + (Nombre-ProductoSku ([string]$k))) }
+    $t = (@($partes) | Select-Object -First 8) -join "; "
+    if ($partes.Count -gt 8) { $t += "; ..." }
+    return $t
+}
+
+function Texto-FaltanYSobran($pedItems, $venta) {
+    $falta = @(); $sobra = @()
+    $claves = @{}
+    foreach ($k in @($pedItems.Keys)) { $claves[$k] = $true }
+    foreach ($k in @($venta.Keys)) { $claves[$k] = $true }
+    foreach ($k in @($claves.Keys | Sort-Object)) {
+        $a = 0.0; if ($pedItems.ContainsKey($k)) { $a = [double]$pedItems[$k] }
+        $b = 0.0; if ($venta.ContainsKey($k)) { $b = [double]$venta[$k] }
+        if ($b -gt ($a + 0.0001)) { $falta += ((Formato-Cantidad ($b - $a)) + " x " + (Nombre-ProductoSku ([string]$k))) }
+        elseif ($a -gt ($b + 0.0001)) { $sobra += ((Formato-Cantidad ($a - $b)) + " x " + (Nombre-ProductoSku ([string]$k))) }
+    }
+    return @{ falta = (@($falta) -join "; "); sobra = (@($sobra) -join "; ") }
+}
+$global:axisBorradoresUltima = [datetime]::MinValue
+
+function Firma-Cantidades($d) {
+    $partes = @()
+    foreach ($k in @($d.Keys | Sort-Object)) { $partes += ([string]$k + ":" + [string]$d[$k]) }
+    return ($partes -join ",")
+}
+
+function Texto-CambiosCaja($pedItems, $venta) {
+    $claves = @{}
+    foreach ($k in @($pedItems.Keys)) { $claves[$k] = $true }
+    foreach ($k in @($venta.Keys)) { $claves[$k] = $true }
+    $agr = New-Object System.Collections.ArrayList
+    $qui = New-Object System.Collections.ArrayList
+    $cam = New-Object System.Collections.ArrayList
+    foreach ($k in @($claves.Keys | Sort-Object)) {
+        $a = 0.0; if ($pedItems.ContainsKey($k)) { $a = [double]$pedItems[$k] }
+        $b = 0.0; if ($venta.ContainsKey($k)) { $b = [double]$venta[$k] }
+        if ([math]::Abs($a - $b) -le 0.0001) { continue }
+        $nom = Nombre-ProductoSku ([string]$k)
+        if ($a -le 0) { [void]$agr.Add((Formato-Cantidad $b) + " x " + $nom) }
+        elseif ($b -le 0) { [void]$qui.Add((Formato-Cantidad $a) + " x " + $nom) }
+        else { [void]$cam.Add($nom + " (de " + (Formato-Cantidad $a) + " a " + (Formato-Cantidad $b) + ")") }
+    }
+    $txt = ""
+    if ($agr.Count -gt 0) { $txt += " Agregaron: " + ((@($agr) | Select-Object -First 4) -join "; ") + $(if ($agr.Count -gt 4) { "..." } else { "" }) + "." }
+    if ($qui.Count -gt 0) { $txt += " Quitaron: " + ((@($qui) | Select-Object -First 4) -join "; ") + $(if ($qui.Count -gt 4) { "..." } else { "" }) + "." }
+    if ($cam.Count -gt 0) { $txt += " Cambiaron: " + ((@($cam) | Select-Object -First 4) -join "; ") + $(if ($cam.Count -gt 4) { "..." } else { "" }) + "." }
+    return $txt.Trim()
+}
+
+# Pedido pendiente al que se parece una venta/borrador de la caja (al menos la mitad de los productos en comun).
+# Si hay dos candidatos igual de parecidos no se adivina: devuelve $null.
+function Buscar-PedidoParecido($venta, $horaRef) {
+    if ($null -eq $venta) { return $null }
+    $mejor = $null; $mejorScore = 0.0; $mejorDif = [double]::MaxValue; $empate = $false; $mejorItems = $null
+    foreach ($p in @($global:pedidos | Where-Object { [string]$_.estado -eq "pendiente" })) {
+        $pedItems = Juntar-CantidadesPorSku $p.items 'sku' 'cantidad'
+        if ($null -eq $pedItems) { continue }
+        $hp = Hora-Pedido $p
+        if ($horaRef -and $hp) {
+            if ($horaRef -lt $hp.AddSeconds(-(Margen-VentaAntesSeg))) { continue }
+            if ($horaRef -gt $hp.AddHours(8)) { continue }
+        }
+        $comun = 0
+        foreach ($k in @($pedItems.Keys)) { if ($venta.ContainsKey($k)) { $comun++ } }
+        if ($comun -eq 0) { continue }
+        $union = $pedItems.Count + $venta.Count - $comun
+        $score = [double]$comun / [double]$union
+        if ($score -lt 0.5) { continue }
+        $dif = 0.0
+        if ($horaRef -and $hp) { $dif = [math]::Abs(($horaRef - $hp).TotalMinutes) }
+        if (($score -gt $mejorScore) -or (($score -eq $mejorScore) -and ($dif -lt $mejorDif))) {
+            $empate = (($score -eq $mejorScore) -and ($dif -eq $mejorDif))
+            $mejor = $p; $mejorScore = $score; $mejorDif = $dif; $mejorItems = $pedItems
+        } elseif (($score -eq $mejorScore) -and ($dif -eq $mejorDif)) { $empate = $true }
+    }
+    if ($null -eq $mejor -or $empate) { return $null }
+    return [pscustomobject]@{ p = $mejor; pedItems = $mejorItems; exacto = (Items-IgualesAVenta $mejorItems $venta) }
+}
+
+function Avisar-DiferenciaCaja($p, $pedItems, $venta, [string]$momento, [string]$ref, [string]$operador = "") {
+    $cambios = Texto-CambiosCaja $pedItems $venta
+    if (-not $cambios) { return }
+    $clave = [string]$p.id + "|" + $ref
+    $firma = Firma-Cantidades $venta
+    $ahora = Get-Date
+    if ($global:avisosDifCaja.ContainsKey($clave)) {
+        $ant = $global:avisosDifCaja[$clave]
+        if ([string]$ant.firma -eq $firma) { return }
+        if (($ahora - $ant.hora).TotalSeconds -lt 90) { return }
+    }
+    if ($global:avisosDifCaja.Count -gt 300) { $global:avisosDifCaja = @{} }
+    $global:avisosDifCaja[$clave] = @{ firma = $firma; hora = $ahora }
+    if ($momento -eq "borrador") {
+        $msg = "Tu pedido #" + $p.id + ": en la caja lo tienen distinto y aun no lo cobran. " + $cambios + " Corrigelo o avisale a la caja antes de que lo cobren."
+        try { Agregar-AlertaVendedor ([string]$p.vendedor) $msg $p.id "pedido" } catch {}
+    } else {
+        $fs = Texto-FaltanYSobran $pedItems $venta
+        $msg = "Tu pedido #" + $p.id + " no cierra: en AxisPOS (venta #" + $ref + ") pasaron: " + (Texto-VentaCompleta $venta) + "."
+        if ($fs.falta) { $msg += " Para que cierre bien tienes que agregar: " + $fs.falta + "." }
+        if ($fs.sobra) { $msg += " Y en AxisPOS NO pasaron: " + $fs.sobra + "." }
+        $msg += " Hablalo con la caja; el pedido sigue pendiente."
+        try { Agregar-AlertaVendedor ([string]$p.vendedor) $msg $p.id "pedido" } catch {}
+        # Para la PC: queda anotado quien paso la venta en AxisPOS y que cambio, para revisarlo (sin acusar a nadie).
+        try {
+            Poner-Prop $p "difCajaAcct" $ref
+            Poner-Prop $p "difCajaDetalle" $cambios
+            Guardar-Pedidos
+            $quien = if ($operador) { $operador } else { "no se sabe" }
+            $txtPc = "Revisar: la venta #" + $ref + " de AxisPOS (hecha por " + $quien + ") no coincide con el pedido #" + $p.id + " de " + [string]$p.vendedor + ". " + $cambios
+            $regPc = [pscustomobject]@{ id = $global:nextIdMensaje; vendedor = "AxisPOS"; texto = (Limpiar-TextoMensaje $txtPc); hora = $ahora.ToString("yyyy-MM-dd HH:mm:ss"); leido = $false }
+            $global:nextIdMensaje++
+            [void]$global:mensajesPc.Add($regPc)
+            Guardar-MensajesPc
+            $lineaLog = $ahora.ToString("yyyy-MM-dd HH:mm:ss") + " | venta AxisPOS #" + $ref + " | hecha por: " + $quien + " | pedido #" + $p.id + " (" + [string]$p.vendedor + ") | pasaron: " + (Texto-VentaCompleta $venta) + " | " + $cambios
+            [System.IO.File]::AppendAllText((Join-Path $scriptDir "diferencias_caja.log"), $lineaLog + "`r`n", [System.Text.Encoding]::UTF8)
+        } catch {}
+    }
+    Write-Host ("[" + $ahora.ToString('HH:mm:ss') + "] AxisPOS: aviso a " + [string]$p.vendedor + " - el pedido #" + $p.id + " no coincide con lo de la caja (" + $momento + ")")
+}
+
+# Pedidos que quedaron pendientes por una diferencia con la caja: si despues se corrigen (la caja les agrega lo que falta,
+# o el vendedor lo vuelve a mandar igual a la venta), se cierran solos con esa venta.
+function Reintentar-ConciliacionDiferidos {
+    if (-not $global:configAxis.activo) { return }
+    $ahora = Get-Date
+    if (($ahora - $global:axisReintentoUltima).TotalSeconds -lt 15) { return }
+    $global:axisReintentoUltima = $ahora
+    foreach ($pd in @($global:pedidos | Where-Object { ([string]$_.estado -eq "pendiente") -and $_.difCajaAcct })) {
+        try { [void](Conciliar-PedidoConVentasPrevias $pd) } catch {}
+    }
+}
+
+# Mira los borradores que la caja tiene en AxisPOS (ventas guardadas sin cobrar) y, si se parecen a un pedido pendiente
+# pero no son iguales, le avisa al vendedor ANTES de que cobren. Solo lectura; solo si hay pedidos pendientes.
+function Revisar-BorradoresAxis {
+    if (-not $global:configAxis.activo) { return }
+    if (-not [bool]$global:configAxis.cerrarPedidosAuto) { return }
+    if ($global:axisVentasUltimoId -lt 0) { return }
+    $ahora = Get-Date
+    $espera = [int]$global:configAxis.ventasCadaSegundos * 2
+    if ($espera -lt 10) { $espera = 10 }
+    if (($ahora - $global:axisBorradoresUltima).TotalSeconds -lt $espera) { return }
+    $hayPend = $false
+    foreach ($pp in @($global:pedidos)) { if ([string]$pp.estado -eq "pendiente") { $hayPend = $true; break } }
+    if (-not $hayPend) { return }
+    $global:axisBorradoresUltima = $ahora
+    try {
+        $c = $global:configAxis
+        $colSku = [string]$c.columnaSku
+        if (@('Code','BarCode1','ID') -notcontains $colSku) { return }
+        $ids = New-Object System.Collections.ArrayList
+        foreach ($a in @($c.almacenes)) { $n = 0; if ([int]::TryParse([string]$a, [ref]$n)) { [void]$ids.Add($n) } }
+        if ($ids.Count -eq 0) { return }
+        $lista = ($ids -join ',')
+        $desde = [math]::Max([long]0, $global:axisVentasUltimoId - 5000)
+        $sql = "SELECT o.Acct, o.ObjectID, g.$colSku, o.Qtty, DATE_FORMAT(o.Timestamp, '%Y-%m-%d %H:%i:%s') FROM operations o JOIN goods g ON g.ID = o.GoodID WHERE o.OperType = 2 AND o.Sign = 0 AND o.Acct < 0 AND o.ID > $desde AND o.ObjectID IN ($lista) AND o.Timestamp >= DATE_SUB(NOW(), INTERVAL 3 HOUR) ORDER BY o.ID"
+        $texto = Ejecutar-ConsultaAxis $sql
+        $inv = [System.Globalization.CultureInfo]::InvariantCulture
+        $grupos = [ordered]@{}
+        foreach ($linea in ($texto -split "`n")) {
+            $linea = $linea.TrimEnd("`r")
+            if ([string]::IsNullOrWhiteSpace($linea)) { continue }
+            $f = $linea -split "`t"
+            if ($f.Count -lt 5) { continue }
+            $qty = 0.0
+            [void][double]::TryParse([string]$f[3], [System.Globalization.NumberStyles]::Float, $inv, [ref]$qty)
+            $k = [string]$f[0] + "|" + [string]$f[1]
+            if (-not $grupos.Contains($k)) { $grupos[$k] = New-Object System.Collections.ArrayList }
+            [void]$grupos[$k].Add([pscustomobject]@{ acct = [string]$f[0]; sku = ([string]$f[2]).Trim(); qty = $qty; fecha = [string]$f[4] })
+        }
+        foreach ($k in @($grupos.Keys)) {
+            $g = $grupos[$k]
+            $venta = Juntar-CantidadesPorSku $g 'sku' 'qty'
+            if ($null -eq $venta) { continue }
+            $fMax = ""
+            foreach ($fg in $g) { if ([string]$fg.fecha -gt $fMax) { $fMax = [string]$fg.fecha } }
+            $hRef = $null
+            try { $hRef = [datetime]::ParseExact($fMax, "yyyy-MM-dd HH:mm:ss", $inv) } catch { $hRef = $null }
+            $par = Buscar-PedidoParecido $venta $hRef
+            if ($par -and (-not $par.exacto)) { Avisar-DiferenciaCaja $par.p $par.pedItems $venta "borrador" ("B" + [string]$g[0].acct) }
+        }
+    } catch {}
 }
 
 # ------------------------------------------------------------------
@@ -2361,6 +2586,14 @@ function Conciliar-VentaAxis($grupo) {
             $hecho = $true
             break
         }
+    }
+
+    # 4) Nada coincide exacto: si la venta se parece a un pedido pendiente (la caja agrego o quito cosas), se avisa al vendedor.
+    if (-not $hecho) {
+        try {
+            $parecido = Buscar-PedidoParecido $venta $horaVenta
+            if ($parecido -and (-not $parecido.exacto)) { Avisar-DiferenciaCaja $parecido.p $parecido.pedItems $venta "cobro" $acct (Nombre-OperadorAxis ([string]$grupo[0].op)) }
+        } catch {}
     }
 
     Guardar-VentasAxisDia
@@ -4154,6 +4387,40 @@ function Calcular-PosVentas([int]$dias, [string]$quien) {
         pedidos = @($lista)
         hayMas = ($todos.Count -gt 200)
     }
+}
+
+# ---- Devoluciones pedidas desde el movil: la PC (caja) las confirma antes de registrarlas ----
+# El movil manda la solicitud, la PC muestra una confirmacion en su Panel y, si la aprueban, recien ahi se registra
+# (y se imprime el comprobante). El movil consulta el resultado cada 2 segundos. Si nadie responde en 3 minutos
+# la solicitud vence y NO se registra nada.
+$global:devolucionesPendientes = @{}
+$global:nextIdDevPend = 1
+
+function Limpiar-DevolucionesPendientes {
+    $limite = (Get-Date).AddMinutes(-10)
+    foreach ($k in @($global:devolucionesPendientes.Keys)) {
+        if ($global:devolucionesPendientes[$k].hora -lt $limite) { $global:devolucionesPendientes.Remove($k) }
+    }
+}
+
+function Crear-SolicitudDevolucion($d, [string]$vendedor, $pedido) {
+    Limpiar-DevolucionesPendientes
+    $lineas = New-Object System.Collections.ArrayList
+    foreach ($it in @($d.items)) {
+        $cant = 0.0; try { $cant = [double]$it.cantidad } catch { $cant = 0.0 }
+        if ($cant -le 0) { continue }
+        [void]$lineas.Add("- " + (Formato-Cantidad $cant) + " x " + [string]$it.nombre)
+    }
+    $reint = $true
+    try { if ($d.PSObject.Properties.Name -contains 'reintegrarStock') { $reint = [bool]$d.reintegrarStock } } catch { $reint = $true }
+    $mot = ([string]$d.motivo).Trim()
+    $res = $vendedor + " pide una devolucion de la venta #" + [string]$d.pedidoId + ":`n" + (@($lineas) -join "`n")
+    if ($mot) { $res += "`nMotivo: " + $mot }
+    $res += $(if ($reint) { "`nRegresa al inventario." } else { "`nNO regresa al inventario (danado)." })
+    $sol = [pscustomobject]@{ id = $global:nextIdDevPend; vendedor = $vendedor; datos = $d; hora = (Get-Date); estado = "esperando"; resultado = $null; resumen = $res }
+    $global:nextIdDevPend++
+    $global:devolucionesPendientes[[string]$sol.id] = $sol
+    return $sol
 }
 
 # Devolucion hecha desde el movil en modo punto de venta. Comprueba contra la
@@ -7059,10 +7326,20 @@ $htmlPC = @'
     setInterval(revisarAsignadosVistos, 5000);
 
     // Mensajes cortos sueltos que mandan los vendedores desde el movil (los que van con un pedido salen en su tarjeta).
+    const devPendAtendidas = {};
     async function revisarMensajesPC() {
       try {
         const r = await fetch('/api/mensajes/pc');
         const d = await r.json().catch(() => null);
+        // Devoluciones que piden los vendedores desde el movil: la PC confirma antes de registrarlas.
+        const devs = (d && d.devoluciones) || [];
+        for (const dv of devs) {
+          if (devPendAtendidas[dv.id]) continue;
+          devPendAtendidas[dv.id] = true;
+          beep();
+          const aprobar = confirm('DEVOLUCION pedida desde el movil\n\n' + dv.texto + '\n\nAceptar = APROBAR y registrar\nCancelar = RECHAZAR');
+          try { await fetch('/api/pos/devolucion/decidir', { method: 'POST', body: JSON.stringify({ id: dv.id, aprobar: aprobar }) }); } catch (e2) {}
+        }
         const lista = (d && d.mensajes) || [];
         if (!lista.length) return;
         beep();
@@ -7713,6 +7990,12 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
         <p style="font-size:12px; color:#64748b; margin-bottom:8px;">La caja te avisa si cambia un precio, se agota un producto, te anula un pedido o cambia tus permisos. Con la app abierta suena y vibra siempre.</p>
         <button class="btn btn-secundario" onclick="activarAvisosTelefono()">Activar avisos del teléfono</button>
         <div id="estadoAvisosTel" style="font-size:12px; color:#64748b; margin-top:6px;"></div>
+      </div>
+
+      <div class="section" id="secDestinoMensajes">
+        <h2>A qui&eacute;n van mis mensajes</h2>
+        <p style="font-size:12px; color:#64748b; margin-bottom:8px;">Elige qui&eacute;n recibe los mensajes cortos que mandas desde este tel&eacute;fono: solo la PC (caja), solo otro vendedor, o todos.</p>
+        <select id="selDestinoMensajes" onchange="guardarDestinoMensajes()"><option value="pc">La PC (caja)</option></select>
       </div>
 
       <div class="section" id="secRedSenal">
@@ -10836,8 +11119,36 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
       if (rb.tr > 0) partes.push('transferencia ' + dineroPOS(rb.tr));
       if (!confirm('Se devuelve al cliente: ' + (partes.join(' + ') || dineroPOS(0)) + (reintegrar ? '' : ' (sin regresar al inventario)') + '.\n\nConfirmas la devolucion?')) return;
       try {
-        const res = await fetch('/api/pos/devolucion', { method: 'POST', body: JSON.stringify({ pedidoId: p.id, pedidoHora: p.hora, items: elegidos, motivo: String(motivo).trim(), reintegrarStock: reintegrar, pin: miPin() }) });
-        const data = await res.json().catch(() => null);
+        let res = await fetch('/api/pos/devolucion', { method: 'POST', body: JSON.stringify({ pedidoId: p.id, pedidoHora: p.hora, items: elegidos, motivo: String(motivo).trim(), reintegrarStock: reintegrar, pin: miPin() }) });
+        let data = await res.json().catch(() => null);
+        if (res.ok && data && data.ok && data.pendiente) {
+          // La PC tiene que confirmar la devolucion: se espera su respuesta (hasta ~3 minutos).
+          mostrarMensaje('Esperando que la PC confirme la devolucion...', true);
+          const idSol = data.id;
+          let final = null;
+          for (let i = 0; i < 95 && !final; i++) {
+            await new Promise(r => setTimeout(r, 2000));
+            try {
+              const rs = await fetch('/api/pos/devolucion/estado?id=' + idSol);
+              const ds = await rs.json().catch(() => null);
+              if (ds && ds.ok && ds.estado && ds.estado !== 'esperando') final = ds;
+              if (ds && ds.posInactivo) { final = { estado: 'inactivo' }; }
+            } catch (e3) {}
+          }
+          if (!final || final.estado === 'vencida') {
+            alert('La PC no confirmo la devolucion a tiempo: NO se registro. Avisale a la caja y vuelve a intentarlo.');
+            cargarMisPedidos(); cargarCatalogo();
+            return;
+          }
+          if (final.estado === 'rechazada') {
+            alert('La caja NO aprobo la devolucion. No se registro nada.');
+            cargarMisPedidos(); cargarCatalogo();
+            return;
+          }
+          if (final.estado === 'inactivo') { posLimpiarLocal(); posAplicarUI(true); return; }
+          data = final.resultado || { ok: false, error: 'La PC no devolvio el resultado.' };
+          res = { ok: !!(data && data.ok) };
+        }
         if (!res.ok || !data || !data.ok) {
           alert((data && data.error) || 'No se pudo registrar la devolucion.');
           if (data && data.requierePin) abrirLogin((nombreInput.value || '').trim());
@@ -10859,7 +11170,39 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
     posAplicarUI(true);
     posVerificar();
     setInterval(posVerificar, 30000);
+    setTimeout(cargarDestinoMensajes, 1500);
+    setInterval(cargarDestinoMensajes, 60000);
 
+
+    // ---- A quien van mis mensajes (Ajustes): la PC (por defecto), todos, o un vendedor puntual ----
+    function destinoMensajesActual() { return localStorage.getItem('destinoMensajes') || 'pc'; }
+    function textoDestinoMensajes() {
+      const d = destinoMensajesActual();
+      if (d === 'pc') return 'la caja';
+      if (d === 'todos') return 'todos';
+      return d;
+    }
+    function guardarDestinoMensajes() {
+      const sel = document.getElementById('selDestinoMensajes');
+      if (!sel) return;
+      localStorage.setItem('destinoMensajes', sel.value);
+      actualizarBotonEnviar();
+    }
+    async function cargarDestinoMensajes() {
+      const sel = document.getElementById('selDestinoMensajes');
+      if (!sel || document.activeElement === sel) return;
+      let nombres = [];
+      try { const rp = await fetch('/api/pines'); nombres = ((await rp.json()) || {}).vendedoresConPin || []; } catch (e) { return; }
+      const esc = t => String(t).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+      const yo = (nombreInput.value || '').trim().toLowerCase();
+      const otros = nombres.filter(n => String(n).toLowerCase() !== yo);
+      let actual = destinoMensajesActual();
+      if (actual !== 'pc' && actual !== 'todos' && !otros.includes(actual)) { actual = 'pc'; localStorage.setItem('destinoMensajes', 'pc'); }
+      sel.innerHTML = '<option value="pc">La PC (caja)</option><option value="todos">Todos (la PC y los dem\u00E1s vendedores)</option>' +
+        otros.map(n => '<option value="' + esc(n) + '">Solo a ' + esc(n) + '</option>').join('');
+      sel.value = actual;
+      actualizarBotonEnviar();
+    }
 
     // ================= MENSAJES CORTOS A LA CAJA =================
     // La nota opcional viaja con el pedido. Sin productos en el pedido, el mismo boton de enviar
@@ -10869,7 +11212,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
       const nota = document.getElementById('notaPedido');
       if (!btn || btn.disabled) return;
       const soloMensaje = carrito.length === 0 && !!nota && nota.value.trim() !== '' && !autoservicioActivo && puede('mensajes');
-      btn.textContent = soloMensaje ? 'Enviar mensaje a la caja' : 'Enviar pedido';
+      btn.textContent = soloMensaje ? ('Enviar mensaje a ' + textoDestinoMensajes()) : 'Enviar pedido';
     }
 
     async function enviarMensajeSolo() {
@@ -10881,14 +11224,14 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
       btn.disabled = true;
       btn.textContent = 'Enviando...';
       try {
-        const res = await fetch('/api/mensajes', { method: 'POST', body: JSON.stringify({ vendedor: (nombreInput.value || '').trim(), pin: miPin(), texto: texto }) });
+        const res = await fetch('/api/mensajes', { method: 'POST', body: JSON.stringify({ vendedor: (nombreInput.value || '').trim(), pin: miPin(), texto: texto, para: destinoMensajesActual() }) });
         const data = await res.json().catch(() => null);
         if (!res.ok || !data || !data.ok) {
           mostrarMensaje((data && data.error) || 'No se pudo enviar el mensaje.', false);
           if (data && data.requierePin) abrirLogin((nombreInput.value || '').trim());
         } else {
           campo.value = '';
-          mostrarMensaje('Mensaje enviado a la caja.', true);
+          mostrarMensaje('Mensaje enviado a ' + textoDestinoMensajes() + '.', true);
         }
       } catch (e) {
         mostrarMensaje('Sin conexion con la PC: el mensaje NO se envio (sigue escrito, intentalo de nuevo).', false);
@@ -11690,6 +12033,1171 @@ function rasterEtiqueta(it) {
 '@
 $htmlEtiquetas = $htmlEtiquetas.Replace('__NEGOCIO__', [System.Net.WebUtility]::HtmlEncode([string]$global:reciboCfg.nombre))
 
+$htmlContador = @'
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>Contador de Dinero</title>
+<style>
+:root{
+  --cup:#0288d1;
+  --cup-bg:#e3f3fc;
+  --cup-line:#90cbee;
+  --usd:#0299b0;
+  --usd-bg:#e2f6f7;
+  --usd-line:#8fd6dd;
+  --transf:#7b1fa2;
+  --transf-bg:#f3e5f5;
+  --transf-line:#ce93d8;
+  --retiro:#e65100;
+  --retiro-bg:#fff3e0;
+  --retiro-line:#ffcc80;
+  --total-bg:#e8f2fb;
+  --total:#01579b;
+  --ink:#18160f;
+  --muted:#8a7f70;
+  --line:#e3edf4;
+  --bg:#f2f7fb;
+  --white:#fff;
+}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;}
+html,body{height:100%;overflow:hidden;}
+body{
+  font-family:"Inter",system-ui,-apple-system,sans-serif;
+  background:var(--bg);
+  color:var(--ink);
+  display:flex;flex-direction:column;
+  -webkit-font-smoothing:antialiased;
+}
+
+/* ── HEADER ── */
+.hdr{
+  background:#29abe2;color:#fff;
+  padding:10px 16px;
+  display:flex;align-items:center;justify-content:space-between;
+  flex-shrink:0;
+}
+.hdr-title{font-size:16px;font-weight:800;letter-spacing:-.01em;}
+.hdr-sub{font-size:10.5px;color:#ffffffd0;margin-top:2px;}
+.hdr-actions{display:flex;align-items:center;gap:10px;flex-shrink:0;}
+.icon-btn{
+  width:34px;height:34px;border-radius:50%;
+  background:#ffffff30;color:#fff;border:none;
+  font-size:16px;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;flex-shrink:0;
+}
+.icon-btn:active{background:#ffffff4a;}
+
+/* ── TABS NAVIGATION ── */
+.nav-tabs{
+  display:flex;
+  background:#fff;
+  border-bottom:2px solid var(--line);
+  flex-shrink:0;
+}
+.tab-btn{
+  flex:1;
+  padding:10px 4px;
+  border:none;
+  background:transparent;
+  font-size:13px;
+  font-weight:700;
+  color:var(--muted);
+  cursor:pointer;
+  border-bottom:3px solid transparent;
+  transition:all 0.2s ease;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  gap:6px;
+}
+.tab-btn.active{
+  color:var(--total);
+  border-bottom-color:var(--total);
+  background:var(--total-bg);
+}
+
+/* ── TAB CONTENT CONTAINERS ── */
+.tab-content{
+  display:none;
+  flex:1;
+  flex-direction:column;
+  overflow:hidden;
+}
+.tab-content.active{
+  display:flex;
+}
+
+/* ── BARS (RATE & EXPECTED & EXTRA INPUTS) ── */
+.top-bar{
+  background:var(--usd-bg);
+  border-bottom:1px solid var(--usd-line);
+  padding:8px 14px;
+  display:flex;align-items:center;gap:8px;
+  flex-shrink:0;
+}
+.rate-lbl{font-size:12px;font-weight:700;color:var(--usd);flex:1;}
+.rate-wrap{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--muted);}
+.rate-inp{
+  width:68px;padding:4px 6px;
+  border:1px solid var(--usd-line);border-radius:5px;
+  font-size:14px;font-weight:800;color:var(--usd);
+  font-family:inherit;text-align:right;background:#fff;
+}
+.rate-inp:focus{outline:none;border-color:var(--usd);}
+
+/* ── ARQUEO DE CAJA TAB STYLES ── */
+.arqueo-container{
+  padding:16px;
+  display:flex;
+  flex-direction:column;
+  gap:16px;
+  overflow-y:auto;
+}
+.card{
+  background:#fff;
+  border-radius:10px;
+  padding:14px;
+  border:1px solid var(--line);
+  box-shadow:0 1px 3px rgba(0,0,0,0.03);
+}
+.card-title{
+  font-size:13px;
+  font-weight:800;
+  margin-bottom:8px;
+  color:var(--ink);
+  display:flex;
+  align-items:center;
+  gap:6px;
+}
+.exp-inp-lg{
+  width:100%;
+  padding:8px 12px;
+  border:1px solid var(--line);
+  border-radius:6px;
+  font-size:18px;
+  font-weight:800;
+  color:var(--ink);
+  font-family:inherit;
+  text-align:right;
+  background:#fafafa;
+}
+.exp-inp-lg:focus{outline:none;border-color:var(--cup);background:#fff;}
+
+.extra-grid{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:10px;
+}
+.extra-card-item{
+  padding:10px;
+  border-radius:8px;
+  display:flex;
+  flex-direction:column;
+  gap:6px;
+}
+.extra-card-item.transf{border:1px solid var(--transf-line);background:var(--transf-bg);}
+.extra-card-item.retiro{border:1px solid var(--retiro-line);background:var(--retiro-bg);}
+
+.extra-card-lbl{font-size:11.5px;font-weight:700;}
+.extra-card-lbl.transf{color:var(--transf);}
+.extra-card-lbl.retiro{color:var(--retiro);}
+
+.extra-card-inp{
+  width:100%;padding:6px 8px;
+  border:1px solid var(--line);border-radius:5px;
+  font-size:15px;font-weight:800;
+  font-family:inherit;text-align:right;background:#fff;
+}
+.extra-card-inp.transf{color:var(--transf);border-color:var(--transf-line);}
+.extra-card-inp.retiro{color:var(--retiro);border-color:var(--retiro-line);}
+.extra-card-inp:focus{outline:none;}
+
+/* ── COLUMN HEADERS ── */
+.col-hdrs{
+  display:grid;grid-template-columns:1fr 1fr;
+  border-bottom:2px solid var(--line);
+  flex-shrink:0;
+}
+.col-hdr{
+  padding:6px 12px;
+  font-size:11.5px;font-weight:800;
+  text-transform:uppercase;letter-spacing:.05em;
+  display:flex;align-items:center;gap:5px;
+}
+.col-hdr.cup{color:var(--cup);border-right:1px solid var(--line);}
+.col-hdr.usd{color:var(--usd);}
+.col-subtag{font-size:9.5px;font-weight:600;opacity:0.8;margin-left:2px;}
+.col-total{
+  margin-left:auto;
+  font-size:12.5px;font-weight:800;letter-spacing:0;text-transform:none;
+  font-family:"Georgia",serif;
+}
+
+/* ── BILL GRID ── */
+.bills-wrap{
+  flex:1;overflow-y:auto;
+  -webkit-overflow-scrolling:touch;
+  min-height:0;
+}
+.bills-grid{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+}
+
+/* ── BILL ROW ── */
+.bill-row{
+  display:flex;align-items:center;gap:4px;
+  padding:6px 8px;
+  border-bottom:1px solid var(--line);
+  background:var(--white);
+}
+.bill-row.cup{border-right:1px solid var(--line);}
+.bill-row.usd{background:#fafdfe;}
+
+.denom{
+  font-size:16px;font-weight:800;
+  font-family:"Georgia",serif;
+  width:38px;flex-shrink:0;
+  letter-spacing:-.02em;
+}
+.denom.cup{color:var(--cup);}
+.denom.usd{color:var(--usd);}
+
+.qinp-group{
+  display:flex;align-items:center;gap:3px;
+  flex:1;min-width:0;
+}
+.qinp{
+  width:50%;min-width:0;
+  text-align:center;
+  border:none;border-bottom:2px solid var(--line);
+  padding:2px 0 3px;
+  font-size:15px;font-weight:800;
+  font-family:inherit;background:transparent;
+}
+.qinp::placeholder{font-size:10.5px;font-weight:700;color:#aaa;}
+.qinp:focus{outline:none;}
+.cup .qinp{border-color:var(--cup-line);}
+.usd .qinp{border-color:var(--usd-line);}
+.cup .qinp:focus{border-color:var(--cup);}
+.usd .qinp:focus{border-color:var(--usd);}
+
+.sub{
+  font-size:14px;font-weight:800;
+  font-family:"Georgia",serif;
+  width:50px;flex-shrink:0;
+  text-align:right;
+  letter-spacing:-.01em;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.sub.cup{color:var(--cup);}
+.sub.usd{color:var(--usd);}
+
+/* ── FILLER for uneven rows ── */
+.bill-filler{
+  border-bottom:1px solid var(--line);
+  background:var(--white);
+}
+
+/* ── FOOTER ── */
+.footer{
+  background:var(--white);
+  border-top:2px solid var(--line);
+  padding:10px 14px 14px;
+  flex-shrink:0;
+}
+.totals-row{
+  display:grid;grid-template-columns:1fr 1fr;
+  gap:10px;margin-bottom:8px;
+}
+.tot-box{
+  border-radius:8px;padding:7px 10px;
+}
+.tot-box.cup{background:var(--cup-bg);border:1px solid var(--cup-line);}
+.tot-box.usd{background:var(--usd-bg);border:1px solid var(--usd-line);}
+.tot-lbl{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;margin-bottom:2px;}
+.tot-lbl.cup{color:var(--cup);}
+.tot-lbl.usd{color:var(--usd);}
+.tot-val{font-size:19px;font-weight:800;font-family:"Georgia",serif;letter-spacing:-.02em;}
+.tot-val.cup{color:var(--cup);}
+.tot-val.usd{color:var(--usd);}
+
+.grand-row{
+  background:var(--total-bg);
+  border:1px solid #b8dcf2;
+  border-radius:8px;
+  padding:8px 12px;
+  display:flex;align-items:center;justify-content:space-between;
+  gap:8px;
+}
+.grand-lbl{font-size:11.5px;font-weight:800;color:var(--total);text-transform:uppercase;letter-spacing:.05em;}
+.grand-val{font-size:24px;font-weight:800;font-family:"Georgia",serif;color:var(--total);letter-spacing:-.02em;white-space:nowrap;}
+.grand-conv{font-size:10px;color:var(--muted);margin-top:2px;}
+
+/* ── STATUS SOBRANTE / FALTANTE ── */
+.diff-box{
+  margin-top:8px;
+  padding:10px 14px;
+  border-radius:8px;
+  display:flex;align-items:center;justify-content:space-between;
+  font-weight:800;font-size:15px;
+  transition:all 0.2s ease;
+}
+.diff-box.sobrante{background-color:#e8f5e9;color:#2e7d32;border:1px solid #a5d6a7;}
+.diff-box.faltante{background-color:#ffebee;color:#c62828;border:1px solid #ef9a9a;}
+.diff-box.exacto{background-color:#e0f2fe;color:#0288d1;border:1px solid #b3e5fc;}
+.diff-box.hidden{display:none;}
+
+/* ── HISTORIAL TAB ── */
+.hist-container{
+  padding:14px;
+  display:flex;
+  flex-direction:column;
+  gap:10px;
+  overflow-y:auto;
+  -webkit-overflow-scrolling:touch;
+}
+.hist-empty{
+  text-align:center;
+  color:var(--muted);
+  font-size:13px;
+  padding:40px 20px;
+  line-height:1.5;
+}
+.hist-toolbar{
+  display:flex;align-items:center;justify-content:space-between;
+  flex-shrink:0;
+}
+.hist-count{font-size:12px;color:var(--muted);font-weight:700;}
+.hist-clear-btn{
+  background:#ffebee;color:#c62828;border:1px solid #ef9a9a;
+  border-radius:7px;padding:6px 10px;
+  font-size:11.5px;font-weight:800;
+  font-family:inherit;cursor:pointer;
+}
+.hist-card{
+  background:#fff;
+  border-radius:10px;
+  padding:12px 14px;
+  border:1px solid var(--line);
+  box-shadow:0 1px 3px rgba(0,0,0,0.03);
+  position:relative;
+}
+.hist-card.sobrante{border-left:4px solid #2e7d32;}
+.hist-card.faltante{border-left:4px solid #c62828;}
+.hist-card.exacto{border-left:4px solid #0288d1;}
+.hist-top{
+  display:flex;align-items:flex-start;justify-content:space-between;
+  margin-bottom:8px;
+}
+.hist-datetime{display:flex;flex-direction:column;gap:1px;}
+.hist-date{font-size:13px;font-weight:800;color:var(--ink);}
+.hist-time{font-size:11px;color:var(--muted);font-weight:600;}
+.hist-badge{
+  font-size:11px;font-weight:800;
+  padding:4px 9px;border-radius:20px;
+  white-space:nowrap;flex-shrink:0;
+}
+.hist-badge.sobrante{background:#e8f5e9;color:#2e7d32;}
+.hist-badge.faltante{background:#ffebee;color:#c62828;}
+.hist-badge.exacto{background:#e0f2fe;color:#0288d1;}
+.hist-diff{
+  font-size:21px;font-weight:800;
+  font-family:"Georgia",serif;
+  margin-bottom:8px;
+}
+.hist-diff.sobrante{color:#2e7d32;}
+.hist-diff.faltante{color:#c62828;}
+.hist-diff.exacto{color:#0288d1;}
+.hist-rows{
+  display:flex;flex-direction:column;gap:4px;
+  border-top:1px solid var(--line);
+  padding-top:8px;
+}
+.hist-row{
+  display:flex;align-items:center;justify-content:space-between;
+  font-size:12px;
+}
+.hist-row .lbl{color:var(--muted);font-weight:600;}
+.hist-row .val{font-weight:800;color:var(--ink);}
+.hist-del-btn{
+  position:absolute;top:10px;right:10px;
+  width:26px;height:26px;border-radius:50%;
+  border:none;background:#f2f2f2;color:#999;
+  font-size:13px;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;
+}
+.hist-del-btn:active{background:#e0e0e0;}
+.axis-row{display:flex;gap:8px;margin-bottom:8px;}
+.axis-sel{flex:1;min-width:0;padding:9px 10px;border:1px solid var(--line);border-radius:6px;font-size:14px;font-family:inherit;background:#fafafa;color:var(--ink);}
+.axis-btn{flex:1;padding:10px;border:none;border-radius:8px;background:var(--transf);color:#fff;font-size:13px;font-weight:800;font-family:inherit;cursor:pointer;}
+.axis-btn.sec{background:#e9eef3;color:var(--ink);flex:0 0 auto;}
+.axis-btn:active{opacity:.85;}
+.axis-info{font-size:12px;color:var(--muted);line-height:1.5;white-space:pre-line;}
+.save-hist-btn{
+  margin-top:8px;
+  width:100%;
+  padding:11px;
+  border:none;border-radius:8px;
+  background:var(--total);color:#fff;
+  font-size:14px;font-weight:800;
+  font-family:inherit;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;gap:6px;
+}
+.save-hist-btn:active{opacity:0.85;}
+.save-hist-toast{
+  position:fixed;left:50%;bottom:90px;transform:translateX(-50%) translateY(20px);
+  background:#18160f;color:#fff;
+  padding:9px 18px;border-radius:20px;
+  font-size:12.5px;font-weight:700;
+  opacity:0;pointer-events:none;
+  transition:all 0.25s ease;
+  z-index:100;
+  white-space:nowrap;
+}
+.save-hist-toast.show{opacity:1;transform:translateX(-50%) translateY(0);}
+
+/* ── SETTINGS OVERLAY ── */
+.settings-overlay{
+  position:fixed;inset:0;
+  background:var(--bg);
+  z-index:50;
+  display:none;flex-direction:column;
+}
+.settings-overlay.open{display:flex;}
+.settings-hdr{
+  background:#29abe2;color:#fff;
+  padding:14px 16px;
+  display:flex;align-items:center;gap:12px;
+  flex-shrink:0;
+}
+.settings-back{
+  background:none;border:none;color:#fff;
+  font-size:22px;line-height:1;cursor:pointer;
+  width:32px;height:32px;
+  display:flex;align-items:center;justify-content:center;flex-shrink:0;
+}
+.settings-title{font-size:18px;font-weight:800;}
+.settings-body{
+  flex:1;overflow-y:auto;
+  -webkit-overflow-scrolling:touch;
+  padding:20px 16px 32px;
+}
+.settings-hint{font-size:12px;color:var(--muted);margin-bottom:14px;line-height:1.4;}
+.denom-card{
+  background:var(--white);
+  border-radius:12px;
+  padding:18px 14px;
+  box-shadow:0 1px 4px rgba(0,0,0,.06);
+}
+.denom-grid{
+  display:grid;
+  grid-template-columns:repeat(3,1fr);
+  row-gap:28px;column-gap:8px;
+}
+.denom-item{
+  display:flex;align-items:center;gap:8px;
+  font-size:20px;font-weight:800;
+  font-family:"Georgia",serif;
+  color:var(--cup);
+  cursor:pointer;
+}
+.denom-check{
+  width:26px;height:26px;flex-shrink:0;
+  accent-color:var(--cup);
+}
+</style>
+</head>
+<body>
+
+<div class="hdr">
+  <div>
+    <div class="hdr-title">💵 Contador de Dinero</div>
+    <div class="hdr-sub">CUP · USD · Transferencias · Retiros · Caja</div>
+  </div>
+  <div class="hdr-actions">
+    <button class="icon-btn" onclick="openSettings()" title="Ajustes">⚙️</button>
+    <button class="icon-btn" onclick="clearAll()" title="Limpiar todo">🧹</button>
+  </div>
+</div>
+
+<!-- NAVEGACIÓN POR PESTAÑAS -->
+<div class="nav-tabs">
+  <button class="tab-btn active" id="btn-tab-contador" onclick="switchTab('contador')">💵 Contador</button>
+  <button class="tab-btn" id="btn-tab-arqueo" onclick="switchTab('arqueo')">🎯 Arqueo y Cuadre</button>
+  <button class="tab-btn" id="btn-tab-historial" onclick="switchTab('historial')">📋 Historial</button>
+</div>
+
+<!-- PESTAÑA 1: CONTADOR DE BILLETES -->
+<div class="tab-content active" id="tab-contador">
+  <div class="top-bar">
+    <div class="rate-lbl">💱 Tasa de cambio</div>
+    <div class="rate-wrap">
+      <span>1 USD =</span>
+      <input type="number" class="rate-inp" id="rate" value="670" min="1">
+      <span>CUP</span>
+    </div>
+  </div>
+
+  <div class="col-hdrs">
+    <div class="col-hdr cup">🇨🇺 CUP <span class="col-subtag">(S / F)</span> <span class="col-total" id="hdr-cup">0</span></div>
+    <div class="col-hdr usd">🇺🇸 USD <span class="col-subtag">(S / F)</span> <span class="col-total" id="hdr-usd">$0</span></div>
+  </div>
+
+  <div class="bills-wrap">
+    <div class="bills-grid" id="bills-grid"></div>
+  </div>
+</div>
+
+<!-- PESTAÑA 2: ARQUEO DE CAJA (VENTA ESPERADA, TRANSFERENCIAS Y RETIROS) -->
+<div class="tab-content" id="tab-arqueo">
+  <div class="arqueo-container">
+    <div class="card" id="axis-card">
+      <div class="card-title">🔌 Traer de AxisPOS</div>
+      <div class="axis-row">
+        <select class="axis-sel" id="axis-user" onchange="localStorage.setItem('cd_axis_user',this.value)"><option value="todos">Todos los usuarios</option></select>
+        <input type="date" class="axis-sel" id="axis-date">
+      </div>
+      <div class="axis-row">
+        <button class="axis-btn" onclick="traerDeAxis()">Traer ventas del día</button>
+        <button class="axis-btn sec" onclick="cambiarServidor()">📡 Servidor</button>
+      </div>
+      <div class="axis-info" id="axis-info">Servidor: sin configurar</div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">🎯 Venta / Caja Esperada (CUP)</div>
+      <input type="number" class="exp-inp-lg" id="expected" placeholder="0" min="0" oninput="update()">
+    </div>
+
+    <div class="extra-grid">
+      <div class="extra-card-item transf">
+        <span class="extra-card-lbl transf">💳 Transf. (CUP)</span>
+        <input type="number" class="extra-card-inp transf" id="transfers" placeholder="0" min="0" oninput="update()">
+      </div>
+      <div class="extra-card-item retiro">
+        <span class="extra-card-lbl retiro">💸 Retirado (CUP)</span>
+        <input type="number" class="extra-card-inp retiro" id="withdrawals" placeholder="0" min="0" oninput="update()">
+      </div>
+    </div>
+
+    <!-- Recuadro dinámico para Sobrante / Faltante dentro de la pestaña de Arqueo -->
+    <div class="diff-box hidden" id="diff-box">
+      <span id="diff-lbl">Estado</span>
+      <span id="diff-val">0.00</span>
+    </div>
+
+    <button class="save-hist-btn" onclick="saveToHistory()">💾 Guardar Arqueo en Historial</button>
+  </div>
+</div>
+
+<!-- PESTAÑA 3: HISTORIAL DE ARQUEOS -->
+<div class="tab-content" id="tab-historial">
+  <div class="hist-container" id="hist-container">
+    <!-- Se rellena dinámicamente por JS -->
+  </div>
+</div>
+
+<div class="save-hist-toast" id="save-hist-toast">✅ Arqueo guardado en el historial</div>
+
+<!-- PIE DE PÁGINA PERMANENTE CON TOTALES -->
+<div class="footer">
+  <div class="totals-row">
+    <div class="tot-box cup">
+      <div class="tot-lbl cup">Efectivo CUP</div>
+      <div class="tot-val cup" id="tot-cup">0.00</div>
+    </div>
+    <div class="tot-box usd">
+      <div class="tot-lbl usd">Efectivo USD</div>
+      <div class="tot-val usd" id="tot-usd">$0.00</div>
+    </div>
+  </div>
+  <div class="grand-row">
+    <div>
+      <div class="grand-lbl">Total General (CUP)</div>
+      <div class="grand-conv" id="grand-conv">Efectivo + USD + Transf. + Retiros</div>
+    </div>
+    <div class="grand-val" id="grand-val">0.00</div>
+  </div>
+</div>
+
+<!-- ── PANTALLA DE AJUSTES ── -->
+<div class="settings-overlay" id="settings-overlay">
+  <div class="settings-hdr">
+    <button class="settings-back" onclick="closeSettings()">←</button>
+    <div class="settings-title">Ajustes</div>
+  </div>
+  <div class="settings-body">
+    <div class="settings-hint">Elige qué denominaciones de CUP quieres ver en el contador.</div>
+    <div class="denom-card">
+      <div class="denom-grid" id="denom-grid"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const ALL_CUP = [20000,10000,5000,2000,1000,500,200,100,50,20,10,5,3,1];
+const USD = [100,50,20,10,5,2,1];
+
+// Cantidades almacenadas: S (Sueltos) y F (Fajos)
+const qtyS = {};
+const qtyF = {};
+let CUP = [];
+
+function fmtD(d){ return d>=1?String(d):d.toFixed(2); }
+function fmt(n,d=2){ return n.toLocaleString('es-CU',{minimumFractionDigits:d,maximumFractionDigits:d}); }
+function getRate(){ return parseFloat(document.getElementById('rate').value)||670; }
+
+/* ── Cambio de Pestañas ── */
+function switchTab(tabName){
+  document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
+  
+  if(tabName === 'contador'){
+    document.getElementById('btn-tab-contador').classList.add('active');
+    document.getElementById('tab-contador').classList.add('active');
+  } else if(tabName === 'arqueo'){
+    document.getElementById('btn-tab-arqueo').classList.add('active');
+    document.getElementById('tab-arqueo').classList.add('active');
+    cargarUsuariosAxis(true);
+  } else if(tabName === 'historial'){
+    document.getElementById('btn-tab-historial').classList.add('active');
+    document.getElementById('tab-historial').classList.add('active');
+    renderHistory();
+  }
+}
+
+/* ── Persistencia de denominaciones habilitadas ── */
+function loadEnabledCup(){
+  try{
+    const saved = JSON.parse(localStorage.getItem('cd_cup_denoms'));
+    if(Array.isArray(saved) && saved.length){
+      const lista = saved.filter(d=>ALL_CUP.includes(d));
+      // Una sola vez: activa el billete de 20.000 para quien ya tenía sus denominaciones guardadas (se puede quitar en Ajustes).
+      if(!localStorage.getItem('cd_20000_ok')){
+        localStorage.setItem('cd_20000_ok','1');
+        if(!lista.includes(20000)){ lista.unshift(20000); localStorage.setItem('cd_cup_denoms', JSON.stringify(lista)); }
+      }
+      return lista;
+    }
+  }catch(e){}
+  localStorage.setItem('cd_20000_ok','1');
+  return [20000,1000,500,200,100,50,20,10,5,3,1];
+}
+function saveEnabledCup(list){
+  localStorage.setItem('cd_cup_denoms', JSON.stringify(list));
+}
+
+let enabledCup = loadEnabledCup();
+
+[...ALL_CUP.map(d=>'c'+d), ...USD.map(d=>'u'+d)].forEach(k=>{
+  qtyS[k]=0;
+  qtyF[k]=0;
+});
+
+/* ── Construir grid principal ── */
+function renderGrid(){
+  CUP = ALL_CUP.filter(d=>enabledCup.includes(d));
+  const grid = document.getElementById('bills-grid');
+  grid.innerHTML='';
+  const maxRows = Math.max(CUP.length, USD.length);
+
+  for(let i=0;i<maxRows;i++){
+    if(i<CUP.length){
+      const d=CUP[i], k='c'+d;
+      const cell=document.createElement('div');
+      cell.className='bill-row cup';
+      cell.innerHTML=`
+        <span class="denom cup">${fmtD(d)}</span>
+        <div class="qinp-group">
+          <input class="qinp" id="inp_s_${k}" type="number" min="0" inputmode="numeric" placeholder="S" value="${qtyS[k]||''}" onfocus="this.select()" oninput="sq('${k}','s',this.value)">
+          <input class="qinp" id="inp_f_${k}" type="number" min="0" inputmode="numeric" placeholder="F" value="${qtyF[k]||''}" onfocus="this.select()" oninput="sq('${k}','f',this.value)">
+        </div>
+        <span class="sub cup" id="sub_${k}">0</span>`;
+      grid.appendChild(cell);
+    } else {
+      const fill=document.createElement('div');
+      fill.className='bill-filler cup';
+      grid.appendChild(fill);
+    }
+    if(i<USD.length){
+      const d=USD[i], k='u'+d;
+      const cell=document.createElement('div');
+      cell.className='bill-row usd';
+      cell.innerHTML=`
+        <span class="denom usd">$${fmtD(d)}</span>
+        <div class="qinp-group">
+          <input class="qinp" id="inp_s_${k}" type="number" min="0" inputmode="numeric" placeholder="S" value="${qtyS[k]||''}" onfocus="this.select()" oninput="sq('${k}','s',this.value)">
+          <input class="qinp" id="inp_f_${k}" type="number" min="0" inputmode="numeric" placeholder="F" value="${qtyF[k]||''}" onfocus="this.select()" oninput="sq('${k}','f',this.value)">
+        </div>
+        <span class="sub usd" id="sub_${k}">$0</span>`;
+      grid.appendChild(cell);
+    } else {
+      const fill=document.createElement('div');
+      fill.className='bill-filler';
+      grid.appendChild(fill);
+    }
+  }
+  update();
+}
+
+function sq(k,type,v){
+  const val = Math.max(0, parseInt(v)||0);
+  if(type==='s') qtyS[k] = val;
+  if(type==='f') qtyF[k] = val;
+  update();
+}
+
+function update(){
+  const rate=getRate();
+  let cupTotal=0, usdTotal=0;
+
+  CUP.forEach(d=>{
+    const k='c'+d;
+    const totalBilletes = (qtyS[k]||0) + ((qtyF[k]||0)*100);
+    const s = totalBilletes * d;
+    cupTotal += s;
+    const el=document.getElementById('sub_'+k);
+    if(el) el.textContent=fmt(s,0);
+  });
+
+  USD.forEach(d=>{
+    const k='u'+d;
+    const totalBilletes = (qtyS[k]||0) + ((qtyF[k]||0)*100);
+    const s = totalBilletes * d;
+    usdTotal += s;
+    const el=document.getElementById('sub_'+k);
+    if(el) el.textContent='$'+fmt(s,0);
+  });
+
+  const transfers = parseFloat(document.getElementById('transfers').value) || 0;
+  const withdrawals = parseFloat(document.getElementById('withdrawals').value) || 0;
+
+  const usdInCup=usdTotal*rate;
+  const grand=cupTotal + usdInCup + transfers + withdrawals;
+
+  document.getElementById('hdr-cup').textContent=fmt(cupTotal,0);
+  document.getElementById('hdr-usd').textContent='$'+fmt(usdTotal,0);
+  document.getElementById('tot-cup').textContent=fmt(cupTotal);
+  document.getElementById('tot-usd').textContent='$'+fmt(usdTotal);
+  document.getElementById('grand-val').textContent=fmt(grand);
+
+  let convText = fmt(cupTotal) + ' (Efect. CUP) + ' + fmt(usdInCup) + ' (USD)';
+  if(transfers > 0) convText += ' + ' + fmt(transfers) + ' (Transf.)';
+  if(withdrawals > 0) convText += ' + ' + fmt(withdrawals) + ' (Retirado)';
+  document.getElementById('grand-conv').textContent = convText;
+
+  /* ── Cálculo de Faltante / Sobrante ── */
+  const expVal = parseFloat(document.getElementById('expected').value) || 0;
+  const diffBox = document.getElementById('diff-box');
+  const diffLbl = document.getElementById('diff-lbl');
+  const diffVal = document.getElementById('diff-val');
+
+  if(expVal > 0){
+    diffBox.classList.remove('hidden', 'sobrante', 'faltante', 'exacto');
+    const diff = grand - expVal;
+    if(diff > 0.001){
+      diffBox.classList.add('sobrante');
+      diffLbl.textContent = '🟢 Sobrante:';
+      diffVal.textContent = '+' + fmt(diff);
+    } else if(diff < -0.001){
+      diffBox.classList.add('faltante');
+      diffLbl.textContent = '🔴 Faltante:';
+      diffVal.textContent = '-' + fmt(Math.abs(diff));
+    } else {
+      diffBox.classList.add('exacto');
+      diffLbl.textContent = '🔵 Caja Exacta:';
+      diffVal.textContent = fmt(0);
+    }
+  } else {
+    diffBox.classList.add('hidden');
+  }
+
+  /* Guarda los últimos valores calculados para usarlos al guardar en el historial */
+  lastCalc = {
+    cupTotal, usdTotal, usdInCup, transfers, withdrawals, grand, expVal
+  };
+}
+
+/* ── HISTORIAL DE ARQUEOS ── */
+let lastCalc = {cupTotal:0, usdTotal:0, usdInCup:0, transfers:0, withdrawals:0, grand:0, expVal:0};
+const HIST_KEY = 'cd_historial_arqueos';
+
+function loadHistory(){
+  try{
+    const saved = JSON.parse(localStorage.getItem(HIST_KEY));
+    if(Array.isArray(saved)) return saved;
+  }catch(e){}
+  return [];
+}
+function saveHistoryList(list){
+  localStorage.setItem(HIST_KEY, JSON.stringify(list));
+}
+
+function saveToHistory(){
+  const expVal = lastCalc.expVal;
+  if(!expVal || expVal <= 0){
+    alert('Ingresa primero la Venta / Caja Esperada en la pestaña "Arqueo y Cuadre" antes de guardar.');
+    switchTab('arqueo');
+    return;
+  }
+  const diff = lastCalc.grand - expVal;
+  let status;
+  if(diff > 0.001) status='sobrante';
+  else if(diff < -0.001) status='faltante';
+  else status='exacto';
+
+  const entry = {
+    id: Date.now(),
+    ts: new Date().toISOString(),
+    rate: getRate(),
+    cupTotal: lastCalc.cupTotal,
+    usdTotal: lastCalc.usdTotal,
+    usdInCup: lastCalc.usdInCup,
+    transfers: lastCalc.transfers,
+    withdrawals: lastCalc.withdrawals,
+    counted: lastCalc.grand,
+    expected: expVal,
+    diff: diff,
+    status: status
+  };
+
+  const list = loadHistory();
+  list.unshift(entry);
+  saveHistoryList(list);
+
+  const toast = document.getElementById('save-hist-toast');
+  toast.classList.add('show');
+  setTimeout(()=>toast.classList.remove('show'), 1800);
+}
+
+function fmtFechaHora(iso){
+  const d = new Date(iso);
+  const fecha = d.toLocaleDateString('es-CU',{day:'2-digit',month:'2-digit',year:'numeric'});
+  const hora = d.toLocaleTimeString('es-CU',{hour:'2-digit',minute:'2-digit',hour12:true});
+  return {fecha, hora};
+}
+
+function statusLabel(status){
+  if(status==='sobrante') return '🟢 Sobrante';
+  if(status==='faltante') return '🔴 Faltante';
+  return '🔵 Exacto';
+}
+
+function renderHistory(){
+  const cont = document.getElementById('hist-container');
+  const list = loadHistory();
+
+  if(list.length === 0){
+    cont.innerHTML = `<div class="hist-empty">📋 Aún no hay arqueos guardados.<br>Ve a "Arqueo y Cuadre" y presiona "Guardar Arqueo en Historial" para registrar el primero.</div>`;
+    return;
+  }
+
+  let html = `
+    <div class="hist-toolbar">
+      <span class="hist-count">${list.length} registro${list.length===1?'':'s'}</span>
+      <button class="hist-clear-btn" onclick="clearHistory()">🗑️ Borrar historial</button>
+    </div>`;
+
+  list.forEach(entry=>{
+    const {fecha, hora} = fmtFechaHora(entry.ts);
+    const diffSign = entry.diff > 0.001 ? '+' : (entry.diff < -0.001 ? '-' : '');
+    const diffAbs = Math.abs(entry.diff);
+    html += `
+      <div class="hist-card ${entry.status}">
+        <button class="hist-del-btn" onclick="deleteHistoryEntry(${entry.id})" title="Eliminar">✕</button>
+        <div class="hist-top">
+          <div class="hist-datetime">
+            <span class="hist-date">📅 ${fecha}</span>
+            <span class="hist-time">🕒 ${hora}</span>
+          </div>
+          <span class="hist-badge ${entry.status}">${statusLabel(entry.status)}</span>
+        </div>
+        <div class="hist-diff ${entry.status}">${diffSign}${fmt(diffAbs)} CUP</div>
+        <div class="hist-rows">
+          <div class="hist-row"><span class="lbl">Contado (Total)</span><span class="val">${fmt(entry.counted)} CUP</span></div>
+          <div class="hist-row"><span class="lbl">Esperado (Caja)</span><span class="val">${fmt(entry.expected)} CUP</span></div>
+          <div class="hist-row"><span class="lbl">Efectivo CUP</span><span class="val">${fmt(entry.cupTotal)}</span></div>
+          <div class="hist-row"><span class="lbl">Efectivo USD</span><span class="val">$${fmt(entry.usdTotal)} (${fmt(entry.usdInCup)} CUP · tasa ${entry.rate})</span></div>
+          ${entry.transfers > 0 ? `<div class="hist-row"><span class="lbl">Transferencias</span><span class="val">${fmt(entry.transfers)}</span></div>` : ''}
+          ${entry.withdrawals > 0 ? `<div class="hist-row"><span class="lbl">Retirado</span><span class="val">${fmt(entry.withdrawals)}</span></div>` : ''}
+        </div>
+      </div>`;
+  });
+
+  cont.innerHTML = html;
+}
+
+function deleteHistoryEntry(id){
+  if(!confirm('¿Eliminar este registro del historial?')) return;
+  let list = loadHistory();
+  list = list.filter(e=>e.id !== id);
+  saveHistoryList(list);
+  renderHistory();
+}
+
+function clearHistory(){
+  if(!confirm('¿Borrar todo el historial de arqueos? Esta acción no se puede deshacer.')) return;
+  saveHistoryList([]);
+  renderHistory();
+}
+
+function clearAll(){
+  Object.keys(qtyS).forEach(k=>{
+    qtyS[k]=0;
+    qtyF[k]=0;
+    const elS=document.getElementById('inp_s_'+k);
+    const elF=document.getElementById('inp_f_'+k);
+    if(elS) elS.value='';
+    if(elF) elF.value='';
+  });
+  document.getElementById('expected').value = '';
+  document.getElementById('transfers').value = '';
+  document.getElementById('withdrawals').value = '';
+  update();
+}
+
+/* ── Pantalla de Ajustes ── */
+function buildSettings(){
+  const g = document.getElementById('denom-grid');
+  g.innerHTML='';
+  ALL_CUP.forEach(d=>{
+    const id='chk_'+d;
+    const label=document.createElement('label');
+    label.className='denom-item';
+    label.setAttribute('for',id);
+    label.innerHTML=`<input type="checkbox" class="denom-check" id="${id}" ${enabledCup.includes(d)?'checked':''} onchange="toggleDenom(${d},this.checked)"><span>${fmtD(d)}</span>`;
+    g.appendChild(label);
+  });
+}
+
+function toggleDenom(d,checked){
+  if(checked){
+    if(!enabledCup.includes(d)) enabledCup.push(d);
+  } else {
+    if(enabledCup.length>1) enabledCup=enabledCup.filter(x=>x!==d);
+    else {
+      document.getElementById('chk_'+d).checked=true;
+      return;
+    }
+  }
+  enabledCup.sort((a,b)=>b-a);
+  saveEnabledCup(enabledCup);
+  renderGrid();
+}
+
+function openSettings(){
+  buildSettings();
+  document.getElementById('settings-overlay').classList.add('open');
+}
+function closeSettings(){
+  document.getElementById('settings-overlay').classList.remove('open');
+}
+
+document.getElementById('rate').addEventListener('input',update);
+renderGrid();
+/* ── AxisPOS: ventas del día por usuario, a través del servidor de pedidos ── */
+// Si la página se abre desde el propio servidor (http://IP:8080/contador) no hace falta dirección; en la app del móvil se guarda con "📡 Servidor".
+const SERVIDOR_PROPIO = (location.protocol === 'http:' || location.protocol === 'https:') && location.port !== '';
+function axisBase(){ return SERVIDOR_PROPIO ? '' : (localStorage.getItem('cd_servidor')||'').trim(); }
+function axisTieneServidor(){ return SERVIDOR_PROPIO || !!axisBase(); }
+function normalizarServidor(txt){
+  let d = String(txt||'').trim();
+  if(!d) return '';
+  if(!/^https?:\/\//i.test(d)) d = 'http://' + d;
+  d = d.replace(/\/+$/,'');
+  if(!/:\d+$/.test(d.replace(/^https?:\/\//i,''))) d += ':8080';
+  return d;
+}
+function hoyLocal(){
+  const d = new Date();
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+}
+function escHtml(t){ return String(t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function pintarServidor(extra){
+  const el = document.getElementById('axis-info');
+  if(!el) return;
+  const srv = SERVIDOR_PROPIO ? 'este servidor' : (axisBase() ? axisBase().replace(/^https?:\/\//i,'') : 'sin configurar');
+  el.textContent = 'Servidor: ' + srv + (extra ? '\n' + extra : '');
+}
+function cambiarServidor(){
+  if(SERVIDOR_PROPIO){ alert('Esta página ya está abierta desde el servidor; no hace falta dirección.'); return; }
+  const actual = axisBase().replace(/^https?:\/\//i,'');
+  const r = prompt('Dirección del servidor de pedidos (la que muestra la PC, por ejemplo 192.168.1.10:8080).\nDéjala vacía para desconectar:', actual);
+  if(r === null) return;
+  const nueva = normalizarServidor(r);
+  if(nueva){ localStorage.setItem('cd_servidor', nueva); srv_recordarServidor(nueva); } else localStorage.removeItem('cd_servidor');
+  pintarServidor();
+  if(nueva) cargarUsuariosAxis(false);
+}
+
+// ---- Buscar el servidor solo, cuando cambió el punto de acceso y la IP guardada ya no responde ----
+// Prueba primero las direcciones que ya funcionaron antes, luego la red en la que está este teléfono y los rangos
+// más comunes de punto de acceso. Lo que encuentra lo recuerda para la próxima vez.
+const srv_MEM = 'cd_servidor_mem';
+function srv_prefijoDe(ip) { const m = /^(\d+\.\d+\.\d+)\.\d+$/.exec(String(ip || '')); return m ? m[1] : null; }
+function srv_leerMem() { try { return JSON.parse(localStorage.getItem(srv_MEM) || '{}') || {}; } catch(e) { return {}; } }
+function srv_recordarServidor(base) {
+    try {
+        const m = /^https?:\/\/(\d+\.\d+\.\d+)\.(\d+)(?::\d+)?$/i.exec(String(base || ''));
+        if(!m) return;
+        const mem = srv_leerMem();
+        mem[m[1]] = m[2];
+        localStorage.setItem(srv_MEM, JSON.stringify(mem));
+    } catch(e) {}
+}
+async function srv_probarServidor(base, ms) {
+    const ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+    const t = ctrl ? setTimeout(() => ctrl.abort(), ms) : null;
+    try {
+        const r = await fetch(base + '/api/ping', { cache: 'no-store', signal: ctrl ? ctrl.signal : undefined });
+        const d = await r.json();
+        return !!(d && d.app === 'toto-pedidos');
+    } catch(e) { return false; } finally { if(t) clearTimeout(t); }
+}
+function srv_ipsLocales() {
+    return new Promise(resolve => {
+        const ips = new Set();
+        let pc = null, listo = false;
+        function fin() { if(listo) return; listo = true; try { if(pc) pc.close(); } catch(e) {} resolve(Array.from(ips)); }
+        try { pc = new RTCPeerConnection({ iceServers: [] }); } catch(e) { resolve([]); return; }
+        try {
+            pc.createDataChannel('x');
+            pc.onicecandidate = ev => {
+                if(!ev || !ev.candidate) { fin(); return; }
+                const m = /(\d+\.\d+\.\d+\.\d+)/.exec(ev.candidate.candidate || '');
+                if(m && !/^(0\.|127\.|169\.254\.)/.test(m[1])) ips.add(m[1]);
+            };
+            pc.createOffer().then(o => pc.setLocalDescription(o)).catch(fin);
+        } catch(e) { fin(); }
+        setTimeout(fin, 1500);
+    });
+}
+async function srv_escanearPrefijo(prefijo, puerto) {
+    let encontrado = null, i = 1;
+    async function trabajador() {
+        while(!encontrado && i <= 254) {
+            const h = i++;
+            const base = 'http://' + prefijo + '.' + h + ':' + puerto;
+            if(await srv_probarServidor(base, 700)) { encontrado = base; }
+        }
+    }
+    await Promise.all(Array.from({ length: 40 }, trabajador));
+    return encontrado;
+}
+// Devuelve la dirección encontrada (por ejemplo http://192.168.43.5:8080) o '' si no apareció.
+async function srv_buscarServidorEnRed(direccionActual, avance) {
+    const mp = /:(\d+)$/.exec(String(direccionActual || '').replace(/^https?:\/\//i, ''));
+    const puerto = mp ? mp[1] : '8080';
+    const limite = Date.now() + 45000;
+    const mem = srv_leerMem();
+    // 1) direcciones completas que ya funcionaron antes (en cada red)
+    const directas = Object.keys(mem).map(p => 'http://' + p + '.' + mem[p] + ':' + puerto);
+    const rd = await Promise.all(directas.map(b => srv_probarServidor(b, 1200).then(ok => ok ? b : null)));
+    const dir = rd.find(x => x);
+    if(dir) return dir;
+    // 2) rangos: el de esta red (si el teléfono lo deja ver), los recordados y los más comunes
+    const prefijos = [];
+    function agregar(p) { if(p && !prefijos.includes(p)) prefijos.push(p); }
+    (await srv_ipsLocales()).forEach(ip => agregar(srv_prefijoDe(ip)));
+    agregar(srv_prefijoDe(String(direccionActual || '').replace(/^https?:\/\//i, '').split(':')[0]));
+    Object.keys(mem).forEach(agregar);
+    ['192.168.43', '192.168.137', '192.168.0', '192.168.1', '192.168.2', '172.20.10', '192.168.42', '10.0.0', '192.168.100'].forEach(agregar);
+    for(const p of prefijos) {
+        if(Date.now() > limite) break;
+        if(avance) avance('Buscando el servidor en ' + p + '.x ...');
+        const b = await srv_escanearPrefijo(p, puerto);
+        if(b) return b;
+    }
+    return '';
+}
+
+async function axisFetch(ruta, reintento, buscado){
+  const h = {};
+  const clave = localStorage.getItem('cd_clave_caja');
+  if(clave) h['X-Clave-Caja'] = clave;
+  const ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+  const t = ctrl ? setTimeout(()=>ctrl.abort(), 30000) : null;
+  let res, data;
+  try{
+    res = await fetch(axisBase() + ruta, { headers:h, cache:'no-store', signal: ctrl?ctrl.signal:undefined });
+    data = await res.json().catch(()=>null);
+  } catch(e){
+    // No respondió: puede que haya cambiado el punto de acceso. Se busca el servidor solo y se repite.
+    if(SERVIDOR_PROPIO || buscado) throw new Error('No encuentro el servidor. Revisa que estés en el mismo WiFi que la PC.');
+    if(t) clearTimeout(t);
+    pintarServidor('Buscando el servidor en la red...');
+    const nueva = await srv_buscarServidorEnRed(axisBase(), x=>pintarServidor(x));
+    if(!nueva) throw new Error('No encuentro el servidor. Revisa que estés en el mismo WiFi que la PC.');
+    localStorage.setItem('cd_servidor', nueva);
+    srv_recordarServidor(nueva);
+    pintarServidor();
+    return axisFetch(ruta, reintento, true);
+  } finally { if(t) clearTimeout(t); }
+  if(res.status === 401 && data && data.claveRequerida && !reintento){
+    const c = prompt(data.error || 'Escribe la clave de administrador del servidor:', '');
+    if(c === null) throw new Error('Hace falta la clave de administrador.');
+    localStorage.setItem('cd_clave_caja', c.trim());
+    return axisFetch(ruta, true);
+  }
+  if(!res.ok || !data || data.ok === false) throw new Error((data && data.error) || ('Error ' + res.status));
+  if(!SERVIDOR_PROPIO) srv_recordarServidor(axisBase());
+  return data;
+}
+async function cargarUsuariosAxis(silencioso){
+  const sel = document.getElementById('axis-user');
+  const fecha = document.getElementById('axis-date');
+  if(fecha && !fecha.value) fecha.value = hoyLocal();
+  pintarServidor();
+  if(!sel || !axisTieneServidor()) return;
+  try{
+    const d = await axisFetch('/api/caja-axis?usuarios=1');
+    const guardado = localStorage.getItem('cd_axis_user') || 'todos';
+    sel.innerHTML = '<option value="todos">Todos los usuarios</option>' + (d.usuarios||[]).map(u=>'<option value="'+u.id+'">'+escHtml(u.nombre)+'</option>').join('');
+    sel.value = Array.from(sel.options).some(o=>o.value===guardado) ? guardado : 'todos';
+  }catch(e){
+    if(!silencioso) pintarServidor('⚠️ ' + e.message);
+  }
+}
+async function traerDeAxis(){
+  if(!axisTieneServidor()){
+    pintarServidor('Buscando el servidor en la red...');
+    const hallado = await srv_buscarServidorEnRed('', x=>pintarServidor(x));
+    if(hallado){ localStorage.setItem('cd_servidor', hallado); srv_recordarServidor(hallado); }
+    else { cambiarServidor(); if(!axisTieneServidor()) return; }
+  }
+  const usuario = document.getElementById('axis-user').value || 'todos';
+  const fecha = document.getElementById('axis-date').value || hoyLocal();
+  pintarServidor('Consultando AxisPOS...');
+  try{
+    const d = await axisFetch('/api/caja-axis?usuario=' + encodeURIComponent(usuario) + '&desde=' + fecha + '&hasta=' + fecha);
+    document.getElementById('expected').value = d.esperado ? Math.round(d.esperado*100)/100 : '';
+    document.getElementById('transfers').value = d.transferencias ? Math.round(d.transferencias*100)/100 : '';
+    document.getElementById('withdrawals').value = d.retiros ? Math.round(d.retiros*100)/100 : '';
+    update();
+    let txt = '✅ ' + (d.usuarioNombre||'Todos') + ' · ' + fecha + ' · ' + d.cantidadVentas + ' ventas\n' +
+      'Ventas: ' + fmt(d.ventas) + ' · Transf.: ' + fmt(d.transferencias) + ' · Devoluciones: ' + fmt(d.devoluciones) +
+      (d.ingresos ? ' · Ingresos: ' + fmt(d.ingresos) : '') + ' · Retiros/gastos: ' + fmt(d.retiros);
+    if(usuario === 'todos' && (d.porUsuario||[]).length > 1){
+      txt += '\n' + d.porUsuario.map(u=>u.nombre+': '+fmt(u.esperado)+(u.transferencias?' (transf. '+fmt(u.transferencias)+')':'')).join('\n');
+    }
+    (d.avisos||[]).forEach(a=>{ txt += '\n⚠️ ' + a; });
+    pintarServidor(txt);
+  }catch(e){
+    pintarServidor('⚠️ ' + e.message);
+  }
+}
+
+pintarServidor();
+cargarUsuariosAxis(true);
+</script>
+</body>
+</html>
+'@
+
 $htmlMetricas = @'
 <!DOCTYPE html>
 <html lang="es">
@@ -12001,6 +13509,164 @@ function Leer-AlmacenesAxisLista {
     return @($res)
 }
 
+# Existencia por producto en almacenes concretos de AxisPOS (para el Gestor: Almacen Principal y Casa de Carlos).
+# Solo lectura y solo cuando el Gestor lo pide (al tocar "Traer del servidor de pedidos").
+function Leer-StockAlmacenesAxis($ids) {
+    $c = $global:configAxis
+    $colSku = [string]$c.columnaSku
+    if (@('Code','BarCode1','ID') -notcontains $colSku) { throw "columnaSku invalida (usa Code, BarCode1 o ID)." }
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $lista = (@($ids) | ForEach-Object { [string][int]$_ }) -join ','
+    $nombres = @{}
+    try {
+        $tN = Ejecutar-ConsultaAxis "SELECT ID, Name FROM objects WHERE ID IN ($lista)"
+        foreach ($lin in ($tN -split "`n")) {
+            $lin = $lin.TrimEnd("`r")
+            if ([string]::IsNullOrWhiteSpace($lin)) { continue }
+            $ff = $lin -split "`t"
+            $idN = 0
+            if (($ff.Count -ge 2) -and [int]::TryParse([string]$ff[0], [ref]$idN)) { $nombres[$idN] = (Texto-LimpioAxis ([string]$ff[1])) }
+        }
+    } catch { }
+    $sql = "SELECT s.ObjectID, g.$colSku, g.Name, ROUND(SUM(s.Qtty), 4) FROM goods g JOIN store s ON s.GoodID = g.ID WHERE g.Deleted = 0 AND TRIM(g.Name) <> '' AND s.ObjectID IN ($lista) GROUP BY s.ObjectID, g.ID, g.$colSku, g.Name"
+    $texto = Ejecutar-ConsultaAxis $sql
+    $porAlm = @{}
+    foreach ($id in @($ids)) { $porAlm[[int]$id] = New-Object System.Collections.ArrayList }
+    foreach ($linea in ($texto -split "`n")) {
+        $linea = $linea.TrimEnd("`r")
+        if ([string]::IsNullOrWhiteSpace($linea)) { continue }
+        $f = $linea -split "`t"
+        if ($f.Count -lt 4) { continue }
+        $obj = 0
+        if (-not [int]::TryParse([string]$f[0], [ref]$obj)) { continue }
+        if (-not $porAlm.ContainsKey($obj)) { continue }
+        $sku = ([string]$f[1]).Trim()
+        if ($sku -eq 'NULL') { $sku = '' }
+        $qty = 0.0
+        [void][double]::TryParse([string]$f[3], [System.Globalization.NumberStyles]::Float, $inv, [ref]$qty)
+        [void]$porAlm[$obj].Add([pscustomobject]@{ sku = $sku; nombre = (Texto-LimpioAxis ([string]$f[2])); stock = $qty })
+    }
+    $res = New-Object System.Collections.ArrayList
+    foreach ($id in @($ids)) {
+        $nom = ''
+        if ($nombres.ContainsKey([int]$id)) { $nom = [string]$nombres[[int]$id] }
+        [void]$res.Add([pscustomobject]@{ id = [int]$id; nombre = $nom; productos = @($porAlm[[int]$id].ToArray()) })
+    }
+    return @($res.ToArray())
+}
+
+# Caja por usuario: lo que AxisPOS cobro en un periodo (ventas en efectivo y por el socio "Transferencia",
+# devoluciones, ingresos y gastos/retiros). Es de solo lectura y alimenta el arqueo del Contador de Dinero.
+function Leer-CajaAxis([string]$desde, [string]$hasta, [string]$usuario, [bool]$soloUsuarios) {
+    $c = $global:configAxis
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $estilo = [System.Globalization.NumberStyles]::Float
+    $usuariosLista = New-Object System.Collections.ArrayList
+    $nomPorId = @{}
+    $tU = Ejecutar-ConsultaAxis "SELECT ID, Name FROM users WHERE Deleted = 0 AND ID <> 1 ORDER BY Name"
+    foreach ($lin in ($tU -split "`n")) {
+        $lin = $lin.TrimEnd("`r")
+        if ([string]::IsNullOrWhiteSpace($lin)) { continue }
+        $ff = $lin -split "`t"
+        $idU = 0
+        if (($ff.Count -ge 2) -and [int]::TryParse(([string]$ff[0]).Trim(), [ref]$idU)) {
+            $nm = Texto-LimpioAxis ([string]$ff[1])
+            $nomPorId[[string]$idU] = $nm
+            [void]$usuariosLista.Add([pscustomobject]@{ id = $idU; nombre = $nm })
+        }
+    }
+    if ($soloUsuarios) { return @{ usuarios = @($usuariosLista.ToArray()) } }
+
+    $ids = New-Object System.Collections.ArrayList
+    foreach ($a in @($c.almacenes)) { $n = 0; if ([int]::TryParse([string]$a, [ref]$n)) { [void]$ids.Add($n) } }
+    if ($ids.Count -eq 0) { throw "config_axis.json: 'almacenes' esta vacio." }
+    $lista = ($ids -join ',')
+
+    $avisos = New-Object System.Collections.ArrayList
+    # Socio de las transferencias (por defecto se llama "Transferencia"; se puede cambiar con "socioTransferencia" en config_axis.json).
+    $nomSocio = "Transferencia"
+    $tSoc = [string]$c.socioTransferencia
+    if ($tSoc -and ($tSoc -match '^[\p{L}\p{N} ]{1,40}$')) { $nomSocio = $tSoc.Trim() }
+    $idSocio = -999
+    $tP = Ejecutar-ConsultaAxis "SELECT ID FROM partners WHERE Deleted = 0 AND Company = '$nomSocio'"
+    foreach ($lin in ($tP -split "`n")) {
+        $x = 0
+        if ([int]::TryParse($lin.Trim(), [ref]$x)) { $idSocio = $x; break }
+    }
+    if ($idSocio -eq -999) { [void]$avisos.Add("No encontre el socio '" + $nomSocio + "' en AxisPOS: las transferencias salen en 0.") }
+
+    $acum = @{}
+    $nuevo = { @{ ventasE = 0.0; ventasT = 0.0; devE = 0.0; devT = 0.0; ingresos = 0.0; retiros = 0.0; n = 0 } }
+    $fechaP = "DATE(IF(p.UserRealTime < '2000-01-01', p.Date, p.UserRealTime))"
+    $sqlP = "SELECT p.UserID, p.PartnerID, p.OperType, p.Sign, ROUND(SUM(p.Qtty * p.CurrencyRate), 2), COUNT(DISTINCT p.Acct) FROM payments p WHERE p.Mode = 1 AND p.OperType IN (2, 34, 300) AND p.ObjectID IN ($lista) AND $fechaP BETWEEN '$desde' AND '$hasta' GROUP BY p.UserID, p.PartnerID, p.OperType, p.Sign"
+    $tPag = Ejecutar-ConsultaAxis $sqlP
+    foreach ($lin in ($tPag -split "`n")) {
+        $lin = $lin.TrimEnd("`r")
+        if ([string]::IsNullOrWhiteSpace($lin)) { continue }
+        $f = $lin -split "`t"
+        if ($f.Count -lt 6) { continue }
+        $uid = ([string]$f[0]).Trim()
+        $soc = 0; [void][int]::TryParse(([string]$f[1]).Trim(), [ref]$soc)
+        $op = 0; [void][int]::TryParse(([string]$f[2]).Trim(), [ref]$op)
+        $sg = 0; [void][int]::TryParse(([string]$f[3]).Trim(), [ref]$sg)
+        $sum = 0.0; [void][double]::TryParse(([string]$f[4]).Trim(), $estilo, $inv, [ref]$sum)
+        $cnt = 0; [void][int]::TryParse(([string]$f[5]).Trim(), [ref]$cnt)
+        if (-not $acum.ContainsKey($uid)) { $acum[$uid] = & $nuevo }
+        $u = $acum[$uid]
+        $esT = ($soc -eq $idSocio)
+        if (($op -eq 2) -and ($sg -eq 1)) { if ($esT) { $u.ventasT += $sum } else { $u.ventasE += $sum }; $u.n += $cnt }
+        elseif (($op -eq 34) -and ($sg -eq -1)) { if ($esT) { $u.devT += $sum } else { $u.devE += $sum } }
+        elseif (($op -eq 300) -and ($sg -eq 1)) { $u.ingresos += $sum }
+    }
+    # Gastos / retiros de la caja (no incluye devoluciones, que ya se restan arriba).
+    $fechaC = "DATE(IF(c.UserRealtime < '2000-01-01', c.Date, c.UserRealtime))"
+    $sqlC = "SELECT c.UserID, ROUND(SUM(c.Profit), 2) FROM cashbook c WHERE c.Sign = -1 AND c.OperType <> 13 AND c.ObjectID IN ($lista) AND $fechaC BETWEEN '$desde' AND '$hasta' GROUP BY c.UserID"
+    $tCb = Ejecutar-ConsultaAxis $sqlC
+    foreach ($lin in ($tCb -split "`n")) {
+        $lin = $lin.TrimEnd("`r")
+        if ([string]::IsNullOrWhiteSpace($lin)) { continue }
+        $f = $lin -split "`t"
+        if ($f.Count -lt 2) { continue }
+        $uid = ([string]$f[0]).Trim()
+        $sum = 0.0; [void][double]::TryParse(([string]$f[1]).Trim(), $estilo, $inv, [ref]$sum)
+        if (-not $acum.ContainsKey($uid)) { $acum[$uid] = & $nuevo }
+        $acum[$uid].retiros += $sum
+    }
+
+    $tot = & $nuevo
+    $porUsuario = New-Object System.Collections.ArrayList
+    $filtrar = (-not [string]::IsNullOrWhiteSpace($usuario)) -and ($usuario -ne "todos")
+    foreach ($uid in @($acum.Keys | Sort-Object)) {
+        $u = $acum[$uid]
+        $nm = if ($nomPorId.ContainsKey($uid)) { [string]$nomPorId[$uid] } else { "Usuario " + $uid }
+        $transfNeta = $u.ventasT - $u.devT
+        $esp = ($u.ventasE + $u.ventasT) - ($u.devE + $u.devT) + $u.ingresos
+        [void]$porUsuario.Add([pscustomobject]@{ id = $uid; nombre = $nm; esperado = [math]::Round($esp, 2); transferencias = [math]::Round($transfNeta, 2); ventas = $u.n })
+        if ($filtrar -and ($uid -ne $usuario)) { continue }
+        foreach ($k in @('ventasE','ventasT','devE','devT','ingresos','retiros','n')) { $tot[$k] += $u[$k] }
+    }
+    $ventas = $tot.ventasE + $tot.ventasT
+    $devol = $tot.devE + $tot.devT
+    $nombreSel = "Todos"
+    if ($filtrar) { $nombreSel = if ($nomPorId.ContainsKey($usuario)) { [string]$nomPorId[$usuario] } else { "Usuario " + $usuario } }
+    return @{
+        usuarios = @($usuariosLista.ToArray())
+        usuario = $(if ($filtrar) { $usuario } else { "todos" })
+        usuarioNombre = $nombreSel
+        desde = $desde; hasta = $hasta
+        ventas = [math]::Round($ventas, 2)
+        ventasEfectivo = [math]::Round($tot.ventasE, 2)
+        transferencias = [math]::Round(($tot.ventasT - $tot.devT), 2)
+        devoluciones = [math]::Round($devol, 2)
+        ingresos = [math]::Round($tot.ingresos, 2)
+        retiros = [math]::Round($tot.retiros, 2)
+        esperado = [math]::Round(($ventas - $devol + $tot.ingresos), 2)
+        cantidadVentas = [int]$tot.n
+        porUsuario = @($porUsuario.ToArray())
+        avisos = @($avisos.ToArray())
+    }
+}
+
 function Calcular-Reposicion([int]$piso, $origenes, [int]$dias, [int]$cobertura) {
     $c = $global:configAxis
     $colSku = [string]$c.columnaSku
@@ -12206,7 +13872,7 @@ while ($listener.IsListening) {
         if ($orig -eq "http://localhost" -or $orig -eq "https://localhost" -or $orig -eq "capacitor://localhost") {
             $context.Response.Headers["Access-Control-Allow-Origin"] = $orig
             $context.Response.Headers["Vary"] = "Origin"
-            $context.Response.Headers["Access-Control-Allow-Headers"] = "Content-Type, X-Vendedor, X-Pos-Token"
+            $context.Response.Headers["Access-Control-Allow-Headers"] = "Content-Type, X-Vendedor, X-Pos-Token, X-Clave-Caja"
             $context.Response.Headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
             $context.Response.Headers["Access-Control-Expose-Headers"] = "X-Nombre-Archivo, X-Nombre-Archivo-Enc"
             $context.Response.Headers["Access-Control-Allow-Private-Network"] = "true"
@@ -12234,6 +13900,8 @@ while ($listener.IsListening) {
     Revisar-CambioCatalogo
     Revisar-CatalogoAxis
     Revisar-VentasAxis
+    Revisar-BorradoresAxis
+    Reintentar-ConciliacionDiferidos
     Revisar-TareasPedidos
 
     # Las consultas de sincronizacion del Gestor de Almacenes (cada ~10 s por telefono) no se anotan en pantalla para no llenar la consola.
@@ -12256,6 +13924,46 @@ while ($listener.IsListening) {
         } elseif ($method -eq "GET" -and $path -eq "/vendedor") {
             Enviar-Respuesta -Context $context -Body (Inyectar-Guardian $htmlVendedor)
 
+        } elseif ($method -eq "GET" -and $path -eq "/api/ping") {
+            # Para que las apps encuentren solas al servidor cuando cambia el punto de acceso (y con el, la IP).
+            Enviar-Json $context @{ ok = $true; app = "toto-pedidos"; ip = [string]$request.LocalEndPoint.Address } 200 3
+
+        } elseif ($method -eq "GET" -and $path -eq "/contador") {
+            Enviar-Respuesta -Context $context -Body (Inyectar-Guardian $htmlContador)
+
+        } elseif ($method -eq "GET" -and $path -eq "/api/caja-axis") {
+            # Caja de AxisPOS por usuario o de todos, para el arqueo (Contador de Dinero). Si hay clave de administrador, se pide.
+            try {
+                $esLocalCaja = [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)
+                $ipCaja = [string]$request.RemoteEndPoint.Address
+                $claveCaja = ""
+                try { $claveCaja = [string]$request.Headers["X-Clave-Caja"] } catch { $claveCaja = "" }
+                $esperaCaja = 0
+                if (-not $esLocalCaja) { $esperaCaja = Pos-Bloqueado $ipCaja }
+                if (-not $global:configAxis.activo) {
+                    Enviar-Json $context @{ ok = $false; error = "AxisPOS no esta activo (config_axis.json)." } 400
+                } elseif ($esperaCaja -gt 0) {
+                    Enviar-Json $context @{ ok = $false; error = ("Demasiados intentos. Espera " + $esperaCaja + " segundos.") } 429
+                } elseif ((-not $esLocalCaja) -and (-not [string]::IsNullOrEmpty($global:posClaveHash)) -and ([string]::IsNullOrWhiteSpace($claveCaja) -or ((Pos-Hash $claveCaja.Trim()) -ne $global:posClaveHash))) {
+                    if (-not [string]::IsNullOrWhiteSpace($claveCaja)) { Pos-Fallo $ipCaja }
+                    Enviar-Json $context @{ ok = $false; claveRequerida = $true; error = "Escribe la clave de administrador del servidor:" } 401
+                } else {
+                    $soloUsr = ([string]$request.QueryString["usuarios"] -eq "1")
+                    $usrCaja = ([string]$request.QueryString["usuario"]).Trim()
+                    if ($usrCaja -and ($usrCaja -ne "todos") -and ($usrCaja -notmatch '^\d{1,6}$')) { $usrCaja = "todos" }
+                    $hoyCaja = (Get-Date).ToString("yyyy-MM-dd")
+                    $dCaja = ([string]$request.QueryString["desde"]).Trim()
+                    $hCaja = ([string]$request.QueryString["hasta"]).Trim()
+                    if ($dCaja -notmatch '^\d{4}-\d{2}-\d{2}$') { $dCaja = $hoyCaja }
+                    if ($hCaja -notmatch '^\d{4}-\d{2}-\d{2}$') { $hCaja = $dCaja }
+                    $resCaja = Leer-CajaAxis $dCaja $hCaja $usrCaja $soloUsr
+                    $resCaja["ok"] = $true
+                    Enviar-Respuesta -Context $context -Body ($resCaja | ConvertTo-Json -Depth 6 -Compress) -ContentType "application/json; charset=utf-8"
+                }
+            } catch {
+                Enviar-Json $context @{ ok = $false; error = [string]$_.Exception.Message } 500
+            }
+
         } elseif ($method -eq "GET" -and $path -eq "/metricas") {
             Enviar-Respuesta -Context $context -Body (Inyectar-Guardian $htmlMetricas)
 
@@ -12270,6 +13978,25 @@ while ($listener.IsListening) {
             }
             $outSp = [pscustomobject]@{ ok = $true; origen = [string]$global:catalogoInfo.origen; actualizado = [string]$global:catalogoInfo.ultimaCarga; cantidad = $lista.Count; productos = @($lista.ToArray()) }
             Enviar-Respuesta -Context $context -Body ($outSp | ConvertTo-Json -Depth 4 -Compress) -ContentType "application/json; charset=utf-8"
+
+        } elseif ($method -eq "GET" -and $path -eq "/api/stock-almacenes") {
+            # Existencia real por almacen en AxisPOS (por defecto 13 = Almacen placa y 14 = Casa de Carlos).
+            try {
+                if (-not $global:configAxis.activo) { throw "AxisPOS no esta activo (config_axis.json)." }
+                $idsTxt = [string]$request.QueryString["ids"]
+                if ([string]::IsNullOrWhiteSpace($idsTxt)) { $idsTxt = "13,14" }
+                $idsAl = New-Object System.Collections.ArrayList
+                foreach ($tI in $idsTxt.Split(',')) {
+                    $nI = 0
+                    if ([int]::TryParse($tI.Trim(), [ref]$nI) -and ($nI -gt 0) -and (-not $idsAl.Contains($nI)) -and ($idsAl.Count -lt 8)) { [void]$idsAl.Add($nI) }
+                }
+                if ($idsAl.Count -eq 0) { throw "Falta el numero de almacen." }
+                $almRes = Leer-StockAlmacenesAxis @($idsAl)
+                $outAl = [pscustomobject]@{ ok = $true; actualizado = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss"); almacenes = @($almRes) }
+                Enviar-Respuesta -Context $context -Body ($outAl | ConvertTo-Json -Depth 5 -Compress) -ContentType "application/json; charset=utf-8"
+            } catch {
+                Enviar-Json $context @{ ok = $false; error = [string]$_.Exception.Message }
+            }
 
         } elseif ($method -eq "GET" -and $path -eq "/api/cuadre") {
             if (-not [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)) {
@@ -13513,10 +15240,79 @@ while ($listener.IsListening) {
                 Enviar-Json $context @{ ok = $false; error = "PIN incorrecto."; requierePin = $true } 403
             } else {
                 try {
-                    $resPosD = Registrar-DevolucionPos $dPosD $vPosD
-                    Enviar-Json $context $resPosD.cuerpo ([int]$resPosD.codigo) 8
+                    $esLocalDevP = [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)
+                    if ($esLocalDevP) {
+                        # Desde la propia PC no hace falta pedir confirmacion.
+                        $resPosD = Registrar-DevolucionPos $dPosD $vPosD
+                        Enviar-Json $context $resPosD.cuerpo ([int]$resPosD.codigo) 8
+                    } else {
+                        $idPedD = 0; try { $idPedD = [int]$dPosD.pedidoId } catch { $idPedD = 0 }
+                        $pedD = Buscar-PedidoCualquiera $idPedD ([string]$dPosD.pedidoHora)
+                        if ((-not $pedD) -or ([string]$pedD.estado -ne "cobrado")) {
+                            Enviar-Json $context @{ ok = $false; error = "No se encontro esa venta cobrada." } 404
+                        } elseif (@($dPosD.items).Count -eq 0) {
+                            Enviar-Json $context @{ ok = $false; error = "Elige al menos un producto a devolver." } 400
+                        } else {
+                            $solD = Crear-SolicitudDevolucion $dPosD $vPosD $pedD
+                            Enviar-Json $context @{ ok = $true; pendiente = $true; id = $solD.id } 200 4
+                        }
+                    }
                 } catch {
                     Enviar-Json $context @{ ok = $false; error = "$($_.Exception.Message)" } 500
+                }
+            }
+
+        } elseif ($method -eq "GET" -and $path -eq "/api/pos/devolucion/estado") {
+            # El movil pregunta si la PC ya confirmo su devolucion.
+            $vEstD = Pos-VendedorDe $request
+            $idEstD = 0; [void][int]::TryParse([string]$request.QueryString["id"], [ref]$idEstD)
+            $solE = $null
+            if ($global:devolucionesPendientes.ContainsKey([string]$idEstD)) { $solE = $global:devolucionesPendientes[[string]$idEstD] }
+            if (-not (Pos-Token-Valido $request $vEstD)) {
+                Enviar-Json $context @{ ok = $false; error = "El modo punto de venta no esta activo en este telefono."; posInactivo = $true } 403
+            } elseif ((-not $solE) -or ([string]$solE.vendedor).ToLowerInvariant() -ne $vEstD.ToLowerInvariant()) {
+                Enviar-Json $context @{ ok = $true; estado = "vencida" }
+            } else {
+                if (([string]$solE.estado -eq "esperando") -and (((Get-Date) - $solE.hora).TotalSeconds -ge 180)) { $solE.estado = "vencida" }
+                Enviar-Json $context @{ ok = $true; estado = [string]$solE.estado; resultado = $solE.resultado } 200 8
+            }
+
+        } elseif ($method -eq "POST" -and $path -eq "/api/pos/devolucion/decidir") {
+            # Solo la PC: aprueba o rechaza una devolucion pedida desde un movil.
+            if (-not [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)) {
+                Enviar-Json $context @{ ok = $false; error = "Las devoluciones se confirman desde la PC." } 403
+            } else {
+                $dDec = Leer-CuerpoJson $request
+                $idDec = 0; try { $idDec = [int]$dDec.id } catch { $idDec = 0 }
+                $solX = $null
+                if ($global:devolucionesPendientes.ContainsKey([string]$idDec)) { $solX = $global:devolucionesPendientes[[string]$idDec] }
+                if ((-not $solX) -or ([string]$solX.estado -ne "esperando")) {
+                    Enviar-Json $context @{ ok = $false; error = "Esa solicitud ya no esta pendiente." } 404
+                } elseif (((Get-Date) - $solX.hora).TotalSeconds -ge 180) {
+                    $solX.estado = "vencida"
+                    Enviar-Json $context @{ ok = $false; error = "Esa solicitud ya vencio." } 410
+                } elseif ([bool]$dDec.aprobar) {
+                    try {
+                        $resDec = Registrar-DevolucionPos $solX.datos ([string]$solX.vendedor)
+                        $cuerpoDec = $resDec.cuerpo
+                        $solX.resultado = $cuerpoDec
+                        if ([int]$resDec.codigo -eq 200) {
+                            $solX.estado = "aprobada"
+                            try { Agregar-AlertaVendedor ([string]$solX.vendedor) ("La caja aprobo tu devolucion de la venta #" + [string]$solX.datos.pedidoId + ".") $null "pedido" } catch {}
+                        } else {
+                            $solX.estado = "error"
+                            try { Agregar-AlertaVendedor ([string]$solX.vendedor) ("La devolucion de la venta #" + [string]$solX.datos.pedidoId + " no se pudo registrar: " + [string]$cuerpoDec.error) $null "pedido" } catch {}
+                        }
+                        Enviar-Json $context @{ ok = $true; estado = [string]$solX.estado } 200 4
+                    } catch {
+                        $solX.estado = "error"
+                        $solX.resultado = @{ ok = $false; error = "$($_.Exception.Message)" }
+                        Enviar-Json $context @{ ok = $false; error = "$($_.Exception.Message)" } 500
+                    }
+                } else {
+                    $solX.estado = "rechazada"
+                    try { Agregar-AlertaVendedor ([string]$solX.vendedor) ("La caja NO aprobo tu devolucion de la venta #" + [string]$solX.datos.pedidoId + ".") $null "pedido" } catch {}
+                    Enviar-Json $context @{ ok = $true; estado = "rechazada" } 200 4
                 }
             }
 
@@ -13534,11 +15330,29 @@ while ($listener.IsListening) {
                 Enviar-Json $context @{ ok = $false; error = "Escribe el mensaje." } 400
             } else {
                 $nombreMsg = [string]$global:pinesVendedores[$vMsg.ToLowerInvariant()].nombre
-                $regMsg = [pscustomobject]@{ id = $global:nextIdMensaje; vendedor = $nombreMsg; texto = $txtMsg; hora = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss"); leido = $false }
-                $global:nextIdMensaje++
-                [void]$global:mensajesPc.Add($regMsg)
-                Guardar-MensajesPc
-                Enviar-Json $context @{ ok = $true; id = $regMsg.id }
+                # Destino elegido en los Ajustes del movil: "pc" (por defecto), "todos" (la PC y los demas vendedores) o el nombre de otro vendedor.
+                $paraMsg = "pc"
+                if ($dMsg.PSObject.Properties.Name -contains 'para') { $paraMsg = ([string]$dMsg.para).Trim() }
+                if (-not $paraMsg) { $paraMsg = "pc" }
+                $paraMsgLow = $paraMsg.ToLowerInvariant()
+                if (($paraMsgLow -ne "pc") -and ($paraMsgLow -ne "todos") -and (-not $global:pinesVendedores.ContainsKey($paraMsgLow))) {
+                    Enviar-Json $context @{ ok = $false; error = "Ese vendedor no existe." } 404
+                } else {
+                    $idMsgOk = 0
+                    if (($paraMsgLow -eq "pc") -or ($paraMsgLow -eq "todos")) {
+                        $regMsg = [pscustomobject]@{ id = $global:nextIdMensaje; vendedor = $nombreMsg; texto = $txtMsg; hora = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss"); leido = $false }
+                        $global:nextIdMensaje++
+                        [void]$global:mensajesPc.Add($regMsg)
+                        Guardar-MensajesPc
+                        $idMsgOk = $regMsg.id
+                    }
+                    if ($paraMsgLow -eq "todos") {
+                        Avisar-A-Todos ("Mensaje de " + $nombreMsg + ": " + $txtMsg) "mensaje" $nombreMsg
+                    } elseif ($paraMsgLow -ne "pc") {
+                        Agregar-AlertaVendedor ([string]$global:pinesVendedores[$paraMsgLow].nombre) ("Mensaje de " + $nombreMsg + ": " + $txtMsg) $null "mensaje"
+                    }
+                    Enviar-Json $context @{ ok = $true; id = $idMsgOk }
+                }
             }
 
         } elseif ($method -eq "GET" -and $path -eq "/api/mensajes/pc") {
@@ -13551,7 +15365,9 @@ while ($listener.IsListening) {
                     foreach ($mP in $pendMsg) { $mP.leido = $true }
                     Guardar-MensajesPc
                 }
-                Enviar-Json $context @{ ok = $true; mensajes = @($pendMsg) } 200 4
+                Limpiar-DevolucionesPendientes
+                $devPC = @($global:devolucionesPendientes.Values | Where-Object { ([string]$_.estado -eq "esperando") -and (((Get-Date) - $_.hora).TotalSeconds -lt 180) } | ForEach-Object { [pscustomobject]@{ id = $_.id; vendedor = $_.vendedor; texto = $_.resumen } })
+                Enviar-Json $context @{ ok = $true; mensajes = @($pendMsg); devoluciones = @($devPC) } 200 4
             }
 
         } elseif ($method -eq "POST" -and $path -eq "/api/mensajes/enviar") {
