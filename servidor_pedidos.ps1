@@ -2414,6 +2414,8 @@ function Aplicar-ReservasALista($lista) {
                 if ([string]::IsNullOrWhiteSpace($sku)) { continue }
                 $q = 0.0
                 try { $q = [double]$it.cantidad } catch { $q = 0.0 }
+                # Lo que la caja ya cobro en ventas parciales de este pedido ya salio del stock de AxisPOS: no se aparta dos veces.
+                if ($p.axisParciales) { $q = [math]::Max(0.0, $q - (Cantidad-PagadaParcial $p $sku)) }
                 if ($res.ContainsKey($sku)) { $res[$sku] = [double]$res[$sku] + $q } else { $res[$sku] = $q }
             }
         }
@@ -2442,6 +2444,216 @@ function Recalcular-Reservas {
 # ---- Pedido que llega DESPUES de que la caja ya cobro la venta en AxisPOS ----
 # Se busca esa venta entre las ya leidas (axis_ventas_dia.json); si los productos coinciden exactamente,
 # el pedido se cierra solo como cobrado en caja y al vendedor le sale el aviso.
+# ---- Venta PARCIAL: la caja cobro solo una parte de lo que el vendedor mando en su pedido ----
+# Si la venta de AxisPOS trae solo algunos de los productos/cantidades de un pedido pendiente, se avisa a la caja (banner en la PC)
+# de lo que falta cobrar y se avisa al vendedor. El pedido sigue pendiente y, cuando AxisPOS registra el resto exacto, se cierra solo.
+function Items-ComoLista($mapa) {
+    return @($mapa.Keys | ForEach-Object { [pscustomobject]@{ sku = [string]$_; cantidad = [double]$mapa[$_] } })
+}
+
+function Cantidad-PagadaParcial($p, [string]$sku) {
+    $t = 0.0
+    foreach ($pc in @($p.axisParciales)) {
+        foreach ($it in @($pc.items)) {
+            if (([string]$it.sku).Trim() -eq $sku) { try { $t += [double]$it.cantidad } catch {} }
+        }
+    }
+    return $t
+}
+
+# Lo que todavia falta cobrar de un pedido (original menos lo ya cobrado en ventas parciales). Puede quedar vacio.
+function Restante-DelPedido($p) {
+    $rest = Juntar-CantidadesPorSku $p.items 'sku' 'cantidad'
+    if ($null -eq $rest) { return $null }
+    foreach ($k in @($rest.Keys)) {
+        $nuevo = [double]$rest[$k] - (Cantidad-PagadaParcial $p ([string]$k))
+        if ($nuevo -le 0.0001) { $rest.Remove($k) } else { $rest[$k] = $nuevo }
+    }
+    return $rest
+}
+
+function Venta-DentroDe($venta, $rest) {
+    foreach ($k in @($venta.Keys)) {
+        if ((-not $rest.ContainsKey($k)) -or ([double]$venta[$k] -gt ([double]$rest[$k] + 0.0001))) { return $false }
+    }
+    return $true
+}
+
+# Pedido pendiente del que esta venta es una parte (o el resto que faltaba). Si hay dudas (dos candidatos iguales), no adivina.
+function Buscar-PedidoParcial($venta, $horaVenta) {
+    if ($null -eq $venta) { return $null }
+    $mejor = $null; $mejorRest = $null; $mejorScore = 0.0; $empate = $false
+    foreach ($p in @($global:pedidos | Where-Object { [string]$_.estado -eq "pendiente" })) {
+        $hp = Hora-Pedido $p
+        if ($horaVenta -and $hp) {
+            if ($horaVenta -lt $hp.AddSeconds(-(Margen-VentaAntesSeg))) { continue }
+            if ($horaVenta -gt $hp.AddHours(3)) { continue }
+        }
+        $rest = Restante-DelPedido $p
+        if (($null -eq $rest) -or ($rest.Count -eq 0)) { continue }
+        if (-not (Venta-DentroDe $venta $rest)) { continue }
+        if ((@($p.axisParciales).Count -gt 0) -and (Items-IgualesAVenta $rest $venta)) {
+            return [pscustomobject]@{ p = $p; completa = $true }
+        }
+        if (Items-IgualesAVenta $rest $venta) { continue }
+        $score = [double]$venta.Count / [double]$rest.Count
+        if ($score -lt 0.5) { continue }
+        if ($score -gt $mejorScore) { $mejor = $p; $mejorScore = $score; $empate = $false }
+        elseif ($score -eq $mejorScore) { $empate = $true }
+    }
+    if ($null -eq $mejor -or $empate) { return $null }
+    return [pscustomobject]@{ p = $mejor; completa = $false }
+}
+
+function Registrar-ParcialPedido($p, [string]$acct, $venta, $rec) {
+    $lista = New-Object System.Collections.ArrayList
+    foreach ($x in @($p.axisParciales)) { [void]$lista.Add($x) }
+    [void]$lista.Add([pscustomobject]@{ acct = $acct; items = @(Items-ComoLista $venta) })
+    Poner-Prop $p "axisParciales" @($lista.ToArray())
+    $rec.pedidoId = $p.id
+    Guardar-Pedidos
+}
+
+function Avisar-FaltaCobrar($p, [string]$acct, [string]$operador) {
+    $rest = Restante-DelPedido $p
+    if (($null -eq $rest) -or ($rest.Count -eq 0)) { return }
+    $falta = Texto-VentaCompleta $rest
+    $ahora = Get-Date
+    $quien = if ($operador) { " (hecha por " + $operador + ")" } else { "" }
+    # Para la caja: banner en la PC con el sonido de siempre.
+    try {
+        $txtPc = "FALTA COBRAR en AxisPOS: el pedido #" + $p.id + " de " + [string]$p.vendedor + " tiene sin pasar: " + $falta + ". La venta #" + $acct + $quien + " no lo incluyo. Cobra lo que falta y el pedido se cierra solo."
+        $regPc = [pscustomobject]@{ id = $global:nextIdMensaje; vendedor = "AxisPOS"; texto = (Limpiar-TextoMensaje $txtPc); hora = $ahora.ToString("yyyy-MM-dd HH:mm:ss"); leido = $false }
+        $global:nextIdMensaje++
+        [void]$global:mensajesPc.Add($regPc)
+        Guardar-MensajesPc
+    } catch {}
+    # Para el vendedor: solo informativo (no tiene que hacer nada).
+    try { Agregar-AlertaVendedor ([string]$p.vendedor) ("Tu pedido #" + $p.id + ": la caja cobro solo una parte (venta #" + $acct + "). Falta por cobrar: " + $falta + ". Ya se le aviso a la caja.") $p.id "pedido" } catch {}
+    try {
+        $lineaLog = $ahora.ToString("yyyy-MM-dd HH:mm:ss") + " | venta parcial AxisPOS #" + $acct + " | hecha por: " + $(if ($operador) { $operador } else { "no se sabe" }) + " | pedido #" + $p.id + " (" + [string]$p.vendedor + ") | falta cobrar: " + $falta
+        [System.IO.File]::AppendAllText((Join-Path $scriptDir "diferencias_caja.log"), $lineaLog + "`r`n", [System.Text.Encoding]::UTF8)
+    } catch {}
+    Write-Host ("[" + $ahora.ToString('HH:mm:ss') + "] AxisPOS: venta parcial #" + $acct + " del pedido #" + $p.id + " - falta cobrar: " + $falta)
+}
+
+# La venta que faltaba completa el pedido: se cierra solo, con todas las ventas que lo formaron.
+function Cerrar-PedidoPorPartes($p, [string]$acct, $rec) {
+    $accts = @(@($p.axisParciales | ForEach-Object { [string]$_.acct }) + @($acct))
+    $acctsTxt = ($accts -join "+")
+    $metodo = if ($p.metodoPago) { [string]$p.metodoPago } else { "Efectivo" }
+    $baseTotal = [double]$p.totalProductos
+    $totalAuto = if ($metodo -eq "Transferencia") { [math]::Round($baseTotal * 2, 2) } else { $baseTotal }
+    $p.estado = "cobrado"
+    Poner-Prop $p "totalCobrado" $totalAuto
+    Poner-Prop $p "cobradoPor" "caja"
+    Poner-Prop $p "revisado" $true
+    Poner-Prop $p "horaCobro" ((Get-Date).ToString("yyyy-MM-dd HH:mm:ss"))
+    Poner-Prop $p "ventaAxis" $acctsTxt
+    Poner-Prop $p "ventaAxisTotal" ([math]::Round($baseTotal, 2))
+    Poner-Prop $p "cuadreAxis" "ok"
+    Poner-Prop $p "cuadreDetalle" ""
+    $rec.pedidoId = $p.id
+    try { Agregar-AlertaVendedor ([string]$p.vendedor) ("Tu pedido #" + $p.id + " ya se cobro completo en caja (ventas #" + ($accts -join ", #") + ").") $p.id "pedido" } catch {}
+    Write-Host ("[" + (Get-Date).ToString('HH:mm:ss') + "] AxisPOS: el pedido #" + $p.id + " (" + [string]$p.vendedor + ") se completo con las ventas " + $acctsTxt)
+}
+
+# ---- Varios pedidos del mismo vendedor que juntos forman UNA venta de AxisPOS ----
+# Condicion obligatoria: la suma de los pedidos tiene que dar exactamente los mismos productos y cantidades de la venta.
+# Se puede apagar y ajustar (minutos entre el primero y el ultimo, y maximo de pedidos) en Ajustes del Panel.
+function Buscar-SubconjuntoPedidos($lista, [int]$inicio, $elegidos, $suma, $venta, [int]$maxN, [double]$spanMin, $debeIncluirId) {
+    for ($i = $inicio; $i -lt $lista.Count; $i++) {
+        $e = $lista[$i]
+        if (@($elegidos).Count -gt 0) {
+            $span = ($e.t - $elegidos[0].t).TotalMinutes
+            if ($span -gt $spanMin) { break }
+        }
+        $nueva = @{}
+        foreach ($k in @($suma.Keys)) { $nueva[$k] = $suma[$k] }
+        $cabe = $true
+        foreach ($k in @($e.items.Keys)) {
+            $a = 0.0
+            if ($nueva.ContainsKey($k)) { $a = [double]$nueva[$k] }
+            $a += [double]$e.items[$k]
+            if ((-not $venta.ContainsKey($k)) -or ($a -gt ([double]$venta[$k] + 0.0001))) { $cabe = $false; break }
+            $nueva[$k] = $a
+        }
+        if (-not $cabe) { continue }
+        $sel = @($elegidos) + @($e)
+        if ($sel.Count -ge 2 -and (Items-IgualesAVenta $nueva $venta)) {
+            if (($null -eq $debeIncluirId) -or (@($sel | Where-Object { [int]$_.p.id -eq [int]$debeIncluirId }).Count -gt 0)) { return $sel }
+        }
+        if ($sel.Count -lt $maxN) {
+            $r = Buscar-SubconjuntoPedidos $lista ($i + 1) $sel $nueva $venta $maxN $spanMin $debeIncluirId
+            if ($r) { return $r }
+        }
+    }
+    return $null
+}
+
+function Buscar-CombinacionPedidos($venta, $horaVenta, $debeIncluirId) {
+    if ($null -eq $venta) { return $null }
+    $ca = $global:configApp
+    if (-not [bool]$ca.unirPedidos) { return $null }
+    $mins = 3.0; try { $mins = [double]$ca.unirPedidosMinutos } catch { $mins = 3.0 }
+    if ($mins -lt 1) { $mins = 1 }
+    if ($mins -gt 30) { $mins = 30 }
+    $maxN = 4; try { $maxN = [int]$ca.unirPedidosMax } catch { $maxN = 4 }
+    if ($maxN -lt 2) { $maxN = 2 }
+    if ($maxN -gt 8) { $maxN = 8 }
+    $porVend = @{}
+    foreach ($p in @($global:pedidos | Where-Object { [string]$_.estado -eq "pendiente" })) {
+        $hp = Hora-Pedido $p
+        if ($null -eq $hp) { continue }
+        if ($horaVenta -and ($horaVenta -lt $hp.AddSeconds(-(Margen-VentaAntesSeg)))) { continue }
+        $its = Juntar-CantidadesPorSku $p.items 'sku' 'cantidad'
+        if ($null -eq $its) { continue }
+        $cabeEnVenta = $true
+        foreach ($k in @($its.Keys)) {
+            if ((-not $venta.ContainsKey($k)) -or ([double]$its[$k] -gt ([double]$venta[$k] + 0.0001))) { $cabeEnVenta = $false; break }
+        }
+        if (-not $cabeEnVenta) { continue }
+        $vk = ([string]$p.vendedor).Trim().ToLowerInvariant()
+        if (-not $porVend.ContainsKey($vk)) { $porVend[$vk] = New-Object System.Collections.ArrayList }
+        [void]$porVend[$vk].Add(@{ p = $p; items = $its; t = $hp })
+    }
+    foreach ($vk in @($porVend.Keys)) {
+        $lista = @($porVend[$vk] | Sort-Object { $_.t })
+        if ($lista.Count -lt 2) { continue }
+        if ($lista.Count -gt 14) { $lista = @($lista | Select-Object -Last 14) }
+        $r = Buscar-SubconjuntoPedidos $lista 0 @() @{} $venta $maxN $mins $debeIncluirId
+        if ($r) { return @($r) }
+    }
+    return $null
+}
+
+# Cierra de una vez todos los pedidos de la combinacion con la misma venta de AxisPOS.
+function Cerrar-PedidosUnidos($combo, [string]$acct, $rec) {
+    $idsTxt = (@($combo | ForEach-Object { [string]$_.p.id }) -join ",")
+    $ahoraTxt = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+    foreach ($e in @($combo)) {
+        $p = $e.p
+        $metodo = if ($p.metodoPago) { [string]$p.metodoPago } else { "Efectivo" }
+        $baseTotal = [double]$p.totalProductos
+        $totalAuto = if ($metodo -eq "Transferencia") { [math]::Round($baseTotal * 2, 2) } else { $baseTotal }
+        $p.estado = "cobrado"
+        Poner-Prop $p "totalCobrado" $totalAuto
+        Poner-Prop $p "cobradoPor" "caja"
+        Poner-Prop $p "revisado" $true
+        Poner-Prop $p "horaCobro" $ahoraTxt
+        Poner-Prop $p "ventaAxis" $acct
+        Poner-Prop $p "ventaAxisTotal" ([math]::Round($baseTotal, 2))
+        Poner-Prop $p "ventaAxisPedidos" $idsTxt
+        Poner-Prop $p "cuadreAxis" "ok"
+        Poner-Prop $p "cuadreDetalle" ""
+    }
+    $rec.pedidoId = $combo[0].p.id
+    Poner-Prop $rec "pedidoIds" $idsTxt
+    $vend = [string]$combo[0].p.vendedor
+    try { Agregar-AlertaVendedor $vend ("Tus pedidos #" + ($idsTxt -replace ',', ', #') + " se juntaron en una sola venta y ya se cobraron en caja (venta #" + $acct + ").") $combo[0].p.id "pedido" } catch {}
+    Write-Host ("[" + (Get-Date).ToString('HH:mm:ss') + "] AxisPOS: la venta " + $acct + " cerro " + @($combo).Count + " pedidos juntos (#" + ($idsTxt -replace ',', ', #') + ") de " + $vend)
+}
+
 function Conciliar-PedidoConVentasPrevias($p) {
     if (-not $global:configAxis.activo) { return $false }
     if (-not [bool]$global:configAxis.cerrarPedidosAuto) { return $false }
@@ -2465,7 +2677,26 @@ function Conciliar-PedidoConVentasPrevias($p) {
         $dif = [math]::Abs(($h - $hs).TotalSeconds)
         if ($dif -lt $mejorDif) { $mejor = $s; $mejorDif = $dif }
     }
-    if ($null -eq $mejor) { return $false }
+    if ($null -eq $mejor) {
+        # Quiza este pedido, junto con otros del mismo vendedor, forma una venta que ya estaba cobrada.
+        foreach ($s2 in $global:ventasAxisDia) {
+            if ($s2.devolucion -or $s2.pedidoId) { continue }
+            $hs2 = $null
+            try { $hs2 = [datetime]::ParseExact([string]$s2.fecha, "yyyy-MM-dd HH:mm:ss", $inv) } catch { continue }
+            $vd2 = Juntar-CantidadesPorSku $s2.items 'sku' 'qty'
+            if ($null -eq $vd2) { continue }
+            $comb2 = Buscar-CombinacionPedidos $vd2 $hs2 ([int]$p.id)
+            if ($comb2) {
+                Cerrar-PedidosUnidos $comb2 ([string]$s2.acct) $s2
+                Guardar-Pedidos
+                Guardar-VentasAxisDia
+                try { Revisar-CatalogoAxis -Forzar } catch {}
+                try { Recalcular-Reservas } catch {}
+                return $true
+            }
+        }
+        return $false
+    }
     $metodo = if ($p.metodoPago) { [string]$p.metodoPago } else { "Efectivo" }
     $baseTotal = [double]$p.totalProductos
     $totalAuto = if ($metodo -eq "Transferencia") { [math]::Round($baseTotal * 2, 2) } else { $baseTotal }
@@ -2563,6 +2794,18 @@ function Conciliar-VentaAxis($grupo) {
         }
     }
 
+    # 2b) Varios pedidos del mismo vendedor, enviados con pocos minutos de diferencia, que JUNTOS son exactamente esta venta.
+    if (-not $hecho) {
+        try {
+            $comb = Buscar-CombinacionPedidos $venta $horaVenta $null
+            if ($comb) {
+                Cerrar-PedidosUnidos $comb $acct $rec
+                Guardar-Pedidos
+                $hecho = $true
+            }
+        } catch {}
+    }
+
     # 3) Pedido que la PC le mando al vendedor y el todavia no lo ha tomado: si la caja ya lo cobro,
     #    se retira solo y al movil le sale "ya se cobro en caja" (en vez de dejarle un pedido que ya no vale).
     if (-not $hecho) {
@@ -2586,6 +2829,23 @@ function Conciliar-VentaAxis($grupo) {
             $hecho = $true
             break
         }
+    }
+
+    # 2c) Venta parcial: la caja cobro solo una parte del pedido (o esta venta es justo lo que faltaba).
+    if (-not $hecho) {
+        try {
+            $par = Buscar-PedidoParcial $venta $horaVenta
+            if ($par) {
+                if ($par.completa) {
+                    Cerrar-PedidoPorPartes $par.p $acct $rec
+                } else {
+                    Registrar-ParcialPedido $par.p $acct $venta $rec
+                    Avisar-FaltaCobrar $par.p $acct (Nombre-OperadorAxis ([string]$grupo[0].op))
+                }
+                Guardar-Pedidos
+                $hecho = $true
+            }
+        } catch {}
     }
 
     # 4) Nada coincide exacto: si la venta se parece a un pedido pendiente (la caja agrego o quito cosas), se avisa al vendedor.
@@ -2849,7 +3109,7 @@ function Aplicar-OrigenDatos([switch]$Inicio) {
 # Se cambia desde el Panel de la PC y se recuerda al reiniciar.
 # ------------------------------------------------------------------
 $configAppPath = Join-Path $scriptDir "config_app.json"
-$global:configApp = [pscustomobject]@{ ocultarSinStock = $false; tasaDolar = 0.0; autoservicioDestino = "pc"; wifiSSID = ""; wifiClave = ""; umbralStockBajo = 3; permitirDescuentos = $false; permitirBorradores = $false; reposPiso = 0; reposOrigen = ""; origenDatos = "axispos" }
+$global:configApp = [pscustomobject]@{ ocultarSinStock = $false; tasaDolar = 0.0; autoservicioDestino = "pc"; wifiSSID = ""; wifiClave = ""; umbralStockBajo = 3; permitirDescuentos = $false; permitirBorradores = $false; reposPiso = 0; reposOrigen = ""; origenDatos = "axispos"; unirPedidos = $true; unirPedidosMinutos = 3; unirPedidosMax = 4 }
 $global:ipLan = "localhost"
 
 function Cargar-ConfigApp {
@@ -2872,6 +3132,15 @@ function Cargar-ConfigApp {
                 }
                 if ($data.PSObject.Properties.Name -contains 'permitirBorradores') {
                     $global:configApp.permitirBorradores = [bool]$data.permitirBorradores
+                }
+                if ($data.PSObject.Properties.Name -contains 'unirPedidos') {
+                    $global:configApp.unirPedidos = [bool]$data.unirPedidos
+                }
+                if ($data.PSObject.Properties.Name -contains 'unirPedidosMinutos') {
+                    $umA = 0; if ([int]::TryParse([string]$data.unirPedidosMinutos, [ref]$umA) -and $umA -ge 1 -and $umA -le 30) { $global:configApp.unirPedidosMinutos = $umA }
+                }
+                if ($data.PSObject.Properties.Name -contains 'unirPedidosMax') {
+                    $uxA = 0; if ([int]::TryParse([string]$data.unirPedidosMax, [ref]$uxA) -and $uxA -ge 2 -and $uxA -le 8) { $global:configApp.unirPedidosMax = $uxA }
                 }
                 if ($data.PSObject.Properties.Name -contains 'reposPiso') {
                     $rpArch = 0
@@ -4781,6 +5050,10 @@ $htmlPC = @'
 
       <button class="btn-toggle" id="btnOcultarSinStock" style="width:100%; margin-bottom:10px;" onclick="alternarOcultarSinStock()" title="Cuando esta activado, a los vendedores no les aparecen en el buscador los productos sin existencias">Ocultar sin stock a vendedores: ...</button>
 
+      <button class="btn-toggle" id="btnUnirPedidos" style="width:100%; margin-bottom:10px;" onclick="alternarUnirPedidos()" title="Cuando esta activado, varios pedidos del mismo vendedor enviados con pocos minutos de diferencia se cierran juntos si SUMAN exactamente la misma venta (mismos productos y cantidades) que se cobra en AxisPOS">Unir pedidos del mismo vendedor: ...</button>
+
+      <label style="font-size:14px; display:flex; align-items:center; gap:8px; margin-bottom:14px; flex-wrap:wrap;" title="Maximo de pedidos que se pueden unir y minutos maximos entre el primero y el ultimo">Unir hasta <input type="number" id="unirPedidosMax" min="2" max="8" step="1" placeholder="4" style="width:56px; padding:6px 8px; border-radius:6px; border:1px solid #334155; background:#0f172a; color:#e2e8f0;" onchange="guardarUnirPedidos()"> pedidos en <input type="number" id="unirPedidosMinutos" min="1" max="30" step="1" placeholder="3" style="width:56px; padding:6px 8px; border-radius:6px; border:1px solid #334155; background:#0f172a; color:#e2e8f0;" onchange="guardarUnirPedidos()"> min</label>
+
       <button class="btn-toggle" id="btnAutoservicioDestino" style="width:100%; margin-bottom:10px;" onclick="alternarAutoservicioDestino()" title="Adonde caen los pedidos que arman los clientes ellos mismos desde el enlace de autoservicio">Pedidos de clientes (autoservicio): ...</button>
       <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="copiarEnlaceAutoservicio()" title="Enlace para que los clientes vean el catalogo completo y armen su propio pedido desde su telefono">Copiar enlace para clientes</button>
       <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="mostrarQRCliente()" title="Muestra un codigo QR con el enlace del catalogo para que los clientes lo escaneen con la camara del telefono">Ver QR para clientes</button>
@@ -4965,7 +5238,7 @@ $htmlPC = @'
       </div>
       <div id="npVigenciaWrap">
         <label style="font-size:13px; display:block; margin-bottom:4px; color:#cbd5e1;">El pedido espera a los vendedores durante:</label>
-        <select id="selVigenciaNP" class="np-select"><option value="30">30 minutos</option><option value="60" selected>1 hora</option><option value="120">2 horas</option><option value="480">8 horas</option></select>
+        <select id="selVigenciaNP" class="np-select"><option value="30">30 minutos</option><option value="60">1 hora</option><option value="120">2 horas</option><option value="480" selected>8 horas</option></select>
       </div>
       <label style="font-size:13px; display:block; margin-bottom:4px; color:#cbd5e1;">Buscar producto:</label>
       <input type="text" id="npBuscador" class="np-input" placeholder="Nombre o SKU" oninput="buscarNP()">
@@ -6078,6 +6351,12 @@ $htmlPC = @'
         tasaDolarPC = parseFloat(cfg.tasaDolar) || 0;
         const inUmbral = document.getElementById('umbralStockBajo');
         if (document.activeElement !== inUmbral) inUmbral.value = (cfg.umbralStockBajo !== undefined && cfg.umbralStockBajo !== null) ? cfg.umbralStockBajo : 3;
+        unirPedidos = cfg.unirPedidos !== false;
+        pintarBotonUnirPedidos();
+        const inUnirMax = document.getElementById('unirPedidosMax');
+        if (document.activeElement !== inUnirMax) inUnirMax.value = cfg.unirPedidosMax || 4;
+        const inUnirMin = document.getElementById('unirPedidosMinutos');
+        if (document.activeElement !== inUnirMin) inUnirMin.value = cfg.unirPedidosMinutos || 3;
         actualizarAlertaMenuPC();
       } catch(e) {}
     }
@@ -6087,6 +6366,30 @@ $htmlPC = @'
       try {
         await fetch('/api/config', { method:'POST', body: JSON.stringify({ umbralStockBajo: isNaN(v) ? 3 : v }) });
         revisarStockBajo();
+      } catch (e) { alert('No se pudo guardar el ajuste.'); }
+    }
+
+    let unirPedidos = true;
+    function pintarBotonUnirPedidos() {
+      const b = document.getElementById('btnUnirPedidos');
+      if (!b) return;
+      b.classList.toggle('activo', unirPedidos);
+      b.textContent = 'Unir pedidos del mismo vendedor: ' + (unirPedidos ? 'ACTIVADO' : 'DESACTIVADO');
+    }
+    async function alternarUnirPedidos() {
+      const nuevo = !unirPedidos;
+      try {
+        const res = await fetch('/api/config', { method:'POST', body: JSON.stringify({ unirPedidos: nuevo }) });
+        const cfg = await res.json();
+        unirPedidos = cfg.unirPedidos !== false;
+        pintarBotonUnirPedidos();
+      } catch (e) { alert('No se pudo guardar el ajuste.'); }
+    }
+    async function guardarUnirPedidos() {
+      const mx = parseInt(document.getElementById('unirPedidosMax').value, 10);
+      const mn = parseInt(document.getElementById('unirPedidosMinutos').value, 10);
+      try {
+        await fetch('/api/config', { method:'POST', body: JSON.stringify({ unirPedidosMax: isNaN(mx) ? 4 : mx, unirPedidosMinutos: isNaN(mn) ? 3 : mn }) });
       } catch (e) { alert('No se pudo guardar el ajuste.'); }
     }
 
@@ -7449,8 +7752,20 @@ $htmlPC = @'
     }
 
 
+    // Tope de stock: nunca se arma un pedido con mas de lo que hay disponible.
+    function stockDisponibleNP(sku) {
+      const prod = catalogoNP.find(c => c.sku === sku);
+      return (prod && prod.stock !== null && prod.stock !== undefined) ? Number(prod.stock) : null;
+    }
+    function avisarTopeStockNP(nombre, tope) {
+      const errEl = document.getElementById('npError');
+      if (errEl) errEl.textContent = 'De "' + nombre + '" solo hay ' + tope + ' disponibles.';
+    }
+
     function agregarAlCarritoNP(p) {
       const existente = carritoNP.find(i => i.sku === p.sku);
+      const dispNP = stockDisponibleNP(p.sku);
+      if (dispNP !== null && ((existente ? existente.cantidad : 0) + 1) > dispNP) { avisarTopeStockNP(p.nombre, dispNP); return; }
       if (existente) existente.cantidad++;
       else carritoNP.push({ sku: p.sku, nombre: p.nombre, precio: p.precio, cantidad: 1 });
       renderCarritoNP();
@@ -7462,6 +7777,8 @@ $htmlPC = @'
     function cambiarCantidadNP(sku, delta) {
       const item = carritoNP.find(i => i.sku === sku);
       if (!item) return;
+      const dispNP = stockDisponibleNP(sku);
+      if (delta > 0 && dispNP !== null && (item.cantidad + delta) > dispNP) { avisarTopeStockNP(item.nombre, dispNP); return; }
       item.cantidad += delta;
       if (item.cantidad <= 0) carritoNP = carritoNP.filter(i => i.sku !== sku);
       renderCarritoNP();
@@ -10542,9 +10859,20 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
     // "Pedidos que te armo la caja", y el vendedor decide cuando agregarlos
     // a su pedido actual (por ejemplo, cuando termine el que tiene entre
     // manos). Al abrirlos se avisa a la caja que ya se vieron.
-    let asignadosPendientes = [];
+    // Se guardan tambien en el telefono: si se apaga o se cierra la app, al volver siguen ahi (y el servidor los
+    // vuelve a entregar hasta que el telefono confirme que ya los tiene).
+    let asignadosPendientes = (function () {
+      try { const g = JSON.parse(localStorage.getItem('asignadosPendientesV1') || '[]'); return Array.isArray(g) ? g : []; } catch (e) { return []; }
+    })();
+    function guardarAsignadosLocal() {
+      try {
+        localStorage.setItem('asignadosPendientesV1', JSON.stringify(asignadosPendientes));
+        localStorage.setItem('asignadosPendientesNombre', ((typeof nombreInput !== 'undefined' && nombreInput) ? (nombreInput.value || '') : '').trim());
+      } catch (e) {}
+    }
 
     function renderAsignados() {
+      guardarAsignadosLocal();
       const cont = document.getElementById('asignadosLista');
       const sec = document.getElementById('seccionAsignados');
       if (asignadosPendientes.length === 0) {
@@ -10643,8 +10971,11 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
     async function revisarPedidosAsignados() {
       const nombre = (nombreInput.value || '').trim();
       if (!nombre) return;
+      // Si en este telefono entro otro vendedor, no se muestran los pedidos guardados del anterior.
+      const nombreGuardado = localStorage.getItem('asignadosPendientesNombre');
+      if (asignadosPendientes.length && nombreGuardado && nombreGuardado !== nombre) { asignadosPendientes = []; renderAsignados(); }
       try {
-        const res = await fetch('/api/pedidos/asignados?vendedor=' + encodeURIComponent(nombre));
+        const res = await fetch('/api/pedidos/asignados?vendedor=' + encodeURIComponent(nombre) + '&tengo=' + asignadosPendientes.map(x => x.id).join(','));
         const data = await res.json();
         const nuevos = (data && data.pedidos) || [];
         if (nuevos.length === 0) return;
@@ -10683,7 +11014,15 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
         let cambio = false;
         for (const a of [...asignadosPendientes]) {
           const e = estados.find(x => x.id === a.id);
-          if (!e) continue;
+          if (!e) {
+            // Ya no esta en el servidor (vencio o se limpio): si es muy viejo se quita del telefono.
+            const edadMs = a.hora ? (Date.now() - new Date(String(a.hora).replace(' ', 'T')).getTime()) : 0;
+            if (edadMs > 3 * 3600 * 1000) {
+              const iV = asignadosPendientes.findIndex(x => x.id === a.id);
+              if (iV !== -1) { asignadosPendientes.splice(iV, 1); cambio = true; }
+            }
+            continue;
+          }
           const loTomoOtro = a.todos && !a.visto && e.tomadoPor && e.tomadoPor !== nombre;
           if (loTomoOtro || e.retirado) {
             const idx = asignadosPendientes.findIndex(x => x.id === a.id);
@@ -11263,6 +11602,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
       } catch (e) {}
     }
     setInterval(revisarAlertas, 7000);
+    renderAsignados();
     setInterval(revisarPedidosAsignados, 5000);
   </script>
 </body>
@@ -14179,6 +14519,15 @@ while ($listener.IsListening) {
                 if ($umbralNuevo -lt 0) { $umbralNuevo = 0 }
                 $global:configApp.umbralStockBajo = $umbralNuevo
             }
+            if ($data.PSObject.Properties.Name -contains 'unirPedidos') {
+                $global:configApp.unirPedidos = [bool]$data.unirPedidos
+            }
+            if ($data.PSObject.Properties.Name -contains 'unirPedidosMinutos') {
+                $umN = 0; if ([int]::TryParse([string]$data.unirPedidosMinutos, [ref]$umN) -and $umN -ge 1 -and $umN -le 30) { $global:configApp.unirPedidosMinutos = $umN }
+            }
+            if ($data.PSObject.Properties.Name -contains 'unirPedidosMax') {
+                $uxN = 0; if ([int]::TryParse([string]$data.unirPedidosMax, [ref]$uxN) -and $uxN -ge 2 -and $uxN -le 8) { $global:configApp.unirPedidosMax = $uxN }
+            }
             if ($data.PSObject.Properties.Name -contains 'autoservicioDestino') {
                 $global:configApp.autoservicioDestino = if ($data.autoservicioDestino -eq 'vendedor') { "vendedor" } else { "pc" }
             }
@@ -14616,6 +14965,21 @@ while ($listener.IsListening) {
             $minVigAsig = 60
             try { $mvA = [int]$data.minutosVigencia; if ($mvA -ge 5 -and $mvA -le 1440) { $minVigAsig = $mvA } } catch {}
             $vigenciaAsig = (Get-Date).AddMinutes($minVigAsig).ToString("yyyy-MM-dd HH:mm:ss")
+            # Nunca se puede armar un pedido que pase del stock disponible de un producto.
+            $erroresStockAsig = New-Object System.Collections.ArrayList
+            $sumaAsig = @{}
+            foreach ($itA in $itemsAsignados) {
+                $skA = [string]$itA.sku
+                if ([string]::IsNullOrWhiteSpace($skA)) { continue }
+                $qA = 0.0; try { $qA = [double]$itA.cantidad } catch { $qA = 0.0 }
+                if ($sumaAsig.ContainsKey($skA)) { $sumaAsig[$skA] += $qA } else { $sumaAsig[$skA] = $qA }
+            }
+            foreach ($skA in @($sumaAsig.Keys)) {
+                $prodA = $global:catalogo | Where-Object { $_.sku -eq $skA } | Select-Object -First 1
+                if ($prodA -and $prodA.stock -ne $null -and $sumaAsig[$skA] -gt $prodA.stock) {
+                    [void]$erroresStockAsig.Add("$($prodA.nombre): solo quedan $($prodA.stock)")
+                }
+            }
             if ((-not $vendedorDestino) -and (-not $paraTodos)) {
                 Enviar-Respuesta -Context $context -Body (@{ ok = $false; error = "Falta elegir el vendedor." } | ConvertTo-Json) -ContentType "application/json; charset=utf-8" -StatusCode 400
             } elseif ($itemsAsignados.Count -eq 0) {
@@ -14623,6 +14987,8 @@ while ($listener.IsListening) {
             } elseif ($respPreviaAsig = (Clave-EnvioBuscar $claveEnvioAsig)) {
                 # Mismo envio repetido: se devuelve el pedido que ya se creo, sin crear otro.
                 Enviar-Respuesta -Context $context -Body $respPreviaAsig -ContentType "application/json; charset=utf-8"
+            } elseif ($erroresStockAsig.Count -gt 0) {
+                Enviar-Respuesta -Context $context -Body (@{ ok = $false; error = ("No hay stock suficiente -> " + ($erroresStockAsig -join "; ")) } | ConvertTo-Json) -ContentType "application/json; charset=utf-8" -StatusCode 409
             } else {
                 $asignado = [ordered]@{
                     id            = $global:nextIdAsignado
@@ -14660,14 +15026,23 @@ while ($listener.IsListening) {
             # alguno lo toma (boton "Yo lo tomo" en su movil).
             $nombreVend = if ($request.QueryString["vendedor"]) { $request.QueryString["vendedor"].Trim() } else { "" }
             $ahoraEntrega = Get-Date
+            # El movil dice cuales ya tiene guardados (tengo=1,2,3). Solo entonces se anotan como entregados: si la
+            # respuesta se pierde (telefono apagado, sin senal, app cerrada) el pedido se vuelve a entregar en la proxima consulta.
+            $tengoIds = @{}
+            foreach ($tg in ([string]$request.QueryString["tengo"]).Split(',')) { $nTg = 0; if ([int]::TryParse($tg.Trim(), [ref]$nTg)) { $tengoIds[$nTg] = $true } }
+            $cambioEntrega = $false
+            foreach ($a in @($global:pedidosAsignados)) {
+                if ($tengoIds.ContainsKey([int]$a.id) -and ($a.entregadoA -notcontains $nombreVend) -and (($a.todos) -or ($a.vendedor -eq $nombreVend))) {
+                    [void]$a.entregadoA.Add($nombreVend)
+                    if (-not $a.todos) { $a.entregado = $true }
+                    $cambioEntrega = $true
+                }
+            }
+            if ($cambioEntrega) { Guardar-Asignados }
             $paraEste = @($global:pedidosAsignados | Where-Object {
-                (-not $_.tomadoPor) -and (-not $_.retirado) -and ((-not $_.vence) -or ([datetime]$_.vence -gt $ahoraEntrega)) -and ($_.entregadoA -notcontains $nombreVend) -and
+                (-not $_.tomadoPor) -and (-not $_.retirado) -and (-not $_.visto) -and ((-not $_.vence) -or ([datetime]$_.vence -gt $ahoraEntrega)) -and (-not $tengoIds.ContainsKey([int]$_.id)) -and
                 (($_.todos) -or ($_.vendedor -eq $nombreVend))
             })
-            foreach ($a in $paraEste) {
-                [void]$a.entregadoA.Add($nombreVend)
-                if (-not $a.todos) { $a.entregado = $true }
-            }
             Enviar-Respuesta -Context $context -Body (@{ ok = $true; pedidos = $paraEste } | ConvertTo-Json -Depth 10) -ContentType "application/json; charset=utf-8"
 
         } elseif ($method -eq "POST" -and $path -match "^/api/pedidos/asignados/(\d+)/visto$") {
