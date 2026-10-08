@@ -1014,6 +1014,13 @@ function Cargar-Asignados {
                         retirado      = [bool]$a.retirado
                         horaRetirado  = $a.horaRetirado
                         vence         = $a.vence
+                        cliente       = [string]$a.cliente
+                        nota          = [string]$a.nota
+                        cobradoAxis   = $a.cobradoAxis
+                        rev           = [int]$a.rev
+                        agregado      = [bool]$a.agregado
+                        horaAgregado  = $a.horaAgregado
+                        agregadoPor   = [string]$a.agregadoPor
                     }
                     [void]$global:pedidosAsignados.Add($obj)
                     if ($obj.id -ge $global:nextIdAsignado) { $global:nextIdAsignado = [int]$obj.id + 1 }
@@ -2392,9 +2399,10 @@ function Detalle-DiferenciaVenta($pedidoItems, $venta) {
 
 # ---- Reservas de stock ----
 function Pedido-ReservaStock($p, [datetime]$ahora, [int]$minutos) {
+    # Con AxisPOS como base de datos, solo un pedido PENDIENTE aparta stock. Uno ya cobrado no descuenta nada:
+    # si la caja lo paso en AxisPOS, esa baja ya esta en el stock de AxisPOS (no se cuenta dos veces).
     $est = [string]$p.estado
-    if ($est -ne "pendiente" -and $est -ne "cobrado") { return $false }
-    if ($est -eq "cobrado" -and $p.ventaAxis) { return $false }
+    if ($est -ne "pendiente") { return $false }
     $h = Hora-Pedido $p
     if ($h -and (($ahora - $h).TotalMinutes -gt $minutos)) { return $false }
     return $true
@@ -2806,11 +2814,12 @@ function Conciliar-VentaAxis($grupo) {
         } catch {}
     }
 
-    # 3) Pedido que la PC le mando al vendedor y el todavia no lo ha tomado: si la caja ya lo cobro,
-    #    se retira solo y al movil le sale "ya se cobro en caja" (en vez de dejarle un pedido que ya no vale).
+    # 3) Pedido que la PC le mando al vendedor y el todavia no lo ha tomado: si la caja ya lo cobro, NO se quita del
+    #    movil (antes desaparecia justo cuando el vendedor iba a cogerlo). Se marca como "ya cobrado en caja" y se le avisa;
+    #    cuando el vendedor lo tome y lo mande, se cierra solo con esa misma venta.
     if (-not $hecho) {
         foreach ($asigC in @($global:pedidosAsignados)) {
-            if ($asigC.retirado -or $asigC.tomadoPor) { continue }
+            if ($asigC.retirado -or $asigC.tomadoPor -or $asigC.cobradoAxis) { continue }
             try { if ($asigC.vence -and ([datetime]$asigC.vence -lt (Get-Date))) { continue } } catch {}
             $itemsAsigC = Juntar-CantidadesPorSku $asigC.items 'sku' 'cantidad'
             if (-not (Items-IgualesAVenta $itemsAsigC $venta)) { continue }
@@ -2819,13 +2828,10 @@ function Conciliar-VentaAxis($grupo) {
                 try { $horaAsigC = [datetime]::ParseExact([string]$asigC.hora, "yyyy-MM-dd HH:mm:ss", $inv) } catch { $horaAsigC = $null }
                 if ($horaAsigC -and ($horaVenta -lt $horaAsigC.AddSeconds(-(Margen-VentaAntesSeg)))) { continue }
             }
-            $asigC.retirado = $true
-            $asigC.horaRetirado = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
             Poner-Prop $asigC "cobradoAxis" $acct
-            $rec.pedidoId = "A" + [string]$asigC.id
             Guardar-Asignados
-            if ($asigC.vendedor) { try { Agregar-AlertaVendedor ([string]$asigC.vendedor) ("El pedido que te armo la caja ya se cobro (venta #" + $acct + ").") $null "pedido" } catch {} }
-            Write-Host ("[" + (Get-Date).ToString('HH:mm:ss') + "] AxisPOS: la venta " + $acct + " cobro el pedido asignado #" + $asigC.id + " antes de que el vendedor lo tomara")
+            if ($asigC.vendedor) { try { Agregar-AlertaVendedor ([string]$asigC.vendedor) ("El pedido que te armo la caja ya se cobro (venta #" + $acct + "). Puedes tomarlo igual: al mandarlo se cierra solo con esa venta.") $null "pedido" } catch {} }
+            Write-Host ("[" + (Get-Date).ToString('HH:mm:ss') + "] AxisPOS: la venta " + $acct + " ya cobro el pedido asignado #" + $asigC.id + " (sigue visible para el vendedor)")
             $hecho = $true
             break
         }
@@ -2852,7 +2858,25 @@ function Conciliar-VentaAxis($grupo) {
     if (-not $hecho) {
         try {
             $parecido = Buscar-PedidoParecido $venta $horaVenta
-            if ($parecido -and (-not $parecido.exacto)) { Avisar-DiferenciaCaja $parecido.p $parecido.pedItems $venta "cobro" $acct (Nombre-OperadorAxis ([string]$grupo[0].op)) }
+            if ($parecido -and (-not $parecido.exacto)) {
+                Avisar-DiferenciaCaja $parecido.p $parecido.pedItems $venta "cobro" $acct (Nombre-OperadorAxis ([string]$grupo[0].op))
+                # Lo que esta venta ya cubrio del pedido salio del stock de AxisPOS: se libera de la reserva para no contarlo dos veces.
+                # (La venta queda sin enlazar, para que el pedido pueda cerrarse con ella cuando el vendedor lo corrija.)
+                $restoPar = Restante-DelPedido $parecido.p
+                if ($restoPar -and $restoPar.Count -gt 0) {
+                    $cubierto = @{}
+                    foreach ($kC in @($venta.Keys)) {
+                        if ($restoPar.ContainsKey($kC)) { $cubierto[$kC] = [math]::Min([double]$restoPar[$kC], [double]$venta[$kC]) }
+                    }
+                    if ($cubierto.Count -gt 0) {
+                        $listaPar = New-Object System.Collections.ArrayList
+                        foreach ($xP in @($parecido.p.axisParciales)) { [void]$listaPar.Add($xP) }
+                        [void]$listaPar.Add([pscustomobject]@{ acct = $acct; items = @(Items-ComoLista $cubierto) })
+                        Poner-Prop $parecido.p "axisParciales" @($listaPar.ToArray())
+                        Guardar-Pedidos
+                    }
+                }
+            }
         } catch {}
     }
 
@@ -4946,6 +4970,7 @@ $htmlPC = @'
     <label><input type="checkbox" id="soloPendientes" checked> Mostrar solo pendientes y por revisar</label>
     <span id="contadorRevisar"></span>
     <button class="btn-nuevo-pedido" onclick="abrirNuevoPedido()" title="Atajo: F2">Nuevo pedido para vendedor (F2)</button>
+    <button class="btn-nuevo-pedido" style="background:#0369a1;" onclick="abrirListaAsignados()" title="Ver, editar o retirar los pedidos que ya enviaste a vendedores">Pedidos enviados</button>
   </div>
 
   <div id="panelStockBajo" style="display:none; position:fixed; top:64px; right:16px; z-index:57; width:340px; max-width:92vw; max-height:70vh; overflow:auto; background:#1e293b; border:1px solid #334155; border-radius:12px; padding:12px; box-shadow:0 8px 24px rgba(0,0,0,0.5);">
@@ -5253,6 +5278,17 @@ $htmlPC = @'
     </div>
   </div>
 
+  <div id="asigListaOverlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); align-items:center; justify-content:center; z-index:54;" onclick="if (event.target === this) cerrarListaAsignados()">
+    <div style="background:#1e293b; padding:20px; border-radius:12px; max-width:560px; width:94%; max-height:88vh; overflow:auto; color:#e2e8f0;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+        <h2 style="font-size:17px; color:#fff;">Pedidos que enviaste a vendedores</h2>
+        <button class="btn-toggle" onclick="cerrarListaAsignados()">Cerrar</button>
+      </div>
+      <div style="font-size:12px; color:#94a3b8; margin-bottom:10px;">Puedes editarlos mientras nadie los haya tomado ni agregado a su pedido. Si ya lo vieron, al editar les vuelve a aparecer como modificado.</div>
+      <div id="asigListaCont"></div>
+    </div>
+  </div>
+
   <div id="fotoOverlayNP" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.85); align-items:center; justify-content:center; z-index:60;" onclick="cerrarFotoProductoNP()">
     <div style="text-align:center;" onclick="event.stopPropagation()">
       <img id="fotoOverlayImgNP" src="" style="max-width:94vw; max-height:80vh; border-radius:10px; background:#fff;">
@@ -5323,7 +5359,18 @@ $htmlPC = @'
     let configMapeoEncabezados = [];
     let procesandoExcel = false;
 
-    document.getElementById('shareUrl').textContent = location.origin + '/vendedor';
+    // Direccion que tienen que abrir los vendedores: la IP de la PC en la red (no "localhost", que solo sirve en esta PC).
+    async function mostrarUrlVendedores() {
+      let base = location.origin;
+      try {
+        const res = await fetch('/api/ip');
+        const info = await res.json();
+        if (info && info.ip && info.ip !== 'localhost' && info.ip !== '127.0.0.1') base = 'http://' + info.ip + ':' + (info.puerto || location.port || 80);
+      } catch (e) {}
+      document.getElementById('shareUrl').textContent = base + '/vendedor';
+    }
+    mostrarUrlVendedores();
+    setInterval(mostrarUrlVendedores, 15000);
 
     function beep() {
       try {
@@ -5370,6 +5417,11 @@ $htmlPC = @'
       btn.style.cssText = 'background:#fff; color:#0369a1; border:none; border-radius:6px; padding:4px 10px; font-weight:700; cursor:pointer; margin-left:6px;';
       btn.onclick = () => deshacerAsignado(idAsignado);
       b.appendChild(btn);
+      const btnEd = document.createElement('button');
+      btnEd.textContent = 'Editar';
+      btnEd.style.cssText = 'background:#fff; color:#0369a1; border:none; border-radius:6px; padding:4px 10px; font-weight:700; cursor:pointer; margin-left:6px;';
+      btnEd.onclick = () => { document.getElementById('banner').style.display = 'none'; abrirEditarAsignado(idAsignado); };
+      b.appendChild(btnEd);
       b.style.display = 'block';
       bannerOcultarTimeout = setTimeout(() => { b.style.display = 'none'; b.innerHTML = ''; }, 8000);
     }
@@ -6972,6 +7024,7 @@ $htmlPC = @'
       ['fotoOverlayNP', function () { cerrarFotoProductoNP(); }],
       ['qrOverlay', function () { cerrarQRCliente(); }],
       ['nuevoPedidoOverlay', function () { cerrarNuevoPedido(); }],
+      ['asigListaOverlay', function () { cerrarListaAsignados(); }],
       ['menuPCOverlay', function () { cerrarMenuPC(); }],
       ['pinesOverlay', function () { cerrarPines(); }],
       ['comprasOverlay', function () { cerrarCompras(); }],
@@ -7597,6 +7650,7 @@ $htmlPC = @'
     // ---- Nuevo pedido para vendedor (armado desde la PC) ----
     let catalogoNP = [];
     let carritoNP = [];
+    let asigEditando = null;   // pedido ya enviado que se esta editando (null = pedido nuevo o "agregar a pedido")
     let intervaloVendedoresNP = null;
     // Se recuerda que pedidos asignados ya se avisaron como "vistos" para no
     // repetir el banner cada vez que se consulta el estado.
@@ -7654,6 +7708,102 @@ $htmlPC = @'
     setInterval(revisarMensajesPC, 5000);
     revisarMensajesPC();
 
+    // ---- Pedidos que la PC ya envio a vendedores: ver su estado, editarlos o retirarlos ----
+    let asigListaDatos = [];
+    let asigListaTimer = null;
+    function abrirListaAsignados() {
+      document.getElementById('asigListaOverlay').style.display = 'flex';
+      cargarListaAsignados();
+      if (!asigListaTimer) asigListaTimer = setInterval(cargarListaAsignados, 3000);
+    }
+    function cerrarListaAsignados() {
+      document.getElementById('asigListaOverlay').style.display = 'none';
+      if (asigListaTimer) { clearInterval(asigListaTimer); asigListaTimer = null; }
+    }
+    function estadoAsigPC(a) {
+      if (a.cobradoAxis) return { texto: 'Ya cobrado en caja (venta #' + a.cobradoAxis + ')', editar: false, color: '#fbbf24' };
+      if (a.tomadoPor) return { texto: 'Lo tomo ' + a.tomadoPor, editar: false, color: '#86efac' };
+      if (a.agregado) return { texto: (a.agregadoPor || (a.todos ? 'Un vendedor' : a.vendedor) || 'El vendedor') + ' lo agrego a su pedido', editar: false, color: '#86efac' };
+      if (a.vencido) return { texto: 'Vencio sin que nadie lo tomara', editar: true, color: '#fca5a5' };
+      if (a.visto) return { texto: (a.vendedor || 'El vendedor') + ' ya lo vio', editar: true, color: '#7dd3fc' };
+      return { texto: a.todos ? 'Esperando: nadie lo ha tomado todavia' : ('Esperando a ' + a.vendedor), editar: true, color: '#cbd5e1' };
+    }
+    async function cargarListaAsignados() {
+      try {
+        const res = await fetch('/api/pedidos/asignados/mios');
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data || !data.ok) return;
+        asigListaDatos = data.asignados || [];
+        renderListaAsignados();
+      } catch (e) {}
+    }
+    function renderListaAsignados() {
+      const cont = document.getElementById('asigListaCont');
+      if (!cont) return;
+      if (!asigListaDatos.length) { cont.innerHTML = '<div class="np-vacio">No hay pedidos enviados activos.</div>'; return; }
+      cont.innerHTML = asigListaDatos.map(a => {
+        const est = estadoAsigPC(a);
+        const total = (a.items || []).reduce((s, i) => s + (Number(i.precio) || 0) * (Number(i.cantidad) || 0), 0);
+        const dest = a.todos ? 'Todos los vendedores' : (a.vendedor || '?');
+        const lineas = (a.items || []).map(i =>
+          '<div style="display:flex; justify-content:space-between; gap:8px; font-size:13px;"><span>' + (Number(i.cantidad) || 0) + ' x ' + escaparHtml(i.nombre) + '</span><span>$' + ((Number(i.precio) || 0) * (Number(i.cantidad) || 0)).toFixed(2) + '</span></div>'
+        ).join('');
+        const btns = (est.editar ? '<button class="btn-nuevo-pedido" style="background:#0369a1; padding:6px 12px;" onclick="abrirEditarAsignado(' + a.id + ')">Editar</button> ' : '') +
+          (a.tomadoPor ? '' : '<button class="btn-nuevo-pedido" style="background:#b91c1c; padding:6px 12px;" onclick="retirarAsignadoLista(' + a.id + ')">Retirar</button>');
+        return '<div style="background:#0f172a; border:1px solid #334155; border-radius:10px; padding:10px; margin-bottom:10px;">' +
+          '<div style="display:flex; justify-content:space-between; font-size:13px; color:#fff; margin-bottom:4px;"><b>#' + a.id + ' &rarr; ' + escaparHtml(dest) + '</b><span style="color:#94a3b8;">' + escaparHtml(String(a.hora || '').slice(11, 16)) + (a.rev > 1 ? ' (editado)' : '') + '</span></div>' +
+          '<div style="font-size:12px; color:' + est.color + '; margin-bottom:6px;">' + escaparHtml(est.texto) + '</div>' +
+          lineas +
+          (a.nota ? '<div style="font-size:12px; color:#7dd3fc; margin-top:4px;">Nota: ' + escaparHtml(a.nota) + '</div>' : '') +
+          '<div style="display:flex; justify-content:space-between; align-items:center; margin-top:8px;"><b>Total: $' + total.toFixed(2) + '</b><span>' + btns + '</span></div>' +
+        '</div>';
+      }).join('');
+    }
+    async function retirarAsignadoLista(id) {
+      if (!confirm('¿Retirar este pedido? Se quita del movil del vendedor.')) return;
+      try {
+        const res = await fetch('/api/pedidos/asignados/' + id + '/retirar', { method: 'POST' });
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data || !data.ok) { mostrarBanner((data && data.error) || 'No se pudo retirar.', 4000); }
+        else mostrarBanner('Pedido retirado.');
+      } catch (e) { mostrarBanner('No se pudo retirar (revisa la conexion).'); }
+      cargarListaAsignados();
+    }
+    // Abre el mismo dialogo de "Nuevo pedido" pero con los productos del pedido ya enviado.
+    async function abrirEditarAsignado(id) {
+      try {
+        const res = await fetch('/api/pedidos/asignados/mios');
+        const data = await res.json().catch(() => null);
+        if (res.ok && data && data.ok) asigListaDatos = data.asignados || [];
+      } catch (e) {}
+      const a = asigListaDatos.find(x => x.id === id);
+      if (!a) { mostrarBanner('Ese pedido ya no esta disponible para editar.', 4000); return; }
+      const est = estadoAsigPC(a);
+      if (!est.editar) { mostrarBanner('Ya no se puede editar: ' + est.texto + '.', 5000); return; }
+      abrirNuevoPedido(null, { editar: a });
+    }
+    async function guardarEdicionAsignado(notaNP) {
+      const err = document.getElementById('npError');
+      const a = asigEditando;
+      if (!a) return;
+      if (carritoNP.length === 0) { err.textContent = 'Deja al menos un producto, o usa "Retirar" en Pedidos enviados para quitar el pedido.'; return; }
+      const destino = document.getElementById('selVendedorDestino').value;
+      if (!destino) { err.textContent = 'Elige a quien enviarlo.'; return; }
+      const vigMin = parseInt(document.getElementById('selVigenciaNP').value, 10) || 60;
+      const paraTodos = destino === '__TODOS__';
+      try {
+        const body = paraTodos ? { todos: true, items: carritoNP, minutosVigencia: vigMin, nota: notaNP } : { vendedor: destino, items: carritoNP, minutosVigencia: vigMin, nota: notaNP };
+        const res = await fetch('/api/pedidos/asignados/' + a.id + '/editar', { method: 'POST', body: JSON.stringify(body) });
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data || !data.ok) { err.textContent = (data && data.error) || 'No se pudieron guardar los cambios.'; return; }
+        delete asignadosVistoAvisado[a.id];
+        delete asignadosVencidoAvisado[a.id];
+        mostrarBanner('Pedido #' + a.id + ' actualizado' + (paraTodos ? ' para todos los vendedores.' : (' para ' + destino + '.')));
+        cerrarNuevoPedido();
+        if (pcVisible('asigListaOverlay')) cargarListaAsignados();
+      } catch (e) { err.textContent = 'No se pudo guardar (revisa la conexion).'; }
+    }
+
     async function cargarCatalogoNP() {
       // Se vuelve a pedir cada vez que se abre el dialogo: asi el stock que se ve (y el filtro de "sin stock") esta al dia.
       try {
@@ -7665,14 +7815,14 @@ $htmlPC = @'
     async function cargarVendedoresNP() {
       const sel = document.getElementById('selVendedorDestino');
       const aviso = document.getElementById('npSinVendedores');
-      const actual = sel.value;
+      const actual = sel.value || (asigEditando ? (asigEditando.todos ? '__TODOS__' : (asigEditando.vendedor || '')) : '');
       try {
         const res = await fetch('/api/vendedores');
         const data = await res.json();
         const conectados = (data && data.vendedores) || [];
         let registrados = [];
         try { const rp = await fetch('/api/pines'); registrados = ((await rp.json()) || {}).vendedoresConPin || []; } catch (e2) {}
-        const todosNombres = Array.from(new Set(registrados.concat(conectados))).sort((a, b) => a.localeCompare(b));
+        const todosNombres = Array.from(new Set(registrados.concat(conectados).concat((asigEditando && !asigEditando.todos && asigEditando.vendedor) ? [asigEditando.vendedor] : []))).sort((a, b) => a.localeCompare(b));
         aviso.style.display = conectados.length === 0 ? 'block' : 'none';
         const opcionTodos = '<option value="__TODOS__">Todos los vendedores (el primero que lo tome)</option>';
         sel.innerHTML = opcionTodos + todosNombres.map(v => '<option value="' + v + '">' + v + (conectados.includes(v) ? ' \u25CF en linea' : ' (sin conexion)') + '</option>').join('');
@@ -7688,7 +7838,8 @@ $htmlPC = @'
     let claveBaseNP = '';   // identifica esta "apertura" del dialogo: sirve para que un envio repetido no se duplique
     let enviandoNP = false;
     function hashSimpleNP(t) { let h = 5381; for (let i = 0; i < t.length; i++) h = ((h << 5) + h + t.charCodeAt(i)) | 0; return (h >>> 0).toString(36); }
-    function abrirNuevoPedido(pedidoIdExistente) {
+    function abrirNuevoPedido(pedidoIdExistente, opciones) {
+      asigEditando = (opciones && opciones.editar) ? opciones.editar : null;
       agregarAPedidoId = pedidoIdExistente || null;
       claveBaseNP = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
       enviandoNP = false;
@@ -7709,12 +7860,20 @@ $htmlPC = @'
         cargarVendedoresNP();
         if (!intervaloVendedoresNP) intervaloVendedoresNP = setInterval(cargarVendedoresNP, 5000);
       }
+      if (asigEditando) {
+        document.getElementById('npTitulo').textContent = 'Editar pedido enviado #' + asigEditando.id;
+        document.getElementById('npBtnEnviar').textContent = 'Guardar cambios';
+        document.getElementById('npNota').value = asigEditando.nota || '';
+        carritoNP = (asigEditando.items || []).map(i => ({ sku: i.sku, nombre: i.nombre, precio: Number(i.precio) || 0, cantidad: Number(i.cantidad) || 0 }));
+        renderCarritoNP();
+      }
     }
 
     function cerrarNuevoPedido() {
       document.getElementById('nuevoPedidoOverlay').style.display = 'none';
       if (intervaloVendedoresNP) { clearInterval(intervaloVendedoresNP); intervaloVendedoresNP = null; }
       agregarAPedidoId = null;
+      asigEditando = null;
       carritoNP = [];
       renderCarritoNP();
     }
@@ -7840,6 +7999,7 @@ $htmlPC = @'
       const err = document.getElementById('npError');
       err.textContent = '';
       const notaNP = ((document.getElementById('npNota') || {}).value || '').trim();
+      if (asigEditando) { await guardarEdicionAsignado(notaNP); return; }
       if (carritoNP.length === 0 && !(notaNP && !agregarAPedidoId)) { err.textContent = agregarAPedidoId ? 'Agrega al menos un producto.' : 'Agrega al menos un producto o escribe un mensaje.'; return; }
       if (agregarAPedidoId) {
         try {
@@ -10904,6 +11064,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
           : (esTodos ? 'Pedido para el primero que lo tome — ' : 'De la caja — ');
         return '<div class="asig-card">' +
           '<div class="mp-top"><span>' + etiquetaOrigen + horaCorta + '</span></div>' +
+          (a.editado ? '<div style="font-size:12px; font-weight:700; color:#b45309; margin:2px 0;">&#9998; La caja modifico este pedido</div>' : '') +
           '<div class="mp-items" style="display:block;">' + lineas + '</div>' +
           (a.nota ? '<div style="font-size:13px; color:#0369a1; margin:4px 0;">Nota de la caja: ' + escaparHtml(a.nota) + '</div>' : '') +
           '<div class="mp-total">Total: $' + total.toFixed(2) + '</div>' +
@@ -10954,6 +11115,8 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
         origenesAsignadosCarrito.push({ asignadoId: a.id, tomadoPor: a.tomadoPor || (nombreInput.value || '').trim(), horaTomado: a.horaTomado || new Date().toISOString(), cliente: a.cliente || '' });
       }
       if (!a.visto) marcarVistoAsignado(id);
+      // Se avisa a la caja: desde ahora ya no puede editarlo (los cambios no llegarian a tu carrito).
+      try { fetch('/api/pedidos/asignados/' + id + '/agregado', { method: 'POST', body: JSON.stringify({ vendedor: (nombreInput.value || '').trim() }) }).catch(() => {}); } catch (e) {}
       asignadosPendientes.splice(idx, 1);
       renderCarrito();
       renderAsignados();
@@ -10975,15 +11138,33 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
       const nombreGuardado = localStorage.getItem('asignadosPendientesNombre');
       if (asignadosPendientes.length && nombreGuardado && nombreGuardado !== nombre) { asignadosPendientes = []; renderAsignados(); }
       try {
-        const res = await fetch('/api/pedidos/asignados?vendedor=' + encodeURIComponent(nombre) + '&tengo=' + asignadosPendientes.map(x => x.id).join(','));
+        const res = await fetch('/api/pedidos/asignados?vendedor=' + encodeURIComponent(nombre) + '&tengo=' + asignadosPendientes.map(x => x.id).join(',') + '&revs=' + asignadosPendientes.map(x => x.id + ':' + (x.rev || 1)).join(','));
         const data = await res.json();
         const nuevos = (data && data.pedidos) || [];
+        // La caja edito un pedido que ya tenias en pantalla: se actualiza la tarjeta.
+        const editados = (data && data.actualizados) || [];
+        let huboEdicion = false;
+        for (const u of editados) {
+          const ex = asignadosPendientes.find(x => x.id === u.id);
+          if (!ex) continue;
+          ex.items = u.items || []; ex.nota = u.nota || ''; ex.hora = u.hora; ex.todos = !!u.todos; ex.cliente = u.cliente || '';
+          ex.rev = u.rev || ((ex.rev || 1) + 1); ex.visto = false; ex.editado = true;
+          huboEdicion = true;
+          agregarNotificacionCampana('La caja modifico un pedido que te habia mandado.');
+        }
+        if (huboEdicion) {
+          renderAsignados();
+          beepAsignado();
+          if (document.hidden) { try { mostrarNotificacionSistema('Pedido modificado', 'La caja cambio un pedido que te habia mandado.'); } catch (e) {} }
+          document.getElementById('bannerAsignado').style.display = 'block';
+          mostrarMensaje('La caja modifico un pedido: revisalo abajo, en "Pedidos que te armo la caja".', true);
+        }
         if (nuevos.length === 0) return;
         let hayNuevo = false;
         for (const a of nuevos) {
           if (asignadosPendientes.some(x => x.id === a.id)) continue;   // ya lo tiene: no se repite la tarjeta ni el aviso
           hayNuevo = true;
-          asignadosPendientes.push({ id: a.id, items: a.items || [], hora: a.hora, todos: !!a.todos, visto: false, cliente: a.cliente || '', nota: a.nota || '' });
+          asignadosPendientes.push({ id: a.id, items: a.items || [], hora: a.hora, todos: !!a.todos, visto: false, cliente: a.cliente || '', nota: a.nota || '', rev: a.rev || 1 });
           const nProd = (a.items || []).length;
           const quePedido = a.cliente
             ? ('El cliente "' + a.cliente + '" mando un pedido (')
@@ -11023,11 +11204,18 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
             }
             continue;
           }
+          if (e.cobradoAxis && !e.retirado && !a.avisadoCobro) {
+            a.avisadoCobro = true; cambio = true;
+            mostrarMensaje('Ojo: la caja ya cobro este pedido (venta #' + e.cobradoAxis + '). Puedes tomarlo igual; al mandarlo se cierra solo.', true);
+          }
           const loTomoOtro = a.todos && !a.visto && e.tomadoPor && e.tomadoPor !== nombre;
-          if (loTomoOtro || e.retirado) {
+          // La caja cambio el pedido a otro vendedor: aqui ya no es tuyo.
+          const yaNoEsMio = !!nombre && !e.todos && !!e.vendedor && String(e.vendedor).trim().toLowerCase() !== nombre.toLowerCase();
+          if (loTomoOtro || e.retirado || yaNoEsMio) {
             const idx = asignadosPendientes.findIndex(x => x.id === a.id);
             if (idx !== -1) { asignadosPendientes.splice(idx, 1); cambio = true; }
             if (e.retirado) mostrarMensaje(e.cobradoAxis ? ('Ese pedido ya se cobro en caja (venta #' + e.cobradoAxis + ').') : 'La caja retiro un pedido que te habia armado.', false);
+            else if (yaNoEsMio) mostrarMensaje('La caja le paso a otro vendedor un pedido que te habia armado.', false);
           }
         }
         if (cambio) renderAsignados();
@@ -15007,6 +15195,10 @@ while ($listener.IsListening) {
                     horaRetirado  = $null
                     vence         = $vigenciaAsig
                     nota          = $notaAsig
+                    rev           = 1
+                    agregado      = $false
+                    horaAgregado  = $null
+                    agregadoPor   = ""
                 }
                 $global:nextIdAsignado++
                 [void]$global:pedidosAsignados.Add([pscustomobject]$asignado)
@@ -15043,7 +15235,19 @@ while ($listener.IsListening) {
                 (-not $_.tomadoPor) -and (-not $_.retirado) -and (-not $_.visto) -and ((-not $_.vence) -or ([datetime]$_.vence -gt $ahoraEntrega)) -and (-not $tengoIds.ContainsKey([int]$_.id)) -and
                 (($_.todos) -or ($_.vendedor -eq $nombreVend))
             })
-            Enviar-Respuesta -Context $context -Body (@{ ok = $true; pedidos = $paraEste } | ConvertTo-Json -Depth 10) -ContentType "application/json; charset=utf-8"
+            # Pedidos que el movil ya tiene pero que la caja EDITO despues (el movil manda revs=id:version,...).
+            $revsTengo = @{}
+            foreach ($rv in ([string]$request.QueryString["revs"]).Split(',')) {
+                $pRv = $rv.Trim().Split(':')
+                $nRv = 0; $rRv = 0
+                if (($pRv.Count -eq 2) -and [int]::TryParse($pRv[0], [ref]$nRv) -and [int]::TryParse($pRv[1], [ref]$rRv)) { $revsTengo[$nRv] = $rRv }
+            }
+            $actualizados = @($global:pedidosAsignados | Where-Object {
+                $revsTengo.ContainsKey([int]$_.id) -and (-not $_.tomadoPor) -and (-not $_.retirado) -and (-not $_.agregado) -and
+                ([Math]::Max(1, [int]$_.rev) -gt $revsTengo[[int]$_.id]) -and
+                (($_.todos) -or ($_.vendedor -eq $nombreVend))
+            })
+            Enviar-Respuesta -Context $context -Body (@{ ok = $true; pedidos = $paraEste; actualizados = $actualizados } | ConvertTo-Json -Depth 10) -ContentType "application/json; charset=utf-8"
 
         } elseif ($method -eq "POST" -and $path -match "^/api/pedidos/asignados/(\d+)/visto$") {
             # El vendedor marca en su movil que ya vio un pedido que le armo la
@@ -15106,6 +15310,128 @@ while ($listener.IsListening) {
                 Enviar-Respuesta -Context $context -Body (@{ ok = $true } | ConvertTo-Json) -ContentType "application/json; charset=utf-8"
             }
 
+        } elseif ($method -eq "GET" -and $path -eq "/api/pedidos/asignados/mios") {
+            # Solo la PC: lista de los pedidos que armo y envio a vendedores (con productos), para poder
+            # ver en que estado estan, editarlos o retirarlos.
+            if (-not [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)) {
+                Enviar-Json $context @{ ok = $false; error = "Solo se puede consultar desde la PC." } 403
+            } else {
+                $ahoraMios = Get-Date
+                $listaMios = @($global:pedidosAsignados | Where-Object { (-not $_.retirado) -and (-not [string]$_.cliente) } | Sort-Object { [int]$_.id } -Descending | ForEach-Object {
+                    $vencidoMios = $false
+                    try { if ((-not $_.tomadoPor) -and $_.vence -and ([datetime]$_.vence -lt $ahoraMios)) { $vencidoMios = $true } } catch {}
+                    [pscustomobject]@{
+                        id = [int]$_.id; vendedor = [string]$_.vendedor; todos = [bool]$_.todos; tomadoPor = $_.tomadoPor
+                        hora = $_.hora; vence = $_.vence; visto = [bool]$_.visto; agregado = [bool]$_.agregado; agregadoPor = [string]$_.agregadoPor
+                        cobradoAxis = [string]$_.cobradoAxis; nota = [string]$_.nota; items = @($_.items); rev = [Math]::Max(1, [int]$_.rev); vencido = $vencidoMios
+                    }
+                })
+                Enviar-Json $context @{ ok = $true; asignados = $listaMios } 200 8
+            }
+
+        } elseif ($method -eq "POST" -and $path -match "^/api/pedidos/asignados/(\d+)/editar$") {
+            # La PC corrige un pedido que ya envio (productos, cantidades, nota, vendedor o "para todos")
+            # mientras nadie lo haya tomado ni agregado a su pedido. Los moviles que ya lo tienen en
+            # pantalla lo actualizan solos (ver "actualizados" en GET /api/pedidos/asignados).
+            $idAsig = [int]$Matches[1]
+            $esLocalEdA = [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)
+            $reader = New-Object System.IO.StreamReader($request.InputStream, [System.Text.Encoding]::UTF8)
+            $bodyText = $reader.ReadToEnd()
+            $reader.Close()
+            $data = $null
+            if ($bodyText -and $bodyText.Trim().Length -gt 0) { $data = $bodyText | ConvertFrom-Json }
+            $asig = $global:pedidosAsignados | Where-Object { [int]$_.id -eq $idAsig }
+            $destEdA = if ($data -and $data.vendedor) { ([string]$data.vendedor).Trim() } else { "" }
+            $todosEdA = [bool]($data -and $data.todos)
+            $itemsEdA = New-Object System.Collections.ArrayList
+            if ($data) {
+                foreach ($itE in @($data.items)) {
+                    if ($null -eq $itE) { continue }
+                    $qE = 0.0; try { $qE = [double]$itE.cantidad } catch { $qE = 0.0 }
+                    if ([string]::IsNullOrWhiteSpace([string]$itE.sku) -or $qE -le 0) { continue }
+                    [void]$itemsEdA.Add($itE)
+                }
+            }
+            # Igual que al crear: nunca pasar del stock disponible.
+            $erroresStockEdA = New-Object System.Collections.ArrayList
+            $sumaEdA = @{}
+            foreach ($itE in $itemsEdA) {
+                $skE = [string]$itE.sku
+                $qE = 0.0; try { $qE = [double]$itE.cantidad } catch { $qE = 0.0 }
+                if ($sumaEdA.ContainsKey($skE)) { $sumaEdA[$skE] += $qE } else { $sumaEdA[$skE] = $qE }
+            }
+            foreach ($skE in @($sumaEdA.Keys)) {
+                $prodE = $global:catalogo | Where-Object { $_.sku -eq $skE } | Select-Object -First 1
+                if ($prodE -and $prodE.stock -ne $null -and $sumaEdA[$skE] -gt $prodE.stock) {
+                    [void]$erroresStockEdA.Add("$($prodE.nombre): solo quedan $($prodE.stock)")
+                }
+            }
+            if (-not $esLocalEdA) {
+                Enviar-Json $context @{ ok = $false; error = "Solo se puede editar desde la PC." } 403
+            } elseif (-not $asig) {
+                Enviar-Json $context @{ ok = $false; error = "No encontrado (puede que ya se haya limpiado)." } 404
+            } elseif ($asig.retirado) {
+                Enviar-Json $context @{ ok = $false; error = "Ese pedido ya fue retirado." } 409
+            } elseif ($asig.tomadoPor) {
+                Enviar-Json $context @{ ok = $false; error = ("Ya lo tomo " + $asig.tomadoPor + ", ya no se puede editar."); tomadoPor = $asig.tomadoPor } 409
+            } elseif ($asig.agregado) {
+                $quienAg = if ($asig.agregadoPor) { [string]$asig.agregadoPor } elseif ($asig.vendedor) { [string]$asig.vendedor } else { "Un vendedor" }
+                Enviar-Json $context @{ ok = $false; error = ($quienAg + " ya lo agrego a su pedido, ya no se puede editar.") } 409
+            } elseif ($asig.cobradoAxis) {
+                Enviar-Json $context @{ ok = $false; error = ("Ese pedido ya se cobro en caja (venta #" + [string]$asig.cobradoAxis + "), ya no se puede editar.") } 409
+            } elseif ([string]$asig.cliente) {
+                Enviar-Json $context @{ ok = $false; error = "Los pedidos que manda un cliente no se editan desde aqui." } 409
+            } elseif ((-not $destEdA) -and (-not $todosEdA)) {
+                Enviar-Json $context @{ ok = $false; error = "Falta elegir el vendedor." } 400
+            } elseif ($itemsEdA.Count -eq 0) {
+                Enviar-Json $context @{ ok = $false; error = "Deja al menos un producto (o retira el pedido)." } 400
+            } elseif ($erroresStockEdA.Count -gt 0) {
+                Enviar-Json $context @{ ok = $false; error = ("No hay stock suficiente -> " + ($erroresStockEdA -join "; ")) } 409
+            } else {
+                $minVigEd = 480
+                try { $mvE = [int]$data.minutosVigencia; if ($mvE -ge 5 -and $mvE -le 1440) { $minVigEd = $mvE } } catch {}
+                $destinoCambio = ($todosEdA -ne [bool]$asig.todos) -or ((-not $todosEdA) -and (([string]$asig.vendedor).Trim().ToLower() -ne $destEdA.ToLower()))
+                $ahoraEd = Get-Date
+                $asig.items   = @($itemsEdA)
+                $asig.nota    = if ($data.nota) { Limpiar-TextoMensaje $data.nota } else { "" }
+                $asig.todos   = $todosEdA
+                $asig.vendedor = if ($todosEdA) { "" } else { $destEdA }
+                $asig.hora    = $ahoraEd.ToString("yyyy-MM-dd HH:mm:ss")
+                $asig.vence   = $ahoraEd.AddMinutes($minVigEd).ToString("yyyy-MM-dd HH:mm:ss")
+                $asig.visto   = $false
+                $asig.horaVisto = $null
+                if ($destinoCambio) {
+                    $asig.entregadoA = New-Object System.Collections.ArrayList
+                    $asig.entregado = $false
+                }
+                Poner-Prop $asig "rev" ([Math]::Max(1, [int]$asig.rev) + 1)
+                Guardar-Asignados
+                $destTxt = if ($todosEdA) { "todos" } else { $destEdA }
+                Write-Host ("[" + $ahoraEd.ToString('HH:mm:ss') + "] La PC edito el pedido asignado #" + $asig.id + " (para " + $destTxt + ")")
+                Enviar-Json $context @{ ok = $true; id = $asig.id; rev = [int]$asig.rev } 200
+            }
+
+        } elseif ($method -eq "POST" -and $path -match "^/api/pedidos/asignados/(\d+)/agregado$") {
+            # El movil avisa que el vendedor ya paso este pedido a SU pedido actual: desde ese momento la
+            # caja ya no puede editarlo (los cambios no le llegarian a lo que ya tiene en su carrito).
+            $idAsig = [int]$Matches[1]
+            $reader = New-Object System.IO.StreamReader($request.InputStream, [System.Text.Encoding]::UTF8)
+            $bodyText = $reader.ReadToEnd()
+            $reader.Close()
+            $data = if ($bodyText -and $bodyText.Trim().Length -gt 0) { $bodyText | ConvertFrom-Json } else { $null }
+            $nombreAg = if ($data -and $data.vendedor) { ([string]$data.vendedor).Trim() } else { "" }
+            $asig = $global:pedidosAsignados | Where-Object { [int]$_.id -eq $idAsig }
+            if (-not $asig) {
+                Enviar-Json $context @{ ok = $false; error = "No encontrado." } 404
+            } else {
+                Poner-Prop $asig "agregado" $true
+                Poner-Prop $asig "horaAgregado" (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+                Poner-Prop $asig "agregadoPor" $nombreAg
+                if (-not $asig.visto) { $asig.visto = $true; $asig.horaVisto = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss") }
+                Guardar-Asignados
+                Enviar-Json $context @{ ok = $true } 200
+            }
+
         } elseif ($method -eq "GET" -and $path -eq "/api/pedidos/asignados/estado") {
             # La PC consulta si los pedidos que ha mandado ya fueron vistos (o,
             # si eran para todos, quien se los tomo), para avisar con un
@@ -15128,7 +15454,7 @@ while ($listener.IsListening) {
             }
             $todos = @($global:pedidosAsignados | ForEach-Object {
                 $vencido = ($_.todos -and (-not $_.tomadoPor) -and (-not $_.retirado) -and (($ahora - [datetime]$_.hora).TotalMinutes -ge $global:minutosAvisoSinTomar))
-                [pscustomobject]@{ id = $_.id; vendedor = $_.vendedor; todos = [bool]$_.todos; tomadoPor = $_.tomadoPor; hora = $_.hora; entregado = [bool]$_.entregado; visto = [bool]$_.visto; retirado = [bool]$_.retirado; cobradoAxis = [string]$_.cobradoAxis; vencido = [bool]$vencido }
+                [pscustomobject]@{ id = $_.id; vendedor = $_.vendedor; todos = [bool]$_.todos; tomadoPor = $_.tomadoPor; hora = $_.hora; entregado = [bool]$_.entregado; visto = [bool]$_.visto; retirado = [bool]$_.retirado; cobradoAxis = [string]$_.cobradoAxis; vencido = [bool]$vencido; rev = [Math]::Max(1, [int]$_.rev); agregado = [bool]$_.agregado; cliente = [string]$_.cliente }
             })
             Enviar-Respuesta -Context $context -Body (@{ ok = $true; asignados = $todos } | ConvertTo-Json -Depth 5) -ContentType "application/json; charset=utf-8"
 
