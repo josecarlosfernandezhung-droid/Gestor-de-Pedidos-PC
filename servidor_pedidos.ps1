@@ -974,7 +974,16 @@ function Cargar-Pedidos {
 function Escribir-ArchivoConReintento([string]$ruta, [string]$contenido, [int]$intentos = 5) {
     for ($i = 1; $i -le $intentos; $i++) {
         try {
-            Set-Content -Path $ruta -Value $contenido -Encoding UTF8
+            # Escritura segura contra cortes de luz: se escribe en un archivo temporal y luego se cambia por el
+            # real. Si la luz se va a mitad de la escritura, el archivo real queda intacto; la version anterior
+            # queda guardada como ".bak".
+            $tmpEscritura = $ruta + ".tmp"
+            [System.IO.File]::WriteAllText($tmpEscritura, [string]$contenido, (New-Object System.Text.UTF8Encoding($true)))
+            if (Test-Path -LiteralPath $ruta) {
+                [System.IO.File]::Replace($tmpEscritura, $ruta, ($ruta + ".bak"), $true)
+            } else {
+                [System.IO.File]::Move($tmpEscritura, $ruta)
+            }
             return $true
         } catch {
             if ($i -eq $intentos) { Write-Host "Error escribiendo '$ruta' tras $intentos intentos: $_"; return $false }
@@ -983,6 +992,45 @@ function Escribir-ArchivoConReintento([string]$ruta, [string]$contenido, [int]$i
     }
     return $false
 }
+
+# Al iniciar: si un archivo de datos quedo danado (corte de luz a mitad de escribir), se recupera la ultima
+# version buena (".bak"). El archivo danado se conserva como ".corrupto" por si hace falta revisarlo.
+# Un archivo vacio NO se considera danado (el servidor lo deja asi a proposito cuando no hay datos).
+function Reparar-JsonCorruptos {
+    try {
+        Add-Type -AssemblyName System.Web.Extensions -ErrorAction Stop
+        $jsRep = New-Object System.Web.Script.Serialization.JavaScriptSerializer
+        $jsRep.MaxJsonLength = [int]::MaxValue
+        $jsRep.RecursionLimit = 500
+    } catch { return }
+    $jsonValido = {
+        param([string]$rutaV)
+        try {
+            $txt = [System.IO.File]::ReadAllText($rutaV)
+            if ([string]::IsNullOrWhiteSpace($txt)) { return $true }
+            [void]$jsRep.DeserializeObject($txt)
+            return $true
+        } catch { return $false }
+    }
+    try {
+        foreach ($fj in @(Get-ChildItem -LiteralPath $scriptDir -Filter "*.json" -File -ErrorAction SilentlyContinue)) {
+            if ($fj.Length -gt 30MB) { continue }
+            if (& $jsonValido $fj.FullName) { continue }
+            $bakRep = $fj.FullName + ".bak"
+            if ((Test-Path -LiteralPath $bakRep) -and (& $jsonValido $bakRep)) {
+                Copy-Item -LiteralPath $fj.FullName -Destination ($fj.FullName + ".corrupto") -Force -ErrorAction SilentlyContinue
+                Copy-Item -LiteralPath $bakRep -Destination $fj.FullName -Force
+                Write-Host ("[AVISO] '" + $fj.Name + "' estaba danado (corte de luz?). Se recupero la ultima copia buena.")
+            } else {
+                Write-Host ("[AVISO] '" + $fj.Name + "' parece danado y no hay copia anterior. Revisa la carpeta 'respaldos'.")
+            }
+        }
+        foreach ($tj in @(Get-ChildItem -LiteralPath $scriptDir -Filter "*.json.tmp" -File -ErrorAction SilentlyContinue)) {
+            Remove-Item -LiteralPath $tj.FullName -Force -ErrorAction SilentlyContinue
+        }
+    } catch {}
+}
+Reparar-JsonCorruptos
 
 function Guardar-Pedidos {
     Escribir-ArchivoConReintento -ruta $pedidosFile -contenido ($global:pedidos | ConvertTo-Json -Depth 10) | Out-Null
@@ -3088,6 +3136,173 @@ function Revisar-TareasPedidos {
     try { Revisar-PedidosOlvidados } catch {}
     try { Actualizar-CuadreAxis } catch {}
     try { Recalcular-Reservas } catch {}
+    try { Revisar-Respaldo } catch { $global:respaldoEnCurso = $false }
+    try { Revisar-CostosAxis } catch {}
+}
+
+# ------------------------------------------------------------------
+# COPIAS DE SEGURIDAD AUTOMATICAS
+# Un .zip con todos los datos (pedidos, historial, vendedores, permisos, almacenes, configuracion...).
+# Siempre queda una copia en la carpeta "respaldos" del servidor; si en Ajustes se pone una "carpeta extra"
+# (unidad de red, o una carpeta de OneDrive / Google Drive / Dropbox que sube sola a la nube) tambien se
+# copia alli. Si esa carpeta no esta disponible (red caida) la copia se reintenta sola cada 10 minutos.
+# ------------------------------------------------------------------
+$respaldoCfgPath = Join-Path $scriptDir "respaldo_config.json"
+$respaldoDirLocal = Join-Path $scriptDir "respaldos"
+$global:respaldoCfg = [pscustomobject]@{ activo = $true; cadaHoras = 6; conservar = 20; carpetaExtra = ""; ultimo = ""; ultimoOk = $true; ultimoMensaje = ""; pendienteExtra = "" }
+$global:respaldoEnCurso = $false
+$global:respaldoUltimoIntento = [datetime]::MinValue
+
+function Guardar-RespaldoCfg {
+    Escribir-ArchivoConReintento -ruta $respaldoCfgPath -contenido ($global:respaldoCfg | ConvertTo-Json -Depth 3) | Out-Null
+}
+
+function Cargar-RespaldoCfg {
+    try {
+        if (Test-Path -LiteralPath $respaldoCfgPath) {
+            $rawR = Get-Content $respaldoCfgPath -Raw -Encoding UTF8
+            if ($rawR -and $rawR.Trim().Length -gt 0) {
+                $dR = $rawR | ConvertFrom-Json
+                foreach ($pR in @("activo", "cadaHoras", "conservar", "carpetaExtra", "ultimo", "ultimoOk", "ultimoMensaje", "pendienteExtra")) {
+                    if ($null -ne $dR.$pR) { $global:respaldoCfg.$pR = $dR.$pR }
+                }
+            }
+        }
+    } catch {}
+}
+Cargar-RespaldoCfg
+
+function Agregar-ArchivoAlZip($zip, [string]$ruta, [string]$nombreEnZip) {
+    $fsZ = $null; $esZ = $null
+    try {
+        # FileShare.ReadWrite: se puede copiar aunque el servidor tenga el archivo abierto.
+        $fsZ = New-Object System.IO.FileStream($ruta, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        $entryZ = $zip.CreateEntry($nombreEnZip.Replace('\', '/'), [System.IO.Compression.CompressionLevel]::Optimal)
+        $esZ = $entryZ.Open()
+        $fsZ.CopyTo($esZ)
+        return $true
+    } catch {
+        return $false
+    } finally {
+        if ($esZ) { $esZ.Dispose() }
+        if ($fsZ) { $fsZ.Dispose() }
+    }
+}
+
+# Copia el zip a una carpeta (primero con nombre ".parcial" para que nunca quede un zip a medias) y deja solo los ultimos N.
+function Copiar-ZipADestino([string]$zipOrigen, [string]$dirDestino, [int]$conservar) {
+    if (-not (Test-Path -LiteralPath $dirDestino)) { New-Item -ItemType Directory -Path $dirDestino -Force | Out-Null }
+    $nombreZ = [System.IO.Path]::GetFileName($zipOrigen)
+    $parcialZ = Join-Path $dirDestino ($nombreZ + ".parcial")
+    $finalZ = Join-Path $dirDestino $nombreZ
+    Copy-Item -LiteralPath $zipOrigen -Destination $parcialZ -Force
+    Move-Item -LiteralPath $parcialZ -Destination $finalZ -Force
+    $viejosZ = @(Get-ChildItem -LiteralPath $dirDestino -Filter "respaldo-*.zip" -File -ErrorAction SilentlyContinue | Sort-Object Name -Descending | Select-Object -Skip $conservar)
+    foreach ($vz in $viejosZ) { try { Remove-Item -LiteralPath $vz.FullName -Force } catch {} }
+}
+
+function Crear-Respaldo([string]$motivo = "auto") {
+    if ($global:respaldoEnCurso) { return @{ ok = $false; mensaje = "Ya hay una copia en curso." } }
+    $global:respaldoEnCurso = $true
+    $cfgR = $global:respaldoCfg
+    $ahoraR = Get-Date
+    $nombreR = "respaldo-" + $ahoraR.ToString("yyyyMMdd-HHmmss") + ".zip"
+    $conservarR = [Math]::Max(3, [int]$cfgR.conservar)
+    $tmpR = Join-Path ([System.IO.Path]::GetTempPath()) ($nombreR + ".tmp")
+    $okLocal = $false; $okExtra = $true; $fallidos = 0; $cuantos = 0
+    $msgs = New-Object System.Collections.ArrayList
+    try {
+        Add-Type -AssemblyName System.IO.Compression
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $archivosR = New-Object System.Collections.ArrayList
+        foreach ($fR in @(Get-ChildItem -LiteralPath $scriptDir -Filter "*.json" -File -ErrorAction SilentlyContinue)) {
+            [void]$archivosR.Add(@($fR.FullName, $fR.Name))
+        }
+        foreach ($fR in @(Get-ChildItem -LiteralPath $scriptDir -Filter "auditoria*.log" -File -ErrorAction SilentlyContinue)) {
+            [void]$archivosR.Add(@($fR.FullName, $fR.Name))
+        }
+        foreach ($subR in @("historial", "almacen_sync")) {
+            $dirSubR = Join-Path $scriptDir $subR
+            if (Test-Path -LiteralPath $dirSubR) {
+                foreach ($fR in @(Get-ChildItem -LiteralPath $dirSubR -Recurse -File -ErrorAction SilentlyContinue)) {
+                    $relR = $fR.FullName.Substring($scriptDir.Length).TrimStart('\', '/')
+                    [void]$archivosR.Add(@($fR.FullName, $relR))
+                }
+            }
+        }
+        if (Test-Path -LiteralPath $tmpR) { Remove-Item -LiteralPath $tmpR -Force -ErrorAction SilentlyContinue }
+        $zipR = [System.IO.Compression.ZipFile]::Open($tmpR, [System.IO.Compression.ZipArchiveMode]::Create)
+        try {
+            foreach ($parR in $archivosR) {
+                $cuantos++
+                if (-not (Agregar-ArchivoAlZip $zipR $parR[0] $parR[1])) { $fallidos++ }
+            }
+        } finally { $zipR.Dispose() }
+
+        try {
+            Copiar-ZipADestino $tmpR $respaldoDirLocal $conservarR
+            $okLocal = $true
+        } catch {
+            [void]$msgs.Add("No se pudo guardar en la carpeta local: " + $_.Exception.Message)
+        }
+
+        $extraR = ([string]$cfgR.carpetaExtra).Trim()
+        if ($okLocal -and $extraR) {
+            try {
+                Copiar-ZipADestino $tmpR $extraR $conservarR
+            } catch {
+                $okExtra = $false
+                [void]$msgs.Add("No se pudo copiar a la carpeta extra (" + $extraR + "): " + $_.Exception.Message + ". Se reintenta sola.")
+            }
+        }
+    } catch {
+        [void]$msgs.Add("Error al crear la copia: " + $_.Exception.Message)
+    } finally {
+        try { if (Test-Path -LiteralPath $tmpR) { Remove-Item -LiteralPath $tmpR -Force -ErrorAction SilentlyContinue } } catch {}
+        $global:respaldoEnCurso = $false
+    }
+
+    if ($okLocal) {
+        $cfgR.ultimo = $ahoraR.ToString("yyyy-MM-dd HH:mm:ss")
+        $cfgR.pendienteExtra = if ($okExtra) { "" } else { (Join-Path $respaldoDirLocal $nombreR) }
+        if ($fallidos -gt 0) { [void]$msgs.Add("$fallidos archivo(s) estaban en uso y no entraron.") }
+        if ($msgs.Count -eq 0) { [void]$msgs.Add("Copia $nombreR guardada ($cuantos archivos).") }
+    }
+    $cfgR.ultimoOk = ($okLocal -and $okExtra)
+    $cfgR.ultimoMensaje = ($msgs -join " ")
+    Guardar-RespaldoCfg
+    Write-Host ("[" + (Get-Date).ToString('HH:mm:ss') + "] Respaldo (" + $motivo + "): " + $cfgR.ultimoMensaje)
+    return @{ ok = $okLocal; extraOk = $okExtra; mensaje = [string]$cfgR.ultimoMensaje; archivo = $nombreR }
+}
+
+function Revisar-Respaldo {
+    $cfgR = $global:respaldoCfg
+    if (-not $cfgR.activo) { return }
+    if ($global:respaldoEnCurso) { return }
+    $ahoraR = Get-Date
+    if (($ahoraR - $global:respaldoUltimoIntento).TotalMinutes -lt 10) { return }
+    # 1) una copia que no pudo ir a la carpeta extra (red caida): se reintenta solo ese paso
+    if ($cfgR.pendienteExtra -and ([string]$cfgR.carpetaExtra).Trim()) {
+        $global:respaldoUltimoIntento = $ahoraR
+        try {
+            if (Test-Path -LiteralPath $cfgR.pendienteExtra) {
+                Copiar-ZipADestino $cfgR.pendienteExtra ([string]$cfgR.carpetaExtra).Trim() ([Math]::Max(3, [int]$cfgR.conservar))
+                $cfgR.ultimoOk = $true
+                $cfgR.ultimoMensaje = "La copia a la carpeta extra se completo en un reintento."
+            }
+            $cfgR.pendienteExtra = ""
+            Guardar-RespaldoCfg
+        } catch {}
+        return
+    }
+    # 2) toca una copia nueva?
+    $toca = $true
+    if ($cfgR.ultimo) {
+        try { $toca = (($ahoraR - [datetime]$cfgR.ultimo).TotalHours -ge [Math]::Max(1.0, [double]$cfgR.cadaHoras)) } catch { $toca = $true }
+    }
+    if (-not $toca) { return }
+    $global:respaldoUltimoIntento = $ahoraR
+    Crear-Respaldo "auto" | Out-Null
 }
 
 # ------------------------------------------------------------------
@@ -3095,6 +3310,445 @@ function Revisar-TareasPedidos {
 # AxisPOS tiene que estar configurado en config_axis.json; la eleccion se guarda en
 # config_app.json (origenDatos) y se puede cambiar sin reiniciar el servidor.
 # ------------------------------------------------------------------
+# ------------------------------------------------------------------
+# SINONIMOS Y ALIAS DE BUSQUEDA
+# "cinta aislante" tambien encuentra "cinta de aislar" o "teipe". Hay dos listas, editables en Ajustes:
+#  - grupos: terminos que significan lo mismo (uno por grupo).
+#  - productos: palabras o codigos extra para un SKU concreto (ej. un codigo viejo del proveedor).
+# ------------------------------------------------------------------
+$sinonimosPath = Join-Path $scriptDir "sinonimos.json"
+$global:sinonimos = @{ version = 1; grupos = (New-Object System.Collections.ArrayList); productos = @{} }
+
+function Sinonimos-Limpiar($grupos, $productos) {
+    $gl = New-Object System.Collections.ArrayList
+    foreach ($g in @($grupos)) {
+        $terminos = @(@($g) | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+        if ($terminos.Count -ge 2) { [void]$gl.Add([string[]]$terminos) }
+    }
+    $pl = @{}
+    if ($productos) {
+        foreach ($prop in $productos.PSObject.Properties) {
+            $k = ([string]$prop.Name).Trim()
+            $vals = @(@($prop.Value) | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+            if ($k -and $vals.Count -gt 0) { $pl[$k] = [string[]]$vals }
+        }
+    }
+    return @{ grupos = $gl; productos = $pl }
+}
+
+function Guardar-Sinonimos {
+    Escribir-ArchivoConReintento -ruta $sinonimosPath -contenido ($global:sinonimos | ConvertTo-Json -Depth 6) | Out-Null
+}
+
+function Cargar-Sinonimos {
+    $cargado = $false
+    try {
+        if (Test-Path -LiteralPath $sinonimosPath) {
+            $rawS = Get-Content $sinonimosPath -Raw -Encoding UTF8
+            if ($rawS -and $rawS.Trim().Length -gt 0) {
+                $dS = $rawS | ConvertFrom-Json
+                $limpio = Sinonimos-Limpiar $dS.grupos $dS.productos
+                $global:sinonimos.grupos = $limpio.grupos
+                $global:sinonimos.productos = $limpio.productos
+                if ($dS.version) { $global:sinonimos.version = [int]$dS.version }
+                $cargado = $true
+            }
+        }
+    } catch {}
+    if (-not $cargado) {
+        # Primera vez: unos ejemplos de ferreteria para empezar (se pueden cambiar en Ajustes).
+        $ej = @(
+            @("cinta aislante", "cinta de aislar", "teipe", "tape"),
+            @("destornillador", "desarmador"),
+            @("alicate", "pinza", "pinzas"),
+            @("llave inglesa", "llave ajustable", "llave francesa"),
+            @("pegamento", "goma de pegar", "adhesivo"),
+            @("amoladora", "esmeriladora", "radial"),
+            @("taladro", "drill")
+        )
+        $limpio = Sinonimos-Limpiar $ej $null
+        $global:sinonimos.grupos = $limpio.grupos
+        Guardar-Sinonimos
+    }
+}
+Cargar-Sinonimos
+
+# ------------------------------------------------------------------
+# SEGURIDAD, COSTOS, COMPRAS, FIADO Y GARANTIAS
+# (roles y limites de descuento, auditoria, costo de reposicion, proveedores, fiado, series/lotes)
+# ------------------------------------------------------------------
+function Es-PeticionPC($request) {
+    try { return [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address) } catch { return $false }
+}
+function Origen-Peticion($request) {
+    try {
+        if ([System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)) { return "PC" }
+        return ("movil " + $request.RemoteEndPoint.Address.ToString())
+    } catch { return "" }
+}
+
+# ---------- Auditoria: quien hizo que (un renglon JSON por accion, en auditoria.log) ----------
+$auditoriaPath = Join-Path $scriptDir "auditoria.log"
+function Registrar-Auditoria([string]$usuario, [string]$accion, [string]$detalle, $pedidoId = $null, $monto = $null, [bool]$alerta = $false, [string]$origen = "") {
+    try {
+        $reg = [ordered]@{ hora = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss"); usuario = $usuario; origen = $origen; accion = $accion; detalle = $detalle; pedido = $pedidoId; monto = $monto; alerta = $alerta }
+        $linea = ($reg | ConvertTo-Json -Compress)
+        if (Test-Path -LiteralPath $auditoriaPath) {
+            if ((Get-Item -LiteralPath $auditoriaPath).Length -gt 3MB) {
+                Move-Item -LiteralPath $auditoriaPath -Destination (Join-Path $scriptDir ("auditoria-" + (Get-Date).ToString("yyyyMMdd-HHmmss") + ".log")) -Force
+            }
+        }
+        [System.IO.File]::AppendAllText($auditoriaPath, $linea + "`r`n", (New-Object System.Text.UTF8Encoding($false)))
+    } catch {}
+}
+function Leer-Auditoria([int]$max = 200, [string]$accion = "", [bool]$soloAlertas = $false, [string]$texto = "") {
+    $res = New-Object System.Collections.ArrayList
+    if (-not (Test-Path -LiteralPath $auditoriaPath)) { return @() }
+    $lineas = @(Get-Content -LiteralPath $auditoriaPath -Tail 4000 -Encoding UTF8)
+    [array]::Reverse($lineas)
+    $buscar = $texto.ToLowerInvariant()
+    foreach ($l in $lineas) {
+        if ([string]::IsNullOrWhiteSpace($l)) { continue }
+        $r = $null
+        try { $r = $l | ConvertFrom-Json } catch { continue }
+        if ($soloAlertas -and (-not $r.alerta)) { continue }
+        if ($accion -and ([string]$r.accion -ne $accion)) { continue }
+        if ($buscar) {
+            $blob = (([string]$r.usuario) + " " + ([string]$r.detalle) + " " + ([string]$r.accion) + " " + ([string]$r.pedido)).ToLowerInvariant()
+            if (-not $blob.Contains($buscar)) { continue }
+        }
+        [void]$res.Add($r)
+        if ($res.Count -ge $max) { break }
+    }
+    return @($res)
+}
+# Aviso en la campana de la PC
+function Avisar-PC([string]$origen, [string]$texto) {
+    try {
+        $reg = [pscustomobject]@{ id = $global:nextIdMensaje; vendedor = $origen; texto = (Limpiar-TextoMensaje $texto); hora = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss"); leido = $false }
+        $global:nextIdMensaje++
+        [void]$global:mensajesPc.Add($reg)
+        Guardar-MensajesPc
+    } catch {}
+}
+
+# ---------- Costo de reposicion (manual y/o columna de AxisPOS) ----------
+$costosPath = Join-Path $scriptDir "costos.json"
+$global:costos = @{ manual = @{}; axis = @{}; columnaAxis = ""; ultimaAxis = "" }
+$global:costosUltimoIntento = [datetime]::MinValue
+function Guardar-Costos {
+    Escribir-ArchivoConReintento -ruta $costosPath -contenido ($global:costos | ConvertTo-Json -Depth 4) | Out-Null
+}
+function Cargar-Costos {
+    try {
+        if (Test-Path -LiteralPath $costosPath) {
+            $raw = Get-Content $costosPath -Raw -Encoding UTF8
+            if ($raw -and $raw.Trim().Length -gt 0) {
+                $d = $raw | ConvertFrom-Json
+                foreach ($par in @(@("manual", $d.manual), @("axis", $d.axis))) {
+                    $h = @{}
+                    if ($par[1]) { foreach ($pp in $par[1].PSObject.Properties) { $v = 0.0; if ([double]::TryParse([string]$pp.Value, [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$v)) { $h[[string]$pp.Name] = $v } } }
+                    $global:costos[$par[0]] = $h
+                }
+                if ($d.columnaAxis) { $global:costos.columnaAxis = [string]$d.columnaAxis }
+                if ($d.ultimaAxis) { $global:costos.ultimaAxis = [string]$d.ultimaAxis }
+            }
+        }
+    } catch {}
+}
+Cargar-Costos
+function Obtener-Costo([string]$sku) {
+    if ([string]::IsNullOrWhiteSpace($sku)) { return $null }
+    if ($global:costos.manual.ContainsKey($sku)) { return [double]$global:costos.manual[$sku] }
+    if ($global:costos.axis.ContainsKey($sku)) { return [double]$global:costos.axis[$sku] }
+    return $null
+}
+function Actualizar-CostosAxis {
+    $col = [string]$global:costos.columnaAxis
+    if ($col -notmatch '^[A-Za-z][A-Za-z0-9_]{0,30}$') { throw "Escribe el nombre de la columna de costo de AxisPOS (por ejemplo PriceIn)." }
+    if (-not $global:configAxis.activo) { throw "AxisPOS no esta activado en la configuracion." }
+    $colSku = [string]$global:configAxis.columnaSku
+    if (@('Code', 'BarCode1', 'ID') -notcontains $colSku) { throw "columnaSku invalida (usa Code, BarCode1 o ID)." }
+    $sql = "SELECT g.$colSku, g.$col FROM goods g WHERE g.Deleted=0"
+    $texto = Ejecutar-ConsultaAxis $sql
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $nuevo = @{}
+    foreach ($linea in ($texto -split "`n")) {
+        $linea = $linea.TrimEnd("`r")
+        if ([string]::IsNullOrWhiteSpace($linea)) { continue }
+        $f = $linea -split "`t"
+        if ($f.Count -lt 2) { continue }
+        $v = 0.0
+        if ([double]::TryParse([string]$f[1], [System.Globalization.NumberStyles]::Float, $inv, [ref]$v) -and $v -gt 0) { $nuevo[([string]$f[0]).Trim()] = $v }
+    }
+    $global:costos.axis = $nuevo
+    $global:costos.ultimaAxis = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+    Guardar-Costos
+    return $nuevo.Count
+}
+function Revisar-CostosAxis {
+    if (-not ([string]$global:costos.columnaAxis)) { return }
+    $ahora = Get-Date
+    if (($ahora - $global:costosUltimoIntento).TotalMinutes -lt 30) { return }
+    if ($global:costos.ultimaAxis) { try { if (($ahora - [datetime]$global:costos.ultimaAxis).TotalHours -lt 6) { return } } catch {} }
+    $global:costosUltimoIntento = $ahora
+    try { [void](Actualizar-CostosAxis) } catch { Write-Host ("Aviso: no se pudieron leer los costos de AxisPOS: " + $_.Exception.Message) }
+}
+
+# ---------- Roles (administrador / cajero / vendedor de piso) y limite de descuento ----------
+$rolesPath = Join-Path $scriptDir "roles_vendedores.json"
+$global:rolesVendedores = @{}
+$global:rolesDef = [ordered]@{
+    administrador = @{ t = "Administrador"; desc = 100.0; p = @{ crearPedidos = $true; cobrar = $true; cancelar = $true; editar = $true; imprimir = $true; descuentos = $true; verStock = $true; misPedidos = $true; ajustes = $true; modoCliente = $true; asignados = $true; notificaciones = $true; mensajes = $true; venderBajoCosto = $true; fiado = $true; series = $true } }
+    cajero        = @{ t = "Cajero"; desc = 10.0; p = @{ crearPedidos = $true; cobrar = $true; cancelar = $true; editar = $true; imprimir = $true; descuentos = $true; verStock = $true; misPedidos = $true; ajustes = $false; modoCliente = $true; asignados = $true; notificaciones = $true; mensajes = $true; venderBajoCosto = $false; fiado = $true; series = $true } }
+    piso          = @{ t = "Vendedor de piso"; desc = 5.0; p = @{ crearPedidos = $true; cobrar = $false; cancelar = $false; editar = $false; imprimir = $true; descuentos = $true; verStock = $true; misPedidos = $true; ajustes = $false; modoCliente = $true; asignados = $true; notificaciones = $true; mensajes = $true; venderBajoCosto = $false; fiado = $false; series = $true } }
+}
+function Guardar-Roles {
+    Escribir-ArchivoConReintento -ruta $rolesPath -contenido ($global:rolesVendedores | ConvertTo-Json -Depth 4) | Out-Null
+}
+function Cargar-Roles {
+    try {
+        if (Test-Path -LiteralPath $rolesPath) {
+            $raw = Get-Content $rolesPath -Raw -Encoding UTF8
+            if ($raw -and $raw.Trim().Length -gt 0) {
+                $d = $raw | ConvertFrom-Json
+                $t = @{}
+                foreach ($pp in $d.PSObject.Properties) {
+                    $dm = 100.0; try { $dm = [double]$pp.Value.descuentoMaxPct } catch { $dm = 100.0 }
+                    $t[[string]$pp.Name] = @{ rol = [string]$pp.Value.rol; descuentoMaxPct = $dm }
+                }
+                $global:rolesVendedores = $t
+            }
+        }
+    } catch {}
+}
+Cargar-Roles
+function Descuento-Maximo([string]$vend) {
+    $k = ([string]$vend).Trim().ToLowerInvariant()
+    if ($k -and $global:rolesVendedores.ContainsKey($k)) {
+        $d = [double]$global:rolesVendedores[$k].descuentoMaxPct
+        if ($d -ge 0 -and $d -le 100) { return $d }
+    }
+    return 100.0
+}
+function Aplicar-Rol([string]$vend, [string]$rolKey, $descMax) {
+    $k = $vend.Trim().ToLowerInvariant()
+    $entrada = @{ rol = "personalizado"; descuentoMaxPct = 100.0 }
+    if ($global:rolesVendedores.ContainsKey($k)) { $entrada = @{ rol = [string]$global:rolesVendedores[$k].rol; descuentoMaxPct = [double]$global:rolesVendedores[$k].descuentoMaxPct } }
+    if ($global:rolesDef.Contains($rolKey)) {
+        $def = $global:rolesDef[$rolKey]
+        $nuevo = @{}
+        foreach ($c in $global:catalogoPermisos) { $nuevo[$c.k] = $(if ($def.p.ContainsKey($c.k)) { [bool]$def.p[$c.k] } else { $true }) }
+        $global:permisosVendedores[$k] = $nuevo
+        Guardar-Permisos
+        $entrada.rol = $rolKey
+        if ($null -eq $descMax) { $entrada.descuentoMaxPct = [double]$def.desc }
+    } else {
+        $entrada.rol = "personalizado"
+    }
+    if ($null -ne $descMax) { $entrada.descuentoMaxPct = [double]$descMax }
+    $global:rolesVendedores[$k] = $entrada
+    Guardar-Roles
+}
+
+# Revisa los precios de un pedido que llega de un movil: limite de descuento y venta bajo costo.
+# Devuelve el texto del error ("" si todo bien).
+function Validar-PreciosPedido([string]$vend, $items, [string]$origen) {
+    $maxPct = Descuento-Maximo $vend
+    $puedeBajoCosto = Tiene-Permiso $vend 'venderBajoCosto'
+    foreach ($it in @($items)) {
+        $sku = [string]$it.sku
+        if ([string]::IsNullOrWhiteSpace($sku)) { continue }
+        $prod = $global:catalogo | Where-Object { $_.sku -eq $sku } | Select-Object -First 1
+        if (-not $prod) { continue }
+        $cat = [double]$prod.precio
+        $pr = 0.0; try { $pr = [double]$it.precio } catch { continue }
+        if (($cat -le 0) -or ($pr -ge ($cat - 0.005))) { continue }
+        $pct = [math]::Round((($cat - $pr) / $cat) * 100, 1)
+        if ($pct -gt ($maxPct + 0.05)) {
+            $msg = "Tu descuento en " + $prod.nombre + " (" + $pct + "%) pasa tu limite de " + $maxPct + "%."
+            Registrar-Auditoria $vend "descuento_bloqueado" $msg $null $null $true $origen
+            return $msg
+        }
+        $costo = Obtener-Costo $sku
+        if (($null -ne $costo) -and ($pr -lt ($costo - 0.005)) -and (-not $puedeBajoCosto)) {
+            $msg = "No puedes vender " + $prod.nombre + " por debajo de su costo de reposicion."
+            Registrar-Auditoria $vend "bajo_costo_bloqueado" $msg $null $null $true $origen
+            return $msg
+        }
+    }
+    return ""
+}
+# Despues de crear un pedido: deja constancia de descuentos y ventas bajo costo.
+function Auditar-PedidoNuevo($p, [string]$origen) {
+    $vend = [string]$p.vendedor
+    if ($vend.StartsWith("Cliente:")) { return }
+    foreach ($it in @($p.items)) {
+        $sku = [string]$it.sku
+        if ([string]::IsNullOrWhiteSpace($sku)) { continue }
+        $prod = $global:catalogo | Where-Object { $_.sku -eq $sku } | Select-Object -First 1
+        if (-not $prod) { continue }
+        $cat = [double]$prod.precio
+        $pr = 0.0; try { $pr = [double]$it.precio } catch { continue }
+        if (($cat -gt 0) -and ($pr -lt ($cat - 0.005))) {
+            $pct = [math]::Round((($cat - $pr) / $cat) * 100, 1)
+            Registrar-Auditoria $vend "descuento" ("Pedido #" + $p.id + ": " + $prod.nombre + " a $" + (Formato-Monto $pr) + " en vez de $" + (Formato-Monto $cat) + " (-" + $pct + "%)") $p.id $pr $false $origen
+        }
+        $costo = Obtener-Costo $sku
+        if (($null -ne $costo) -and ($pr -lt ($costo - 0.005))) {
+            $txt = "Pedido #" + $p.id + " de " + $vend + ": " + $prod.nombre + " vendido a $" + (Formato-Monto $pr) + ", por debajo del costo de reposicion."
+            Registrar-Auditoria $vend "venta_bajo_costo" $txt $p.id $pr $true $origen
+            Avisar-PC "ALERTA" $txt
+        }
+    }
+}
+
+# ---------- Ventas por producto (para reposicion y stock estatico) ----------
+$global:ventasProdCache = @{ hora = [datetime]::MinValue; dias = 0; mapa = @{}; fuente = "" }
+function Obtener-VentasProductos([int]$dias) {
+    $c = $global:ventasProdCache
+    if ((((Get-Date) - $c.hora).TotalMinutes -lt 10) -and ($c.dias -eq $dias)) { return $c }
+    $mapa = @{}
+    $fuente = "app"
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $desde = (Get-Date).Date.AddDays(-$dias)
+    $okAxis = $false
+    if ($global:configAxis.activo) {
+        try {
+            $col = [string]$global:configAxis.columnaSku
+            if (@('Code', 'BarCode1', 'ID') -notcontains $col) { throw "columnaSku invalida" }
+            $ids = New-Object System.Collections.ArrayList
+            foreach ($a in @($global:configAxis.almacenes)) { $n = 0; if ([int]::TryParse([string]$a, [ref]$n)) { [void]$ids.Add($n) } }
+            if ($ids.Count -eq 0) { throw "almacenes vacio" }
+            $lista = ($ids -join ',')
+            $fechaExpr = "IF(o.UserRealTime IS NULL OR o.UserRealTime < '2000-01-01', o.Timestamp, o.UserRealTime)"
+            $desdeTxt = $desde.ToString("yyyy-MM-dd HH:mm:ss")
+            $sql = "SELECT g.$col, ROUND(SUM(ABS(o.Qtty)),4), DATE_FORMAT(MAX($fechaExpr), '%Y-%m-%d %H:%i:%s') FROM operations o JOIN goods g ON g.ID = o.GoodID WHERE o.OperType = 2 AND o.Sign <> 0 AND o.Acct > 0 AND o.ObjectID IN ($lista) AND $fechaExpr >= '$desdeTxt' GROUP BY g.ID, g.$col"
+            $texto = Ejecutar-ConsultaAxis $sql
+            foreach ($linea in ($texto -split "`n")) {
+                $linea = $linea.TrimEnd("`r")
+                if ([string]::IsNullOrWhiteSpace($linea)) { continue }
+                $f = $linea -split "`t"
+                if ($f.Count -lt 3) { continue }
+                $q = 0.0
+                [void][double]::TryParse([string]$f[1], [System.Globalization.NumberStyles]::Float, $inv, [ref]$q)
+                $mapa[([string]$f[0]).Trim()] = @{ qty = $q; ultima = [string]$f[2] }
+            }
+            $okAxis = $true
+            $fuente = "axispos"
+        } catch { Write-Host ("Aviso: no se pudieron leer las ventas de AxisPOS (" + $_.Exception.Message + "); se usan los pedidos de la app.") }
+    }
+    if (-not $okAxis) {
+        $sumar = {
+            param($p)
+            if ([string]$p.estado -ne "cobrado") { return }
+            $hp = [datetime]::MinValue
+            try { $hp = [datetime]$p.hora } catch { return }
+            if ($hp -lt $desde) { return }
+            foreach ($it in @($p.items)) {
+                $sk = [string]$it.sku
+                if ([string]::IsNullOrWhiteSpace($sk)) { continue }
+                $q = 0.0; try { $q = [double]$it.cantidad } catch { $q = 0.0 }
+                if (-not $mapa.ContainsKey($sk)) { $mapa[$sk] = @{ qty = 0.0; ultima = "" } }
+                $mapa[$sk].qty = [double]$mapa[$sk].qty + $q
+                if ([string]$p.hora -gt [string]$mapa[$sk].ultima) { $mapa[$sk].ultima = [string]$p.hora }
+            }
+        }
+        foreach ($p in @($global:pedidos)) { & $sumar $p }
+        $dirH = Join-Path $scriptDir "historial"
+        if (Test-Path -LiteralPath $dirH) {
+            foreach ($fh in @(Get-ChildItem -LiteralPath $dirH -Filter "pedidos_*.json" -File -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $desde })) {
+                try {
+                    $arr = (Get-Content -LiteralPath $fh.FullName -Raw -Encoding UTF8) | ConvertFrom-Json
+                    foreach ($p in @($arr)) { if ($p) { & $sumar $p } }
+                } catch {}
+            }
+        }
+    }
+    $global:ventasProdCache = @{ hora = (Get-Date); dias = $dias; mapa = $mapa; fuente = $fuente }
+    return $global:ventasProdCache
+}
+
+# ---------- Proveedores (para compras) ----------
+$proveedoresPath = Join-Path $scriptDir "proveedores.json"
+$global:proveedores = @{ lista = (New-Object System.Collections.ArrayList); porSku = @{} }
+function Guardar-Proveedores {
+    Escribir-ArchivoConReintento -ruta $proveedoresPath -contenido ($global:proveedores | ConvertTo-Json -Depth 4) | Out-Null
+}
+function Cargar-Proveedores {
+    try {
+        if (Test-Path -LiteralPath $proveedoresPath) {
+            $raw = Get-Content $proveedoresPath -Raw -Encoding UTF8
+            if ($raw -and $raw.Trim().Length -gt 0) {
+                $d = $raw | ConvertFrom-Json
+                $l = New-Object System.Collections.ArrayList
+                foreach ($p in @($d.lista)) { if ($p -and $p.nombre) { [void]$l.Add([pscustomobject]@{ nombre = [string]$p.nombre; telefono = [string]$p.telefono; nota = [string]$p.nota }) } }
+                $global:proveedores.lista = $l
+                $h = @{}
+                if ($d.porSku) { foreach ($pp in $d.porSku.PSObject.Properties) { $h[[string]$pp.Name] = [string]$pp.Value } }
+                $global:proveedores.porSku = $h
+            }
+        }
+    } catch {}
+}
+Cargar-Proveedores
+
+# ---------- Fiado (cuentas por cobrar) ----------
+$fiadoPath = Join-Path $scriptDir "fiado.json"
+$global:fiado = @{ siguienteId = 1; clientes = (New-Object System.Collections.ArrayList) }
+function Guardar-Fiado {
+    Escribir-ArchivoConReintento -ruta $fiadoPath -contenido ($global:fiado | ConvertTo-Json -Depth 6) | Out-Null
+}
+function Cargar-Fiado {
+    try {
+        if (Test-Path -LiteralPath $fiadoPath) {
+            $raw = Get-Content $fiadoPath -Raw -Encoding UTF8
+            if ($raw -and $raw.Trim().Length -gt 0) {
+                $d = $raw | ConvertFrom-Json
+                foreach ($c in @($d.clientes)) {
+                    if (-not $c) { continue }
+                    $movs = New-Object System.Collections.ArrayList
+                    foreach ($m in @($c.movimientos)) { if ($m) { [void]$movs.Add($m) } }
+                    $c | Add-Member -NotePropertyName movimientos -NotePropertyValue $movs -Force
+                    [void]$global:fiado.clientes.Add($c)
+                }
+                if ($d.siguienteId) { $global:fiado.siguienteId = [int]$d.siguienteId }
+            }
+        }
+    } catch {}
+}
+Cargar-Fiado
+function Fiado-Cliente([int]$id) {
+    return ($global:fiado.clientes | Where-Object { [int]$_.id -eq $id } | Select-Object -First 1)
+}
+function Fiado-ADouble($v) { $x = 0.0; [void][double]::TryParse(([string]$v).Replace(',', '.'), [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$x); return $x }
+
+# ---------- Garantias y trazabilidad (series / lotes) ----------
+$seriesPath = Join-Path $scriptDir "series_garantias.json"
+$global:seriesReg = @{ siguienteId = 1; registros = (New-Object System.Collections.ArrayList) }
+function Guardar-Series {
+    Escribir-ArchivoConReintento -ruta $seriesPath -contenido ($global:seriesReg | ConvertTo-Json -Depth 6) | Out-Null
+}
+function Cargar-Series {
+    try {
+        if (Test-Path -LiteralPath $seriesPath) {
+            $raw = Get-Content $seriesPath -Raw -Encoding UTF8
+            if ($raw -and $raw.Trim().Length -gt 0) {
+                $d = $raw | ConvertFrom-Json
+                foreach ($r in @($d.registros)) {
+                    if (-not $r) { continue }
+                    $h = New-Object System.Collections.ArrayList
+                    foreach ($x in @($r.historial)) { if ($x) { [void]$h.Add($x) } }
+                    $r | Add-Member -NotePropertyName historial -NotePropertyValue $h -Force
+                    [void]$global:seriesReg.registros.Add($r)
+                }
+                if ($d.siguienteId) { $global:seriesReg.siguienteId = [int]$d.siguienteId }
+            }
+        }
+    } catch {}
+}
+Cargar-Series
+
 function Config-ParaPanel {
     $c = $global:configApp | Select-Object *
     $c | Add-Member -NotePropertyName axisConfigurado -NotePropertyValue ([bool]$global:axisConfigurado) -Force
@@ -3671,6 +4325,7 @@ function Generar-TextoRecibo($p) {
     $fecha = [string]$p.hora
     try { $fecha = ([datetime]::ParseExact([string]$p.hora, "yyyy-MM-dd HH:mm:ss", $inv)).ToString("d/M/yyyy HH:mm", $inv) } catch {}
     if ($rc.mostrarVendedor) { [void]$sb.AppendLine("Vendedor: $($p.vendedor)") }
+    if ([string]$p.clienteNombre) { foreach ($lcn in @(Partir-Texto ("Cliente: " + [string]$p.clienteNombre) $ancho)) { [void]$sb.AppendLine($lcn) } }
     if ($rc.mostrarFolio) { [void]$sb.AppendLine("Folio: $($p.id)") }
     if ($rc.mostrarFecha) { [void]$sb.AppendLine("Fecha: $fecha") }
     if ([string]$p.estado -ne "cobrado") { [void]$sb.AppendLine("Estado: PENDIENTE DE PAGO") }
@@ -3870,7 +4525,10 @@ $global:catalogoPermisos = @(
     @{ k = 'modoCliente';   t = 'Usar modo cliente';               d = 'Puede mostrarle el catalogo al cliente.' },
     @{ k = 'asignados';     t = 'Recibir pedidos de la caja';      d = 'Le llegan los pedidos que arma la PC.' },
     @{ k = 'notificaciones'; t = 'Recibir notificaciones';         d = 'Avisos de precios, stock, anulaciones y permisos.' },
-    @{ k = 'mensajes';       t = 'Enviar mensajes a la caja';      d = 'Puede escribir una nota en sus pedidos o mandar mensajes cortos a la caja.' }
+    @{ k = 'mensajes';       t = 'Enviar mensajes a la caja';      d = 'Puede escribir una nota en sus pedidos o mandar mensajes cortos a la caja.' },
+    @{ k = 'venderBajoCosto'; t = 'Vender por debajo del costo';    d = 'Puede dejar un producto a un precio menor que su costo de reposicion.' },
+    @{ k = 'fiado';          t = 'Vender a credito (fiado)';        d = 'Puede registrar ventas a credito a clientes con cuenta.' },
+    @{ k = 'series';         t = 'Registrar series y lotes';        d = 'Puede registrar el numero de serie o lote de lo que vende (garantias).' }
 )
 
 function Permisos-Completos {
@@ -3931,6 +4589,7 @@ function Permiso-De-Ruta([string]$method, [string]$path) {
         if ($path -match "^/api/pedidos/\d+/metodo$") { return "editar" }
         if ($path -match "^/api/pedidos/\d+/imprimir$") { return "imprimir" }
         if ($path -eq "/api/mensajes") { return "mensajes" }
+        if ($path -eq "/api/series") { return "series" }
     } elseif ($method -eq "GET") {
         if ($path -eq "/api/pedidos") { return "misPedidos" }
         if ($path -eq "/api/pedidos/asignados") { return "asignados" }
@@ -3985,6 +4644,7 @@ function Avisar-CambiosCatalogo($anteriorPorSku, $nuevoLista) {
             if (-not $a) { continue }
             if ([math]::Abs([double]$a.precio - [double]$n.precio) -gt 0.001) {
                 [void]$precios.Add("$($n.nombre): $(Formato-Monto $a.precio) -> $(Formato-Monto $n.precio)")
+                if ($precios.Count -le 100) { Registrar-Auditoria "AxisPOS/Excel" "precio_catalogo" ("Precio de " + $n.nombre + ": $" + (Formato-Monto $a.precio) + " -> $" + (Formato-Monto $n.precio)) $null ([double]$n.precio) $false "catalogo" }
             }
             if ($n.stock -ne $null -and $a.stock -ne $null) {
                 if ([double]$a.stock -gt 0 -and [double]$n.stock -le 0) {
@@ -5100,6 +5760,14 @@ $htmlPC = @'
       <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="abrirRecibo()" title="Nombre, NIT, logo, textos del ticket y QR de pago para imprimir">Personalizar comprobante y QR</button>
       <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="abrirPermisos()">Permisos de vendedores</button>
       <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="abrirRed()">Red / IP fija de la PC</button>
+      <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="cerrarMenuPC(); abrirRespaldo();">Copias de seguridad</button>
+      <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="cerrarMenuPC(); abrirSinonimos();">Sinónimos de búsqueda</button>
+      <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="cerrarMenuPC(); abrirAuditoria();">Auditoría (quién hizo qué)</button>
+      <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="cerrarMenuPC(); abrirCostos();">Costos de reposición</button>
+      <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="cerrarMenuPC(); abrirComprasProv();">Compras a proveedores</button>
+      <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="cerrarMenuPC(); abrirEstatico();">Stock estático (baja rotación)</button>
+      <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="cerrarMenuPC(); abrirFiado();">Fiado (cuentas por cobrar)</button>
+      <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="cerrarMenuPC(); abrirSeries();">Garantías y series / lotes</button>
       <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="window.open('/metricas', '_blank')">Ver metricas (F8)</button>
 
       <button class="btn-nuevo-pedido" style="width:100%; background:#0369a1; margin-bottom:10px;" onclick="cerrarMenuPC(); abrirPines();">PIN de vendedores</button>
@@ -5250,6 +5918,40 @@ $htmlPC = @'
       <button class="btn" style="background:#475569; margin-top:6px;" onclick="ipAutomaticaRed()">Volver a IP automática (DHCP)</button>
       <div id="redMsg" style="font-size:12px; margin-top:8px; min-height:16px; line-height:1.4;"></div>
       <button class="btn" style="background:#334155; margin-top:10px;" onclick="pcById('redOverlay').style.display='none'">Cerrar</button>
+    </div>
+  </div>
+
+  <div id="respaldoOverlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); align-items:center; justify-content:center; z-index:59;">
+    <div style="background:#1e293b; padding:22px; border-radius:12px; max-width:480px; width:94%; max-height:92vh; overflow:auto;">
+      <h2 style="font-size:17px; margin-bottom:4px; color:#fff;">Copias de seguridad</h2>
+      <p style="font-size:12px; color:#94a3b8; margin-bottom:10px;">Se guarda un .zip con los pedidos, historial, vendedores, permisos, almacenes y configuración. Siempre queda una copia en la carpeta "respaldos" del servidor. Si pones una carpeta extra (una unidad de red, o una carpeta de OneDrive / Google Drive / Dropbox para que suba sola a la nube) también se copia allí. Para restaurar: cierra el servidor y extrae el .zip sobre su carpeta.</p>
+      <div id="respInfo" style="font-size:13px; background:#0f172a; border-radius:8px; padding:10px 12px; margin-bottom:10px; color:#cbd5e1; line-height:1.4;">Cargando...</div>
+      <label style="font-size:13px; display:flex; align-items:center; gap:8px; margin-bottom:10px; color:#cbd5e1;"><input type="checkbox" id="respActivo"> Hacer copias automáticas</label>
+      <label style="font-size:13px; color:#cbd5e1; display:block; margin-bottom:4px;">Cada:</label>
+      <select id="respHoras" class="np-select"><option value="1">1 hora</option><option value="3">3 horas</option><option value="6">6 horas</option><option value="12">12 horas</option><option value="24">24 horas</option><option value="48">48 horas</option></select>
+      <label style="font-size:13px; color:#cbd5e1; display:block; margin-bottom:4px;">Conservar las últimas (copias):</label>
+      <input type="number" id="respConservar" class="np-input" min="3" max="200">
+      <label style="font-size:13px; color:#cbd5e1; display:block; margin-bottom:4px;">Carpeta extra (opcional):</label>
+      <input type="text" id="respExtra" class="np-input" placeholder="Ej: D:\Respaldos   o   \\PC2\respaldos">
+      <button class="btn" onclick="guardarRespaldo()">Guardar ajustes</button>
+      <button class="btn" style="background:#0369a1; margin-top:6px;" id="btnRespAhora" onclick="respaldarAhora()">Respaldar ahora</button>
+      <div id="respMsg" style="font-size:12px; margin-top:8px; min-height:16px; line-height:1.4;"></div>
+      <div id="respLista" style="font-size:12px; color:#94a3b8; margin-top:6px; line-height:1.5;"></div>
+      <button class="btn" style="background:#334155; margin-top:10px;" onclick="pcById('respaldoOverlay').style.display='none'">Cerrar</button>
+    </div>
+  </div>
+
+  <div id="sinOverlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); align-items:center; justify-content:center; z-index:59;">
+    <div style="background:#1e293b; padding:22px; border-radius:12px; max-width:520px; width:94%; max-height:92vh; overflow:auto;">
+      <h2 style="font-size:17px; margin-bottom:4px; color:#fff;">Sinónimos de búsqueda</h2>
+      <p style="font-size:12px; color:#94a3b8; margin-bottom:10px;">Para que el cliente encuentre un producto aunque no sepa el nombre. Vale en la búsqueda de los vendedores y en esta PC.</p>
+      <label style="font-size:13px; color:#cbd5e1; display:block; margin-bottom:4px;">Palabras que significan lo mismo (una línea por grupo, separadas por coma):</label>
+      <textarea id="sinGrupos" rows="7" style="width:100%; background:#0f172a; color:#e2e8f0; border:1px solid #334155; border-radius:8px; padding:8px; font-size:13px; margin-bottom:10px;" placeholder="cinta aislante, cinta de aislar, teipe"></textarea>
+      <label style="font-size:13px; color:#cbd5e1; display:block; margin-bottom:4px;">Palabras o códigos extra para un producto (una línea por producto: SKU: palabra1, palabra2):</label>
+      <textarea id="sinProductos" rows="5" style="width:100%; background:#0f172a; color:#e2e8f0; border:1px solid #334155; border-radius:8px; padding:8px; font-size:13px; margin-bottom:10px;" placeholder="10234: teipe negro, aislante 3M"></textarea>
+      <button class="btn" onclick="guardarSinonimos()">Guardar</button>
+      <div id="sinMsg" style="font-size:12px; margin-top:8px; min-height:16px; line-height:1.4;"></div>
+      <button class="btn" style="background:#334155; margin-top:10px;" onclick="pcById('sinOverlay').style.display='none'">Cerrar</button>
     </div>
   </div>
 
@@ -6140,7 +6842,8 @@ $htmlPC = @'
         }).join('');
       }
 
-      const notaHtml = p.nota ? ('<div style="font-size:13px; color:#0f172a; background:#e0f2fe; border-radius:6px; padding:6px 8px; margin:6px 0;">&#128172; <b>Nota del vendedor:</b> ' + escaparHtml(p.nota) + '</div>') : '';
+      const notaHtml = (p.clienteNombre ? ('<div style="font-size:13px; color:#0f172a; background:#e0f2fe; border-radius:6px; padding:6px 8px; margin:6px 0;">&#128100; <b>Cliente:</b> ' + escaparHtml(p.clienteNombre) + '</div>') : '') +
+        (p.nota ? ('<div style="font-size:13px; color:#0f172a; background:#e0f2fe; border-radius:6px; padding:6px 8px; margin:6px 0;">&#128172; <b>Nota del vendedor:</b> ' + escaparHtml(p.nota) + '</div>') : '');
 
       const totalProductos = Number(p.totalProductos !== undefined ? p.totalProductos : p.total || 0);
       const totalCobrado = Number(p.totalCobrado !== undefined && p.totalCobrado !== null ? p.totalCobrado : totalProductos);
@@ -7031,6 +7734,14 @@ $htmlPC = @'
       ['devOverlay', function () { cerrarDevolucion(); }],
       ['permOverlay', function () { cerrarPermisos(); }],
       ['redOverlay', function () { var e = document.getElementById('redOverlay'); if (e) e.style.display = 'none'; }],
+      ['respaldoOverlay', function () { var e = document.getElementById('respaldoOverlay'); if (e) e.style.display = 'none'; }],
+      ['sinOverlay', function () { var e = document.getElementById('sinOverlay'); if (e) e.style.display = 'none'; }],
+      ['modAud', function () { var e = document.getElementById('modAud'); if (e) e.style.display = 'none'; }],
+      ['modCostos', function () { var e = document.getElementById('modCostos'); if (e) e.style.display = 'none'; }],
+      ['modComp', function () { var e = document.getElementById('modComp'); if (e) e.style.display = 'none'; }],
+      ['modEst', function () { var e = document.getElementById('modEst'); if (e) e.style.display = 'none'; }],
+      ['modFiado', function () { var e = document.getElementById('modFiado'); if (e) e.style.display = 'none'; }],
+      ['modSeries', function () { var e = document.getElementById('modSeries'); if (e) e.style.display = 'none'; }],
       ['configOverlay', function () { cerrarConfig(); }],
       ['consultaOverlay', function () { cerrarConsulta(); }],
       ['reposOverlay', function () { cerrarRepos(); }]
@@ -7249,6 +7960,87 @@ $htmlPC = @'
     function normalizar(t) {
       return String(t == null ? '' : t).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
     }
+
+    // ---- Busqueda inteligente: varias palabras en cualquier orden, sinonimos y alias por producto ----
+    // "cinta aislante" tambien encuentra "cinta de aislar" o "teipe" (se editan en Ajustes de la PC).
+    let sinonimosGrupos = [];          // [[terminos normalizados que significan lo mismo], ...]
+    let sinonimosProd = {};            // sku -> alias normalizados (texto)
+    const busCacheTxt = new Map();     // sku -> texto normalizado del producto
+    const PALABRAS_VACIAS = new Set(['de', 'del', 'la', 'el', 'los', 'las', 'para', 'con', 'y', 'en', 'un', 'una', 'por', 'a']);
+    function aplicarSinonimos(d) {
+      d = d || {};
+      sinonimosGrupos = (d.grupos || []).map(g => [].concat(g || []).map(s => normalizar(s).trim()).filter(Boolean)).filter(g => g.length > 1);
+      sinonimosProd = {};
+      const pr = d.productos || {};
+      Object.keys(pr).forEach(k => { sinonimosProd[String(k).trim()] = [].concat(pr[k] || []).map(s => normalizar(s)).join(' '); });
+      busCacheTxt.clear();
+    }
+    function tokensBusqueda(q) {
+      return q.split(/\s+/).filter(t => t && !PALABRAS_VACIAS.has(t)).map(t => {
+        if (!/^[a-z]+$/.test(t)) return t;                      // numeros, medidas (3/4), codigos: tal cual
+        if (t.length > 4 && t.endsWith('es')) return t.slice(0, -2);   // "llaves" -> "llav" (encuentra "llave")
+        if (t.length > 3 && t.endsWith('s')) return t.slice(0, -1);    // "clavos" -> "clavo"
+        return t;
+      });
+    }
+    function textoBusquedaProducto(p) {
+      const k = String(p.sku || '');
+      let c = busCacheTxt.get(k);
+      if (!c || c.n !== p.nombre) {
+        c = { n: p.nombre, nom: normalizar(p.nombre), sku: normalizar(p.sku || ''), alias: sinonimosProd[k.trim()] || '' };
+        c.todo = c.nom + ' ' + c.sku + ' ' + c.alias;
+        busCacheTxt.set(k, c);
+      }
+      return c;
+    }
+    // Lo que escribio, mas la misma busqueda cambiando cada termino por sus sinonimos.
+    function consultasEquivalentes(q) {
+      const lista = [q];
+      for (const g of sinonimosGrupos) {
+        for (const t of g) {
+          const i = q.indexOf(t);
+          if (i < 0) continue;
+          const antes = (i === 0 || q.charAt(i - 1) === ' ');
+          const despues = (i + t.length === q.length || q.charAt(i + t.length) === ' ');
+          if (!antes || !despues) continue;
+          for (const u of g) { if (u !== t) lista.push((q.slice(0, i) + u + q.slice(i + t.length)).trim()); }
+        }
+      }
+      return Array.from(new Set(lista)).slice(0, 12);
+    }
+    // Devuelve los productos que coinciden, los mas claros primero.
+    function buscarProductos(lista, textoBuscado) {
+      const q = normalizar(textoBuscado).trim();
+      if (!q) return lista;
+      const sets = consultasEquivalentes(q).map(tokensBusqueda).filter(s => s.length > 0);
+      const res = [];
+      for (const p of lista) {
+        const c = textoBusquedaProducto(p);
+        let score = 99;
+        if (c.nom.includes(q) || c.sku.includes(q)) score = 0;
+        else {
+          for (let i = 0; i < sets.length; i++) {
+            if (sets[i].every(tk => c.todo.includes(tk))) { score = (i === 0 ? 1 : 2); break; }
+          }
+        }
+        if (score < 99) res.push({ p: p, score: score });
+      }
+      res.sort((a, b) => a.score - b.score);
+      return res.map(r => r.p);
+    }
+    async function cargarSinonimos() {
+      try {
+        const res = await fetch('/api/sinonimos');
+        const d = await res.json();
+        if (d && d.ok) {
+          aplicarSinonimos(d);
+          try { localStorage.setItem('sinonimosCache', JSON.stringify(d)); } catch (e) {}
+        }
+      } catch (e) {}
+    }
+    try { aplicarSinonimos(JSON.parse(localStorage.getItem('sinonimosCache') || 'null')); } catch (e) {}
+    cargarSinonimos();
+    setInterval(cargarSinonimos, 300000);
 
     // ---- PIN de vendedores ----
     // =====================================================================
@@ -7485,6 +8277,7 @@ $htmlPC = @'
     // =====================================================================
     let permData = null;
     let permActual = '';
+    let rolesData = null;
     const PERM_PRESETS = {
       completo: null,
       vender: { crearPedidos: true, cobrar: false, cancelar: false, editar: false, imprimir: true, descuentos: false, verStock: true, misPedidos: true, ajustes: false, modoCliente: true, asignados: true, notificaciones: true },
@@ -7499,6 +8292,7 @@ $htmlPC = @'
     function cerrarPermisos() { pcById('permOverlay').style.display = 'none'; }
     async function cargarPermisos() {
       try { const r = await fetch('/api/permisos/todos'); permData = await r.json(); } catch (e) { permData = null; }
+      try { const rr = await fetch('/api/roles'); rolesData = await rr.json(); } catch (e) { rolesData = null; }
       const sel = pcById('permVendedor');
       if (!permData || !permData.vendedores || permData.vendedores.length === 0) {
         sel.innerHTML = '';
@@ -7513,7 +8307,7 @@ $htmlPC = @'
     function renderPermisos() {
       const v = (permData.vendedores || []).find(x => x.nombre === permActual);
       if (!v) return;
-      pcById('permLista').innerHTML = permData.claves.map(c =>
+      pcById('permLista').innerHTML = rolesBoxHtml(v) + permData.claves.map(c =>
         '<label style="display:flex; align-items:flex-start; gap:10px; padding:8px 0; border-bottom:1px solid #334155; font-size:14px; cursor:pointer;">' +
         '<input type="checkbox" style="margin-top:3px;" ' + (v.permisos[c.k] ? 'checked' : '') + ' onchange="permCambiar(\'' + c.k + '\', this.checked)">' +
         '<span><b style="color:#fff;">' + escaparHtml(c.t) + '</b><br><small style="color:#94a3b8;">' + escaparHtml(c.d) + '</small></span></label>'
@@ -7538,6 +8332,431 @@ $htmlPC = @'
     }
 
     // ---- Red / IP fija ----
+    // ================= Seguridad, costos, compras, stock estatico, fiado y garantias =================
+    function pcModal(id, titulo) {
+      let o = document.getElementById(id);
+      if (!o) {
+        o = document.createElement('div');
+        o.id = id;
+        o.style.cssText = 'display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); align-items:center; justify-content:center; z-index:59;';
+        o.onclick = function (e) { if (e.target === o) o.style.display = 'none'; };
+        o.innerHTML = '<div style="background:#1e293b; padding:20px; border-radius:12px; max-width:780px; width:96%; max-height:92vh; overflow:auto; color:#e2e8f0;">' +
+          '<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;"><h2 style="font-size:17px; color:#fff;">' + titulo + '</h2>' +
+          '<button class="btn-toggle" onclick="document.getElementById(\'' + id + '\').style.display=\'none\'">Cerrar</button></div><div id="' + id + '_c"></div></div>';
+        document.body.appendChild(o);
+      }
+      o.style.display = 'flex';
+      return document.getElementById(id + '_c');
+    }
+    function pcMoney(n) { return '$' + (Number(n) || 0).toFixed(2); }
+    async function pcApi(url, body) {
+      const o = (body === undefined) ? {} : { method: 'POST', body: JSON.stringify(body) };
+      try {
+        const r = await fetch(url, o);
+        const d = await r.json().catch(() => null);
+        return { ok: r.ok && !!d && d.ok !== false, d: d || {}, status: r.status };
+      } catch (e) { return { ok: false, d: { error: 'Sin conexion con el servidor.' }, status: 0 }; }
+    }
+    function pcCopiar(texto) {
+      try { navigator.clipboard.writeText(texto).then(function () { mostrarBanner('Copiado.'); }, function () { prompt('Copia el texto:', texto); }); }
+      catch (e) { prompt('Copia el texto:', texto); }
+    }
+    function pcTelWa(tel) {
+      let d = String(tel || '').replace(/\D/g, '');
+      if (d.length === 8 && d.charAt(0) === '5') d = '53' + d;
+      return d;
+    }
+    const PC_BTN = 'background:#0369a1; color:#fff; border:none; border-radius:6px; padding:5px 10px; font-size:12px; font-weight:600; cursor:pointer; margin:2px 2px 0 0;';
+    const PC_CAJA = 'background:#0f172a; border:1px solid #334155; border-radius:8px; padding:9px 10px; margin-bottom:7px; font-size:13px; line-height:1.45;';
+    const PC_AREA = 'width:100%; background:#0f172a; color:#e2e8f0; border:1px solid #334155; border-radius:8px; padding:8px; font-size:13px; margin-bottom:8px;';
+
+    // ---- Auditoria ----
+    const ACC_AUD = ['descuento', 'descuento_bloqueado', 'venta_bajo_costo', 'bajo_costo_bloqueado', 'anulacion', 'cambio_metodo', 'devolucion', 'permisos', 'roles', 'precio_catalogo', 'costos', 'fiado_cargo', 'fiado_abono', 'series'];
+    function abrirAuditoria() {
+      const c = pcModal('modAud', 'Auditoría de acciones sensibles');
+      c.innerHTML = '<div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:8px; align-items:center;">' +
+        '<select id="audAcc" class="np-select" style="flex:1; min-width:150px; margin:0;"><option value="">Todas las acciones</option>' + ACC_AUD.map(a => '<option value="' + a + '">' + a.replace(/_/g, ' ') + '</option>').join('') + '</select>' +
+        '<input id="audQ" class="np-input" placeholder="Buscar (usuario, pedido, producto)" style="flex:2; min-width:170px; margin:0;">' +
+        '<label style="font-size:13px; display:flex; align-items:center; gap:5px;"><input type="checkbox" id="audAl"> Solo alertas</label>' +
+        '<button style="' + PC_BTN + '" onclick="cargarAuditoria()">Ver</button></div><div id="audLista"></div>';
+      cargarAuditoria();
+    }
+    async function cargarAuditoria() {
+      const q = '/api/auditoria?max=300&accion=' + encodeURIComponent(pcById('audAcc').value) + '&q=' + encodeURIComponent(pcById('audQ').value) + (pcById('audAl').checked ? '&alertas=1' : '');
+      const r = await pcApi(q);
+      const lista = (r.d && r.d.registros) || [];
+      pcById('audLista').innerHTML = lista.length ? lista.map(x =>
+        '<div style="padding:7px 9px; margin-bottom:5px; border-radius:8px; font-size:12px; line-height:1.4; background:' + (x.alerta ? '#450a0a' : '#0f172a') + '; border:1px solid ' + (x.alerta ? '#991b1b' : '#334155') + ';">' +
+        '<b style="color:#fff;">' + escaparHtml(x.hora) + '</b> · ' + escaparHtml(x.usuario) + ' <span style="color:#94a3b8;">(' + escaparHtml(x.origen) + ')</span> · ' +
+        '<span style="color:' + (x.alerta ? '#fca5a5' : '#7dd3fc') + ';">' + escaparHtml(String(x.accion).replace(/_/g, ' ')) + '</span><br>' + escaparHtml(x.detalle) + '</div>'
+      ).join('') : '<div class="np-vacio">No hay registros con ese filtro.</div>';
+    }
+
+    // ---- Costos de reposicion ----
+    async function abrirCostos() {
+      const c = pcModal('modCostos', 'Costos de reposición');
+      const r = await pcApi('/api/costos');
+      const d = r.d || {};
+      const man = d.manual || {};
+      c.innerHTML = '<p style="font-size:12px; color:#94a3b8; margin-bottom:10px;">El costo se usa para avisar (y bloquear, si el vendedor no tiene permiso) cuando se vende por debajo de lo que cuesta reponer el producto, y para calcular el capital parado. Los vendedores nunca ven el costo.</p>' +
+        '<div style="' + PC_CAJA + '">Costos leídos de AxisPOS: <b>' + (d.nAxis || 0) + '</b>' + (d.ultimaAxis ? ' (última carga: ' + escaparHtml(d.ultimaAxis) + ')' : '') + '</div>' +
+        '<label style="font-size:13px; display:block; margin-bottom:4px;">Columna de costo en la tabla de productos de AxisPOS (opcional, ej. PriceIn):</label>' +
+        '<input id="cosCol" class="np-input" value="' + escaparHtml(d.columnaAxis || '') + '" placeholder="PriceIn">' +
+        '<label style="font-size:13px; display:block; margin:6px 0 4px;">Costos manuales (una línea por producto: SKU: costo). Tienen prioridad sobre AxisPOS:</label>' +
+        '<textarea id="cosMan" rows="8" style="' + PC_AREA + '" placeholder="10234: 12.50">' + escaparHtml(Object.keys(man).map(k => k + ': ' + man[k]).join('\n')) + '</textarea>' +
+        '<button style="' + PC_BTN + '" onclick="guardarCostos(false)">Guardar</button> <button style="' + PC_BTN + '" onclick="guardarCostos(true)">Guardar y cargar costos de AxisPOS</button><div id="cosMsg" style="font-size:12px; margin-top:8px;"></div>';
+    }
+    async function guardarCostos(cargarAxis) {
+      const msg = pcById('cosMsg');
+      const manual = {};
+      pcById('cosMan').value.split('\n').forEach(l => {
+        const i = l.indexOf(':');
+        if (i < 1) return;
+        const v = parseFloat(l.slice(i + 1).trim().replace(',', '.'));
+        if (!isNaN(v) && v > 0) manual[l.slice(0, i).trim()] = v;
+      });
+      let r = await pcApi('/api/costos', { manual: manual, columnaAxis: pcById('cosCol').value.trim() });
+      if (!r.ok) { msg.style.color = '#fca5a5'; msg.textContent = (r.d && r.d.error) || 'No se pudo guardar.'; return; }
+      if (cargarAxis) {
+        msg.style.color = '#cbd5e1'; msg.textContent = 'Leyendo AxisPOS...';
+        r = await pcApi('/api/costos/axis', {});
+        if (!r.ok) { msg.style.color = '#fca5a5'; msg.textContent = (r.d && r.d.error) || 'No se pudo leer AxisPOS.'; return; }
+        msg.style.color = '#86efac'; msg.textContent = 'Listo: ' + r.d.n + ' costos leídos de AxisPOS.';
+        return;
+      }
+      msg.style.color = '#86efac'; msg.textContent = 'Guardado.';
+    }
+
+    // ---- Compras a proveedores ----
+    let comprasDatos = null;
+    let comprasQty = {};
+    async function abrirComprasProv() {
+      const c = pcModal('modComp', 'Compras a proveedores');
+      c.innerHTML = '<div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:8px; font-size:13px;">' +
+        'Ventas de los últimos <select id="cpDias" class="np-select" style="width:auto; margin:0;"><option value="15">15</option><option value="30" selected>30</option><option value="60">60</option><option value="90">90</option></select> días · ' +
+        'alcanzar para <select id="cpCob" class="np-select" style="width:auto; margin:0;"><option value="7">7</option><option value="15" selected>15</option><option value="30">30</option><option value="45">45</option></select> días ' +
+        '<button style="' + PC_BTN + '" onclick="calcularCompras()">Calcular</button></div>' +
+        '<div id="cpInfo" style="font-size:12px; color:#94a3b8; margin-bottom:8px;"></div><div id="cpLista"></div>' +
+        '<details style="margin-top:12px;"><summary style="cursor:pointer; font-size:13px; color:#7dd3fc;">Mis proveedores</summary>' +
+        '<p style="font-size:12px; color:#94a3b8; margin:6px 0;">Una línea por proveedor: nombre, teléfono (para WhatsApp).</p>' +
+        '<textarea id="cpProv" rows="4" style="' + PC_AREA + '" placeholder="Ferrimport, 52345678"></textarea>' +
+        '<button style="' + PC_BTN + '" onclick="guardarProveedores()">Guardar proveedores</button></details>';
+      await calcularCompras();
+    }
+    async function calcularCompras() {
+      pcById('cpLista').innerHTML = '<div class="np-vacio">Calculando...</div>';
+      const r = await pcApi('/api/compras/sugerencias?dias=' + pcById('cpDias').value + '&cobertura=' + pcById('cpCob').value);
+      if (!r.ok) { pcById('cpLista').innerHTML = '<div class="np-vacio">' + escaparHtml((r.d && r.d.error) || 'No se pudo calcular.') + '</div>'; return; }
+      comprasDatos = r.d; comprasQty = {};
+      (comprasDatos.items || []).forEach((it, i) => { comprasQty[i] = it.sugerido; });
+      const ta = pcById('cpProv');
+      if (ta && !ta.value) ta.value = (comprasDatos.proveedores || []).map(p => p.nombre + ', ' + (p.telefono || '')).join('\n');
+      pcById('cpInfo').textContent = 'Ventas tomadas de ' + (comprasDatos.fuente === 'axispos' ? 'AxisPOS' : 'los pedidos de la app (no incluye ventas hechas solo en AxisPOS)') + '. Cantidades editables.';
+      renderCompras();
+    }
+    function renderCompras() {
+      const items = (comprasDatos && comprasDatos.items) || [];
+      if (!items.length) { pcById('cpLista').innerHTML = '<div class="np-vacio">Nada que reponer con estos datos.</div>'; return; }
+      const nombresProv = (comprasDatos.proveedores || []).map(p => p.nombre);
+      const grupos = {};
+      items.forEach((it, i) => { const g = it.proveedor || ''; (grupos[g] = grupos[g] || []).push(i); });
+      const orden = Object.keys(grupos).sort((a, b) => (a === '' ? 1 : 0) - (b === '' ? 1 : 0) || a.localeCompare(b));
+      pcById('cpLista').innerHTML = orden.map(g => {
+        let total = 0;
+        const filas = grupos[g].map(i => {
+          const it = items[i];
+          total += (Number(it.costo) || 0) * (Number(comprasQty[i]) || 0);
+          return '<div style="' + PC_CAJA + '"><b style="color:#fff;">' + escaparHtml(it.nombre) + '</b><br>' +
+            '<span style="color:#94a3b8;">Hay ' + it.stock + ' · mín ' + it.minimo + ' · vende ' + it.velDia + '/día' + (it.diasRestantes != null ? ' · alcanza ' + it.diasRestantes + ' días' : '') + '</span><br>' +
+            'Pedir: <input type="number" min="0" value="' + comprasQty[i] + '" style="width:70px; background:#1e293b; color:#fff; border:1px solid #475569; border-radius:6px; padding:3px;" onchange="comprasQty[' + i + ']=parseFloat(this.value)||0; renderCompras();"> ' +
+            (it.costo != null ? ' · costo ' + pcMoney(it.costo) : '') +
+            ' &nbsp; Proveedor: <select style="background:#1e293b; color:#fff; border:1px solid #475569; border-radius:6px; padding:3px;" onchange="asignarProveedor(' + i + ', this.value)"><option value="">(sin proveedor)</option>' +
+            nombresProv.map(n => '<option value="' + escaparHtml(n) + '"' + (n === it.proveedor ? ' selected' : '') + '>' + escaparHtml(n) + '</option>').join('') + '</select></div>';
+        }).join('');
+        const nombreG = g || 'Sin proveedor asignado';
+        return '<div style="margin-bottom:14px;"><div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;"><b style="color:#fff; font-size:14px;">' + escaparHtml(nombreG) + ' (' + grupos[g].length + ')' + (total > 0 ? ' · aprox. ' + pcMoney(total) : '') + '</b>' +
+          '<span><button style="' + PC_BTN + '" onclick="copiarPedidoProv(\'' + escaparHtml(g).replace(/'/g, '') + '\')">Copiar</button><button style="' + PC_BTN + '" onclick="waPedidoProv(\'' + escaparHtml(g).replace(/'/g, '') + '\')">WhatsApp</button></span></div>' + filas + '</div>';
+      }).join('');
+    }
+    async function asignarProveedor(i, nombre) {
+      const it = comprasDatos.items[i];
+      const r = await pcApi('/api/proveedores', { asignar: { sku: it.sku, proveedor: nombre } });
+      if (r.ok) { it.proveedor = nombre; renderCompras(); } else mostrarBanner('No se pudo asignar el proveedor.', 4000);
+    }
+    async function guardarProveedores() {
+      const lista = pcById('cpProv').value.split('\n').map(l => { const p = l.split(','); return { nombre: (p[0] || '').trim(), telefono: (p[1] || '').trim(), nota: (p[2] || '').trim() }; }).filter(p => p.nombre);
+      const r = await pcApi('/api/proveedores', { lista: lista });
+      if (r.ok) { comprasDatos.proveedores = lista; renderCompras(); mostrarBanner('Proveedores guardados.'); } else mostrarBanner('No se pudo guardar.', 4000);
+    }
+    function textoPedidoProv(g) {
+      const items = comprasDatos.items;
+      const lineas = [];
+      items.forEach((it, i) => { if ((it.proveedor || '') === g && (Number(comprasQty[i]) || 0) > 0) lineas.push('- ' + comprasQty[i] + ' x ' + it.nombre); });
+      return 'Pedido' + (g ? ' para ' + g : '') + ' (' + new Date().toLocaleDateString() + '):\n' + lineas.join('\n');
+    }
+    function copiarPedidoProv(g) { pcCopiar(textoPedidoProv(g)); }
+    function waPedidoProv(g) {
+      const p = (comprasDatos.proveedores || []).find(x => x.nombre === g);
+      window.open('https://wa.me/' + pcTelWa(p && p.telefono) + '?text=' + encodeURIComponent(textoPedidoProv(g)), '_blank');
+    }
+
+    // ---- Stock estatico (baja rotacion) ----
+    async function abrirEstatico() {
+      const c = pcModal('modEst', 'Stock estático (baja rotación)');
+      c.innerHTML = '<div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:8px; font-size:13px;">Productos con existencias y <b>sin ventas</b> en los últimos ' +
+        '<select id="esDias" class="np-select" style="width:auto; margin:0;"><option value="30">30</option><option value="60">60</option><option value="90" selected>90</option><option value="180">180</option><option value="365">365</option></select> días ' +
+        '<button style="' + PC_BTN + '" onclick="cargarEstatico()">Ver</button></div><div id="esRes"></div>';
+      cargarEstatico();
+    }
+    let estaticoDatos = null;
+    async function cargarEstatico() {
+      pcById('esRes').innerHTML = '<div class="np-vacio">Calculando...</div>';
+      const r = await pcApi('/api/reportes/estatico?dias=' + pcById('esDias').value);
+      if (!r.ok) { pcById('esRes').innerHTML = '<div class="np-vacio">' + escaparHtml((r.d && r.d.error) || 'No se pudo calcular.') + '</div>'; return; }
+      estaticoDatos = r.d;
+      const d = r.d;
+      pcById('esRes').innerHTML = '<div style="' + PC_CAJA + '">' + d.total + ' productos sin movimiento · capital parado: <b style="color:#fbbf24;">' + pcMoney(d.capitalTotal) + '</b>' +
+        (d.sinCosto ? '<br><span style="color:#94a3b8;">En ' + d.sinCosto + ' no hay costo cargado: se usó el precio de venta para estimar el capital.</span>' : '') +
+        (d.fuente !== 'axispos' ? '<br><span style="color:#fca5a5;">Ventas tomadas solo de la app: lo vendido directo en AxisPOS no se cuenta, revisa antes de rebajar.</span>' : '') + '</div>' +
+        '<button style="' + PC_BTN + '" onclick="copiarEstatico()">Copiar lista de oferta</button>' +
+        (d.items || []).map(it => '<div style="' + PC_CAJA + '"><b style="color:#fff;">' + escaparHtml(it.nombre) + '</b><br>' +
+          'Hay ' + it.stock + ' · precio ' + pcMoney(it.precio) + (it.costo != null ? ' · costo ' + pcMoney(it.costo) : '') + ' · capital ' + pcMoney(it.capital) + '<br>' +
+          '<span style="color:#86efac;">Oferta sugerida: -' + it.descSugerido + '% → ' + pcMoney(it.precioOferta) + (it.descSugerido === 0 ? ' (sin margen para rebajar)' : '') + '</span></div>').join('');
+    }
+    function copiarEstatico() {
+      if (!estaticoDatos) return;
+      pcCopiar('Ofertas de liquidación:\n' + (estaticoDatos.items || []).filter(it => it.descSugerido > 0).map(it => '- ' + it.nombre + ': ' + pcMoney(it.precioOferta) + ' (antes ' + pcMoney(it.precio) + ')').join('\n'));
+    }
+
+    // ---- Fiado (cuentas por cobrar) ----
+    async function abrirFiado() { pcModal('modFiado', 'Fiado (cuentas por cobrar)'); renderFiado(); }
+    async function renderFiado() {
+      const r = await pcApi('/api/fiado');
+      const cont = pcById('modFiado_c');
+      if (!r.ok) { cont.innerHTML = '<div class="np-vacio">' + escaparHtml((r.d && r.d.error) || 'No se pudo cargar.') + '</div>'; return; }
+      const cl = r.d.clientes || [];
+      cont.innerHTML = '<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;"><span style="font-size:14px;">Total por cobrar: <b style="color:#fbbf24;">' + pcMoney(r.d.total) + '</b></span>' +
+        '<button style="' + PC_BTN + '" onclick="fiadoCliente(0)">+ Nuevo cliente</button></div>' +
+        (cl.length ? cl.map(c => '<div style="' + PC_CAJA + '"><b style="color:#fff;">' + escaparHtml(c.nombre) + '</b>' + (c.telefono ? ' <span style="color:#94a3b8;">' + escaparHtml(c.telefono) + '</span>' : '') + '<br>' +
+          'Debe <b style="color:' + (c.saldo > 0 ? '#fca5a5' : '#86efac') + ';">' + pcMoney(c.saldo) + '</b>' + (c.limite > 0 ? ' de ' + pcMoney(c.limite) + ' (disponible ' + pcMoney(c.disponible) + ')' : ' · sin límite') +
+          (c.saldo > 0 && c.dias != null ? ' · <span style="color:' + (c.dias >= 30 ? '#fca5a5' : '#94a3b8') + ';">' + c.dias + ' días sin movimiento</span>' : '') + '<br>' +
+          '<button style="' + PC_BTN + '" onclick="fiadoCargo(' + c.id + ')">Cargo</button><button style="' + PC_BTN + '" onclick="fiadoAbono(' + c.id + ')">Abono</button>' +
+          (c.saldo > 0 ? '<button style="' + PC_BTN + '" onclick="fiadoRecordar(' + c.id + ')">Recordar por WhatsApp</button>' : '') +
+          '<button style="' + PC_BTN + 'background:#475569;" onclick="fiadoMovs(' + c.id + ')">Movimientos</button><button style="' + PC_BTN + 'background:#475569;" onclick="fiadoCliente(' + c.id + ')">Editar</button></div>').join('')
+          : '<div class="np-vacio">Todavía no hay clientes con cuenta. Crea el primero con "+ Nuevo cliente".</div>') +
+        '<div id="fiadoMovs"></div>';
+      window.__fiadoLista = cl;
+    }
+    async function fiadoCliente(id) {
+      const ex = (window.__fiadoLista || []).find(x => x.id === id) || {};
+      const nombre = prompt('Nombre del cliente:', ex.nombre || ''); if (nombre === null) return;
+      const tel = prompt('Teléfono (para recordatorios por WhatsApp, opcional):', ex.telefono || ''); if (tel === null) return;
+      const lim = prompt('Límite de crédito (0 = sin límite):', ex.limite != null ? ex.limite : '0'); if (lim === null) return;
+      const r = await pcApi('/api/fiado/cliente', { id: id || undefined, nombre: nombre, telefono: tel, limite: lim });
+      if (!r.ok) mostrarBanner((r.d && r.d.error) || 'No se pudo guardar.', 4000);
+      renderFiado();
+    }
+    async function fiadoCargo(id) {
+      const monto = prompt('Monto fiado ($):'); if (monto === null) return;
+      const concepto = prompt('Concepto / productos (opcional):', '') || '';
+      const pedido = prompt('Número de pedido (opcional):', '') || '';
+      let r = await pcApi('/api/fiado/cargo', { id: id, monto: monto, concepto: concepto, pedido: pedido });
+      if (!r.ok && r.d && r.d.excede) {
+        if (!confirm(r.d.error + '\n\n¿Autorizar de todas formas? Quedará registrado en la auditoría.')) return;
+        r = await pcApi('/api/fiado/cargo', { id: id, monto: monto, concepto: concepto, pedido: pedido, forzar: true });
+      }
+      if (!r.ok) mostrarBanner((r.d && r.d.error) || 'No se pudo registrar.', 4000);
+      renderFiado();
+    }
+    async function fiadoAbono(id) {
+      const monto = prompt('Monto que paga ahora ($):'); if (monto === null) return;
+      const concepto = prompt('Nota (opcional):', '') || '';
+      const r = await pcApi('/api/fiado/abono', { id: id, monto: monto, concepto: concepto });
+      if (!r.ok) mostrarBanner((r.d && r.d.error) || 'No se pudo registrar.', 4000);
+      renderFiado();
+    }
+    function fiadoRecordar(id) {
+      const c = (window.__fiadoLista || []).find(x => x.id === id); if (!c) return;
+      const txt = 'Hola ' + c.nombre + ', te recordamos que tienes un saldo pendiente de ' + pcMoney(c.saldo) + '. Cuando puedas pasar a saldarlo, gracias.';
+      window.open('https://wa.me/' + pcTelWa(c.telefono) + '?text=' + encodeURIComponent(txt), '_blank');
+    }
+    async function fiadoMovs(id) {
+      const r = await pcApi('/api/fiado/movimientos?id=' + id);
+      const cont = pcById('fiadoMovs');
+      if (!r.ok) { cont.innerHTML = ''; return; }
+      cont.innerHTML = '<h3 style="font-size:14px; margin:12px 0 6px; color:#fff;">Movimientos de ' + escaparHtml(r.d.nombre) + '</h3>' +
+        ((r.d.movimientos || []).map(m => '<div style="' + PC_CAJA + '"><span style="color:#94a3b8;">' + escaparHtml(m.fecha) + '</span> · <b style="color:' + (m.tipo === 'cargo' ? '#fca5a5' : '#86efac') + ';">' + (m.tipo === 'cargo' ? '+' : '-') + pcMoney(m.monto) + '</b> · saldo ' + pcMoney(m.saldo) +
+          (m.concepto ? '<br>' + escaparHtml(m.concepto) : '') + (m.pedido ? ' · pedido #' + escaparHtml(m.pedido) : '') + '</div>').join('') || '<div class="np-vacio">Sin movimientos.</div>');
+    }
+
+    // ---- Garantias y trazabilidad (series / lotes) ----
+    const EST_SERIE = { vendido: 'Vendido', devuelto: 'Devuelto por el cliente', garantia_proveedor: 'En garantía con el proveedor', reparado: 'Reparado / repuesto' };
+    function abrirSeries() {
+      const c = pcModal('modSeries', 'Garantías y series / lotes');
+      c.innerHTML = '<details style="margin-bottom:10px;"><summary style="cursor:pointer; font-size:13px; color:#7dd3fc;">+ Registrar serie o lote</summary><div style="display:grid; grid-template-columns:1fr 1fr; gap:6px; margin-top:8px;">' +
+        ['sku:SKU del producto', 'serie:Número de serie', 'lote:Lote', 'cliente:Cliente', 'telefono:Teléfono', 'pedido:Pedido #', 'garantiaMeses:Meses de garantía', 'proveedor:Proveedor'].map(x => { const p = x.split(':'); return '<input id="se_' + p[0] + '" class="np-input" style="margin:0;" placeholder="' + p[1] + '"' + (p[0] === 'garantiaMeses' ? ' type="number" min="0" value="12"' : '') + '>'; }).join('') +
+        '</div><input id="se_notas" class="np-input" style="margin-top:6px;" placeholder="Notas"><button style="' + PC_BTN + '" onclick="guardarSerie()">Guardar</button><div id="seMsg" style="font-size:12px; margin-top:6px;"></div></details>' +
+        '<div style="display:flex; gap:6px; margin-bottom:8px;"><input id="seQ" class="np-input" style="margin:0; flex:1;" placeholder="Buscar por serie, lote, cliente, producto o pedido" oninput="cargarSeries()"><select id="seEst" class="np-select" style="width:auto; margin:0;" onchange="cargarSeries()"><option value="">Todos</option>' +
+        Object.keys(EST_SERIE).map(k => '<option value="' + k + '">' + EST_SERIE[k] + '</option>').join('') + '</select></div><div id="seLista"></div>';
+      cargarSeries();
+    }
+    async function cargarSeries() {
+      const r = await pcApi('/api/series?q=' + encodeURIComponent(pcById('seQ').value) + '&estado=' + encodeURIComponent(pcById('seEst').value));
+      const lista = (r.d && r.d.registros) || [];
+      window.__seriesLista = lista;
+      pcById('seLista').innerHTML = lista.length ? lista.map(s => {
+        let vence = '';
+        if (s.vence) vence = s.venceEn < 0 ? '<span style="color:#fca5a5;">garantía vencida (' + escaparHtml(s.vence) + ')</span>' : '<span style="color:#86efac;">garantía hasta ' + escaparHtml(s.vence) + ' (' + s.venceEn + ' días)</span>';
+        return '<div style="' + PC_CAJA + '"><b style="color:#fff;">' + escaparHtml(s.producto || s.sku) + '</b> <span style="color:#94a3b8;">' + escaparHtml(s.sku) + '</span><br>' +
+          (s.serie ? 'Serie: <b>' + escaparHtml(s.serie) + '</b> ' : '') + (s.lote ? 'Lote: <b>' + escaparHtml(s.lote) + '</b> ' : '') + '<br>' +
+          (s.cliente ? 'Cliente: ' + escaparHtml(s.cliente) + (s.telefono ? ' (' + escaparHtml(s.telefono) + ')' : '') + ' · ' : '') + (s.pedido ? 'Pedido #' + escaparHtml(s.pedido) + ' · ' : '') + escaparHtml(s.fecha.slice(0, 10)) + (s.vendedor ? ' · ' + escaparHtml(s.vendedor) : '') + '<br>' +
+          (s.proveedor ? 'Proveedor: ' + escaparHtml(s.proveedor) + '<br>' : '') + (vence ? vence + '<br>' : '') +
+          'Estado: <b>' + escaparHtml(EST_SERIE[s.estado] || s.estado) + '</b>' + (s.notas ? '<br><span style="color:#94a3b8;">' + escaparHtml(s.notas) + '</span>' : '') + '<br>' +
+          '<button style="' + PC_BTN + '" onclick="cambiarEstadoSerie(' + s.id + ')">Cambiar estado</button></div>';
+      }).join('') : '<div class="np-vacio">No hay registros.</div>';
+    }
+    async function guardarSerie() {
+      const campos = ['sku', 'serie', 'lote', 'cliente', 'telefono', 'pedido', 'garantiaMeses', 'proveedor', 'notas'];
+      const body = {};
+      campos.forEach(k => { body[k] = pcById('se_' + k).value.trim(); });
+      const msg = pcById('seMsg');
+      const r = await pcApi('/api/series', body);
+      msg.style.color = r.ok ? '#86efac' : '#fca5a5';
+      msg.textContent = r.ok ? 'Registrado.' : ((r.d && r.d.error) || 'No se pudo guardar.');
+      if (r.ok) { ['serie', 'lote', 'cliente', 'telefono', 'pedido', 'notas'].forEach(k => { pcById('se_' + k).value = ''; }); cargarSeries(); }
+    }
+    async function cambiarEstadoSerie(id) {
+      const claves = Object.keys(EST_SERIE);
+      const n = parseInt(prompt('Nuevo estado:\n' + claves.map((k, i) => (i + 1) + ') ' + EST_SERIE[k]).join('\n')), 10);
+      if (!(n >= 1 && n <= claves.length)) return;
+      const nota = prompt('Nota (opcional):', '') || '';
+      const r = await pcApi('/api/series/' + id + '/estado', { estado: claves[n - 1], nota: nota });
+      if (!r.ok) mostrarBanner((r.d && r.d.error) || 'No se pudo cambiar.', 4000);
+      cargarSeries();
+    }
+
+    // ---- Roles dentro de la ventana de permisos ----
+    function rolesBoxHtml(v) {
+      if (!rolesData || !rolesData.ok) return '';
+      const rv = (rolesData.vendedores || []).find(x => x.nombre === v.nombre) || { rol: 'personalizado', descuentoMaxPct: 100 };
+      const opts = (rolesData.roles || []).map(r => '<option value="' + r.k + '"' + (r.k === rv.rol ? ' selected' : '') + '>' + escaparHtml(r.t) + ' (desc. máx. ' + r.desc + '%)</option>').join('') +
+        '<option value="personalizado"' + (rv.rol === 'personalizado' ? ' selected' : '') + '>Personalizado</option>';
+      return '<div style="background:#0f172a; border:1px solid #334155; border-radius:8px; padding:10px; margin-bottom:10px; font-size:13px;"><b style="color:#fff;">Rol de ' + escaparHtml(v.nombre) + '</b><br>' +
+        '<select id="permRol" class="np-select" onchange="rolAplicar(true)">' + opts + '</select>' +
+        '<label>Descuento máximo (%): <input type="number" id="permDescMax" class="np-input" min="0" max="100" value="' + rv.descuentoMaxPct + '" onchange="rolAplicar(false)" style="width:90px; display:inline-block; margin:0;"></label>' +
+        '<div style="color:#94a3b8; font-size:12px; margin-top:4px;">Al elegir un rol se aplican sus permisos (luego puedes ajustarlos abajo). El descuento máximo limita cuánto puede bajar un precio.</div></div>';
+    }
+    async function rolAplicar(cambioRol) {
+      const body = { vendedor: permActual, rol: pcById('permRol').value };
+      const desc = parseFloat(pcById('permDescMax').value);
+      if (!cambioRol && !isNaN(desc)) body.descuentoMaxPct = desc;
+      const r = await pcApi('/api/roles', body);
+      const m = pcById('permMsg');
+      m.style.color = r.ok ? '#86efac' : '#fca5a5';
+      m.textContent = r.ok ? 'Rol guardado.' : ((r.d && r.d.error) || 'No se pudo guardar.');
+      await cargarPermisos();
+    }
+
+    // ---- Sinonimos de busqueda ----
+    async function abrirSinonimos() {
+      pcById('sinOverlay').style.display = 'flex';
+      pcById('sinMsg').textContent = '';
+      try {
+        const res = await fetch('/api/sinonimos');
+        const d = await res.json();
+        if (!d || !d.ok) return;
+        pcById('sinGrupos').value = (d.grupos || []).map(g => [].concat(g).join(', ')).join('\n');
+        const pr = d.productos || {};
+        pcById('sinProductos').value = Object.keys(pr).map(k => k + ': ' + [].concat(pr[k]).join(', ')).join('\n');
+      } catch (e) { pcById('sinMsg').textContent = 'No se pudieron cargar.'; }
+    }
+    async function guardarSinonimos() {
+      const msg = pcById('sinMsg');
+      msg.style.color = '#cbd5e1';
+      const grupos = pcById('sinGrupos').value.split('\n').map(l => l.split(',').map(s => s.trim()).filter(Boolean)).filter(g => g.length > 1);
+      const productos = {};
+      pcById('sinProductos').value.split('\n').forEach(l => {
+        const i = l.indexOf(':');
+        if (i < 1) return;
+        const sku = l.slice(0, i).trim();
+        const alias = l.slice(i + 1).split(',').map(s => s.trim()).filter(Boolean);
+        if (sku && alias.length) productos[sku] = alias;
+      });
+      try {
+        const res = await fetch('/api/sinonimos', { method: 'POST', body: JSON.stringify({ grupos: grupos, productos: productos }) });
+        const d = await res.json().catch(() => null);
+        if (!res.ok || !d || !d.ok) { msg.style.color = '#fca5a5'; msg.textContent = (d && d.error) || 'No se pudo guardar.'; return; }
+        msg.style.color = '#86efac';
+        msg.textContent = 'Guardado. Los teléfonos lo reciben en pocos minutos.';
+        cargarSinonimos();
+      } catch (e) { msg.style.color = '#fca5a5'; msg.textContent = 'No se pudo guardar (revisa la conexión).'; }
+    }
+
+    // ---- Copias de seguridad ----
+    async function abrirRespaldo() {
+      pcById('respaldoOverlay').style.display = 'flex';
+      pcById('respMsg').textContent = '';
+      await cargarRespaldo(false);
+    }
+    async function cargarRespaldo(soloEstado) {
+      try {
+        const res = await fetch('/api/respaldo');
+        const d = await res.json();
+        if (!d || !d.ok) return;
+        const c = d.cfg || {};
+        if (!soloEstado) {
+          pcById('respActivo').checked = !!c.activo;
+          pcById('respHoras').value = String(Number(c.cadaHoras) || 6);
+          pcById('respConservar').value = c.conservar || 20;
+          pcById('respExtra').value = c.carpetaExtra || '';
+        }
+        const ult = c.ultimo ? ('Última copia: ' + c.ultimo + (c.ultimoOk ? ' (bien)' : ' (con problemas)')) : 'Todavía no se ha hecho ninguna copia.';
+        pcById('respInfo').innerHTML = escaparHtml(ult) +
+          (c.ultimoMensaje ? '<br>' + escaparHtml(c.ultimoMensaje) : '') +
+          (c.pendienteExtra ? '<br><span style="color:#fca5a5;">Falta copiar a la carpeta extra: se reintenta sola cada 10 minutos.</span>' : '') +
+          '<br><span style="color:#94a3b8;">Carpeta local: ' + escaparHtml(d.carpetaLocal || '') + '</span>';
+        pcById('respLista').innerHTML = (d.lista || []).length
+          ? 'Últimas copias:<br>' + d.lista.map(x => escaparHtml(x.fecha) + ' &nbsp; ' + escaparHtml(x.nombre) + ' (' + x.kb + ' KB)').join('<br>')
+          : '';
+      } catch (e) {}
+    }
+    async function guardarRespaldo() {
+      const msg = pcById('respMsg');
+      msg.style.color = '#cbd5e1';
+      msg.textContent = 'Guardando...';
+      try {
+        const res = await fetch('/api/respaldo/config', { method: 'POST', body: JSON.stringify({
+          activo: pcById('respActivo').checked,
+          cadaHoras: parseFloat(pcById('respHoras').value) || 6,
+          conservar: parseInt(pcById('respConservar').value, 10) || 20,
+          carpetaExtra: pcById('respExtra').value.trim()
+        }) });
+        const d = await res.json().catch(() => null);
+        if (!res.ok || !d || !d.ok) { msg.style.color = '#fca5a5'; msg.textContent = (d && d.error) || 'No se pudo guardar.'; return; }
+        msg.style.color = '#86efac';
+        msg.textContent = 'Ajustes guardados.';
+        cargarRespaldo(true);
+      } catch (e) { msg.style.color = '#fca5a5'; msg.textContent = 'No se pudo guardar (revisa la conexión).'; }
+    }
+    async function respaldarAhora() {
+      const msg = pcById('respMsg');
+      const b = pcById('btnRespAhora');
+      b.disabled = true;
+      const txt = b.textContent;
+      b.textContent = 'Respaldando...';
+      msg.style.color = '#cbd5e1';
+      msg.textContent = '';
+      try {
+        const res = await fetch('/api/respaldo/ahora', { method: 'POST' });
+        const d = await res.json().catch(() => null);
+        if (!res.ok || !d) { msg.style.color = '#fca5a5'; msg.textContent = 'No se pudo hacer la copia.'; }
+        else { msg.style.color = d.ok && d.extraOk ? '#86efac' : '#fbbf24'; msg.textContent = d.mensaje || (d.ok ? 'Copia lista.' : 'No se pudo hacer la copia.'); }
+      } catch (e) { msg.style.color = '#fca5a5'; msg.textContent = 'No se pudo hacer la copia (revisa la conexión).'; }
+      b.disabled = false;
+      b.textContent = txt;
+      cargarRespaldo(true);
+    }
+
     async function abrirRed() {
       pcById('menuPCOverlay').style.display = 'none';
       pcById('redOverlay').style.display = 'flex';
@@ -7888,9 +9107,7 @@ $htmlPC = @'
       const baseNP = (ocultarSinStock && hayControlNP)
         ? catalogoNP.filter(p => !(p.stock === null || p.stock === undefined || p.stock <= 0))
         : catalogoNP;
-      const encontrados = baseNP.filter(p =>
-        normalizar(p.nombre).includes(q) || normalizar(p.sku || '').includes(q)
-      ).slice(0, 25);
+      const encontrados = buscarProductos(baseNP, document.getElementById('npBuscador').value).slice(0, 25);
       cont.innerHTML = encontrados.map(p => {
         const fotoTag = tieneFoto(p.sku) ? ('<img class="np-miniatura" src="/foto/' + encodeURIComponent(p.sku) + '.jpg" onerror=\'fotoFallo(this,' + JSON.stringify(String(p.sku)) + ')\' onclick=\'verFotoProductoNP(' + JSON.stringify(p.sku) + ',' + JSON.stringify(p.nombre) + ')\'>') : '';
         return '<div class="np-resultado">' +
@@ -8180,6 +9397,8 @@ $htmlVendedor = @'
   #posFiltros select { flex:1; margin-bottom:0; }
   body.modoPOS #posFiltros { display:flex; }
   body.autoservicio #notaPedido, body.modoCliente #notaPedido, body.sin-mensajes #notaPedido { display:none !important; }
+  body.autoservicio #clienteNombrePedido, body.modoCliente #clienteNombrePedido { display:none !important; }
+  body.sin-series .btn-serie { display:none !important; }
   body.sin-verStock #btnDescargarStock { display:none !important; }
   #estadoCatalogo { font-size:13px; color:#16a34a; margin-bottom:8px; font-weight:600; }
   #estadoCatalogo.error { color:#991b1b; }
@@ -8357,6 +9576,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
       <div id="cambioTexto"></div>
     </div>
     <input type="text" id="notaPedido" maxlength="200" placeholder="Nota para la caja (opcional)" oninput="actualizarBotonEnviar()">
+    <input type="text" id="clienteNombrePedido" maxlength="60" placeholder="Nombre del cliente (opcional, sale en el recibo)">
     <div id="borradoresBox" style="display:none; gap:8px; margin:0 0 8px;">
       <button class="btn" style="flex:1; width:auto; background:#475569;" onclick="guardarBorrador()">&#128190; Guardar borrador</button>
       <button class="btn" id="btnVerBorradores" style="flex:1; width:auto; background:#0369a1;" onclick="verBorradores()">&#128194; Borradores (0)</button>
@@ -8379,6 +9599,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
   <div id="mensaje"></div>
   <div id="accionesPostEnvio" style="display:none; margin:0 12px 12px;">
     <button class="btn btn-secundario" onclick="imprimirUltimoPedido()">Imprimir recibo</button>
+    <button class="btn btn-secundario" style="margin-top:6px;" onclick="enviarReciboPdf(ultimoPedidoId)">Enviar recibo (PDF)</button>
   </div>
   <div id="barraTotal">
     <span>Total del pedido</span>
@@ -9555,6 +10776,198 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
       return String(t == null ? '' : t).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
     }
 
+    // ---- Busqueda inteligente: varias palabras en cualquier orden, sinonimos y alias por producto ----
+    // "cinta aislante" tambien encuentra "cinta de aislar" o "teipe" (se editan en Ajustes de la PC).
+    let sinonimosGrupos = [];          // [[terminos normalizados que significan lo mismo], ...]
+    let sinonimosProd = {};            // sku -> alias normalizados (texto)
+    const busCacheTxt = new Map();     // sku -> texto normalizado del producto
+    const PALABRAS_VACIAS = new Set(['de', 'del', 'la', 'el', 'los', 'las', 'para', 'con', 'y', 'en', 'un', 'una', 'por', 'a']);
+    function aplicarSinonimos(d) {
+      d = d || {};
+      sinonimosGrupos = (d.grupos || []).map(g => [].concat(g || []).map(s => normalizar(s).trim()).filter(Boolean)).filter(g => g.length > 1);
+      sinonimosProd = {};
+      const pr = d.productos || {};
+      Object.keys(pr).forEach(k => { sinonimosProd[String(k).trim()] = [].concat(pr[k] || []).map(s => normalizar(s)).join(' '); });
+      busCacheTxt.clear();
+    }
+    function tokensBusqueda(q) {
+      return q.split(/\s+/).filter(t => t && !PALABRAS_VACIAS.has(t)).map(t => {
+        if (!/^[a-z]+$/.test(t)) return t;                      // numeros, medidas (3/4), codigos: tal cual
+        if (t.length > 4 && t.endsWith('es')) return t.slice(0, -2);   // "llaves" -> "llav" (encuentra "llave")
+        if (t.length > 3 && t.endsWith('s')) return t.slice(0, -1);    // "clavos" -> "clavo"
+        return t;
+      });
+    }
+    function textoBusquedaProducto(p) {
+      const k = String(p.sku || '');
+      let c = busCacheTxt.get(k);
+      if (!c || c.n !== p.nombre) {
+        c = { n: p.nombre, nom: normalizar(p.nombre), sku: normalizar(p.sku || ''), alias: sinonimosProd[k.trim()] || '' };
+        c.todo = c.nom + ' ' + c.sku + ' ' + c.alias;
+        busCacheTxt.set(k, c);
+      }
+      return c;
+    }
+    // Lo que escribio, mas la misma busqueda cambiando cada termino por sus sinonimos.
+    function consultasEquivalentes(q) {
+      const lista = [q];
+      for (const g of sinonimosGrupos) {
+        for (const t of g) {
+          const i = q.indexOf(t);
+          if (i < 0) continue;
+          const antes = (i === 0 || q.charAt(i - 1) === ' ');
+          const despues = (i + t.length === q.length || q.charAt(i + t.length) === ' ');
+          if (!antes || !despues) continue;
+          for (const u of g) { if (u !== t) lista.push((q.slice(0, i) + u + q.slice(i + t.length)).trim()); }
+        }
+      }
+      return Array.from(new Set(lista)).slice(0, 12);
+    }
+    // Devuelve los productos que coinciden, los mas claros primero.
+    function buscarProductos(lista, textoBuscado) {
+      const q = normalizar(textoBuscado).trim();
+      if (!q) return lista;
+      const sets = consultasEquivalentes(q).map(tokensBusqueda).filter(s => s.length > 0);
+      const res = [];
+      for (const p of lista) {
+        const c = textoBusquedaProducto(p);
+        let score = 99;
+        if (c.nom.includes(q) || c.sku.includes(q)) score = 0;
+        else {
+          for (let i = 0; i < sets.length; i++) {
+            if (sets[i].every(tk => c.todo.includes(tk))) { score = (i === 0 ? 1 : 2); break; }
+          }
+        }
+        if (score < 99) res.push({ p: p, score: score });
+      }
+      res.sort((a, b) => a.score - b.score);
+      return res.map(r => r.p);
+    }
+    async function cargarSinonimos() {
+      try {
+        const res = await fetch('/api/sinonimos');
+        const d = await res.json();
+        if (d && d.ok) {
+          aplicarSinonimos(d);
+          try { localStorage.setItem('sinonimosCache', JSON.stringify(d)); } catch (e) {}
+        }
+      } catch (e) {}
+    }
+    try { aplicarSinonimos(JSON.parse(localStorage.getItem('sinonimosCache') || 'null')); } catch (e) {}
+    cargarSinonimos();
+    setInterval(cargarSinonimos, 300000);
+
+    // ---- Recibo digital en PDF: se arma en el telefono con el mismo texto del ticket y se comparte
+    // (WhatsApp, correo, Drive...) con el menu de compartir de Android. ----
+    function pdfDesdeJpeg(jpg, w, h) {
+      const pw = Math.round(w * 0.5), ph = Math.round(h * 0.5);
+      const enc = new TextEncoder();
+      const partes = []; const offs = []; let pos = 0;
+      function add(x) { const b = (typeof x === 'string') ? enc.encode(x) : x; partes.push(b); pos += b.length; }
+      add('%PDF-1.4\n');
+      offs[1] = pos; add('1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n');
+      offs[2] = pos; add('2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n');
+      offs[3] = pos; add('3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ' + pw + ' ' + ph + '] /Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>\nendobj\n');
+      offs[4] = pos; add('4 0 obj\n<< /Type /XObject /Subtype /Image /Width ' + w + ' /Height ' + h + ' /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ' + jpg.length + ' >>\nstream\n');
+      add(jpg); add('\nendstream\nendobj\n');
+      const cont = 'q ' + pw + ' 0 0 ' + ph + ' 0 0 cm /Im0 Do Q';
+      offs[5] = pos; add('5 0 obj\n<< /Length ' + cont.length + ' >>\nstream\n' + cont + '\nendstream\nendobj\n');
+      const xref = pos;
+      let x = 'xref\n0 6\n0000000000 65535 f \n';
+      for (let i = 1; i <= 5; i++) x += String(offs[i]).padStart(10, '0') + ' 00000 n \n';
+      add(x + 'trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n' + xref + '\n%%EOF');
+      return new Blob(partes, { type: 'application/pdf' });
+    }
+    async function reciboComoPdf(id) {
+      const res = await fetch('/api/pedidos/' + id + '/recibo-texto');
+      const d = await res.json().catch(() => null);
+      if (!res.ok || !d || !d.ok) throw new Error((d && d.error) || 'No se pudo obtener el recibo.');
+      const lineas = String(d.texto || '').replace(/\r/g, '').split('\n').filter(l => !/^\s*\[ (LOGO|QR[^\]]*)\]\s*$/.test(l));
+      while (lineas.length && !lineas[lineas.length - 1].trim()) lineas.pop();
+      while (lineas.length && !lineas[0].trim()) lineas.shift();
+      const cols = Math.max(Math.max(24, d.ancho || 32), ...lineas.map(l => l.length));
+      const fuente = 28, alto = Math.round(fuente * 1.4), margen = 36;
+      const fam = fuente + 'px "Courier New", Courier, monospace';
+      const medidor = document.createElement('canvas').getContext('2d');
+      medidor.font = fam;
+      const cw = medidor.measureText('M').width;
+      const W = Math.ceil(cw * cols + margen * 2), H = lineas.length * alto + margen * 2;
+      const cv = document.createElement('canvas');
+      cv.width = W; cv.height = H;
+      const ctx = cv.getContext('2d');
+      ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, W, H);
+      ctx.fillStyle = '#000000'; ctx.font = fam; ctx.textBaseline = 'top';
+      lineas.forEach((l, i) => ctx.fillText(l, margen, margen + i * alto));
+      const b64 = cv.toDataURL('image/jpeg', 0.92).split(',')[1];
+      const bin = atob(b64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return pdfDesdeJpeg(bytes, W, H);
+    }
+    async function enviarReciboPdf(id) {
+      if (!id) return;
+      try {
+        mostrarMensaje('Preparando el recibo...', true);
+        const blob = await reciboComoPdf(id);
+        await guardarArchivoEnMovil(blob, 'recibo-' + id + '.pdf');
+      } catch (e) {
+        if (e && (e.name === 'AbortError' || /cancel/i.test(String(e.message || '')))) return;
+        alert('No se pudo preparar el recibo: ' + ((e && e.message) || 'revisa la conexion con la PC'));
+      }
+    }
+
+    // ---- Alerta de venta por debajo del costo y limite de descuento ----
+    const skusBajoCosto = new Set();
+    function alertaBajoCosto(nombre, bloqueado) {
+      try { if (navigator.vibrate) navigator.vibrate([200, 100, 200]); } catch (e) {}
+      let b = document.getElementById('alertaBajoCosto');
+      if (!b) {
+        b = document.createElement('div');
+        b.id = 'alertaBajoCosto';
+        b.style.cssText = 'display:none; position:fixed; left:10px; right:10px; top:60px; z-index:99998; background:#b91c1c; color:#fff; border-radius:12px; padding:14px; font-size:15px; font-weight:700; text-align:center; box-shadow:0 6px 24px rgba(0,0,0,.5);';
+        b.onclick = function () { b.style.display = 'none'; };
+        document.body.appendChild(b);
+      }
+      b.textContent = '\u26A0 ' + nombre + ' quedaria POR DEBAJO DEL COSTO de reposicion.' + (bloqueado ? ' Tu usuario no puede vender asi.' : ' Revisa el precio.');
+      b.style.display = 'block';
+      setTimeout(function () { b.style.display = 'none'; }, 6000);
+    }
+    async function verificarBajoCosto(item) {
+      try {
+        const nom = (nombreInput.value || '').trim();
+        const res = await fetch('/api/costo/verificar?sku=' + encodeURIComponent(item.sku) + '&precio=' + item.precio + '&vendedor=' + encodeURIComponent(nom));
+        const d = await res.json();
+        if (d && d.bajoCosto) { skusBajoCosto.add(item.sku); alertaBajoCosto(item.nombre, !d.permitido); }
+        else skusBajoCosto.delete(item.sku);
+        renderCarrito();
+      } catch (e) {}
+    }
+
+    // ---- Garantias: registrar numero de serie / lote de un pedido ----
+    async function registrarSerieMP(id) {
+      try {
+        const lista = await (await fetch('/api/pedidos')).json();
+        const p = lista.find(x => x.id === id);
+        if (!p) { alert('No encontre ese pedido.'); return; }
+        const items = p.items || [];
+        let it = items[0];
+        if (items.length > 1) {
+          const n = parseInt(prompt('Cual producto? Escribe el numero:\n' + items.map((x, i) => (i + 1) + ') ' + x.nombre).join('\n')), 10);
+          if (!(n >= 1 && n <= items.length)) return;
+          it = items[n - 1];
+        }
+        if (!it) return;
+        const serie = (prompt('Numero de serie de ' + it.nombre + ' (vacio si solo hay lote):') || '').trim();
+        const lote = (prompt('Lote (opcional):') || '').trim();
+        if (!serie && !lote) return;
+        const meses = parseInt(prompt('Meses de garantia (0 si no tiene):', '12'), 10) || 0;
+        const res = await fetch('/api/series', { method: 'POST', body: JSON.stringify({ sku: it.sku, producto: it.nombre, serie: serie, lote: lote, pedido: p.id, cliente: p.clienteNombre || '', garantiaMeses: meses, vendedor: (nombreInput.value || '').trim() }) });
+        const d = await res.json().catch(() => null);
+        if (!res.ok || !d || !d.ok) { alert((d && d.error) || 'No se pudo registrar.'); return; }
+        mostrarMensaje('Serie / lote registrado.', true);
+      } catch (e) { alert('No se pudo registrar (revisa la conexion con la PC).'); }
+    }
+
     // ---- Fotos locales en este telefono (sin pasar por la PC) ----
     // Lector de .zip minimo en JS puro (sin librerias externas: el .zip que
     // genera la app del catalogo no usa zip64 ni contraseña, asi que con
@@ -9740,9 +11153,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
       const enModoCliente = document.body.classList.contains('modoCliente');
       if (!q && !enModoCliente) { cont.innerHTML = ''; renderRecientes(); return; }
       const base = ocultandoSinStock() ? catalogo.filter(p => !productoSinStock(p)) : catalogo;
-      const filtrados = q
-        ? base.filter(p => normalizar(p.nombre).includes(q) || normalizar(p.sku || '').includes(q))
-        : base;
+      const filtrados = q ? buscarProductos(base, document.getElementById('buscador').value) : base;
       const encontrados = enModoCliente ? filtrados : filtrados.slice(0, 25);
 
       const htmlRes = encontrados.map(p => {
@@ -10057,8 +11468,16 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
       if (!item || !descuentosDisponibles() || autoservicioActivo) return;
       let n = parseFloat(String(valor).replace(',', '.'));
       if (isNaN(n) || n < 0) { renderCarrito(); return; }   // campo invalido: vuelve al valor anterior
+      // Limite de descuento que le puso la caja a este vendedor (segun su rol).
+      const baseP = ((catalogo.find(p => p.sku === sku)) || {}).precio;
+      const maxD = (typeof window.__descMax === 'number') ? window.__descMax : 100;
+      if (baseP > 0 && maxD < 100) {
+        const minimoP = Math.ceil(baseP * (1 - maxD / 100) * 100) / 100;
+        if (n < minimoP - 0.001) { n = minimoP; mostrarMensaje('Tu limite de descuento es ' + maxD + '%: el precio minimo es $' + minimoP.toFixed(2) + '.', false); }
+      }
       item.precio = Math.round(n * 100) / 100;
       renderCarrito();
+      verificarBajoCosto(item);
     }
 
     // Si el metodo de pago elegido es Transferencia, el precio de cada
@@ -10083,7 +11502,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
             ? ('$' + precioMostrado.toFixed(2) + ' c/u' + notaTransf)
             : ('$<input type="number" class="qty-input" style="width:64px;" inputmode="decimal" min="0" step="any" value="' + i.precio.toFixed(2) + '" onfocus="this.select()" onchange="fijarPrecio(\'' + i.sku + '\', this.value)"> c/u' + (factor === 2 ? ' (x2 en transferencia)' : '') + ' — toca para aplicar descuento');
           return '<div class="carrito-item">' +
-            '<div>' + i.nombre + '<div class="sku">' + precioHtml + '</div></div>' +
+            '<div>' + (skusBajoCosto.has(i.sku) ? '<span style="color:#f87171;">&#9888; </span>' : '') + i.nombre + '<div class="sku">' + precioHtml + '</div></div>' +
             '<div class="qty-controls">' +
               '<button onclick="cambiarCantidad(\'' + i.sku + '\', -1)">-</button>' +
               '<input type="number" class="qty-input" inputmode="decimal" min="0" step="any" value="' + i.cantidad + '" onfocus="this.select()" onchange="fijarCantidad(\'' + i.sku + '\', this.value)">' +
@@ -10457,7 +11876,8 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
         pagoEfectivo: pagoEfectivo,
         pagoTransferencia: pagoTransferencia,
         origenAsignados: origenesAsignadosCarrito,
-        nota: autoservicioActivo ? '' : ((document.getElementById('notaPedido').value || '').trim())
+        nota: autoservicioActivo ? '' : ((document.getElementById('notaPedido').value || '').trim()),
+        clienteNombre: autoservicioActivo ? '' : ((document.getElementById('clienteNombrePedido').value || '').trim())
       };
 
       const porAutoservicioAVendedor = autoservicioActivo && autoservicioDestino === 'vendedor';
@@ -10481,7 +11901,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
         try { quitarBorradorAbierto(); } catch (e) {}
         carrito = [];
         origenesAsignadosCarrito = [];
-        try { document.getElementById('notaPedido').value = ''; } catch (e) {}
+        try { document.getElementById('notaPedido').value = ''; document.getElementById('clienteNombrePedido').value = ''; } catch (e) {}
         volverAEfectivo();
         renderCarrito();
         document.getElementById('buscador').value = '';
@@ -10507,7 +11927,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
           mostrarMensaje('Sin conexion: tu pedido quedo guardado en tu telefono y se enviara solo cuando vuelva la conexion. No hace falta hacerlo de nuevo.', true);
         } else {
           agregarACola(payload, urlEnvio, bodyEnvio);
-          try { document.getElementById('notaPedido').value = ''; } catch (e) {}
+          try { document.getElementById('notaPedido').value = ''; document.getElementById('clienteNombrePedido').value = ''; } catch (e) {}
           mostrarMensaje('Sin conexion: el pedido se guardo en el telefono y se enviara solo cuando vuelva la red.', true);
           volverAEfectivo();
         }
@@ -10632,6 +12052,106 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
     window.addEventListener('online', intentarEnviarCola);
     setInterval(intentarEnviarCola, 10000);
     actualizarColaUI();
+
+    // ---- Acciones chicas que no se pueden perder por un microcorte (visto, agregado...) ----
+    // Se guardan en el telefono y se reintentan hasta que la PC las reciba (todas son seguras de repetir).
+    const CLAVE_ACCIONES = 'colaAccionesOffline';
+    function leerAcciones() { try { return JSON.parse(localStorage.getItem(CLAVE_ACCIONES) || '[]'); } catch (e) { return []; } }
+    function guardarAcciones(l) { try { localStorage.setItem(CLAVE_ACCIONES, JSON.stringify(l)); } catch (e) {} }
+    function accionConReintento(url, body) {
+      const l = leerAcciones();
+      l.push({ url: url, body: body || null, t: Date.now() });
+      guardarAcciones(l);
+      intentarEnviarAcciones();
+    }
+    let enviandoAcciones = false;
+    async function intentarEnviarAcciones() {
+      if (enviandoAcciones) return;
+      const lista = leerAcciones();
+      if (lista.length === 0) return;
+      enviandoAcciones = true;
+      const quedan = [];
+      try {
+        for (const a of lista) {
+          if (Date.now() - a.t > 6 * 3600 * 1000) continue;   // muy vieja: ya no sirve
+          try {
+            const res = await fetchConTiempo(a.url, { method: 'POST', body: a.body ? JSON.stringify(a.body) : undefined }, 15000);
+            if (res.status >= 500) quedan.push(a);
+          } catch (e) { quedan.push(a); }
+        }
+      } finally {
+        const nuevas = leerAcciones().filter(x => !lista.some(y => y.t === x.t && y.url === x.url));
+        guardarAcciones(quedan.concat(nuevas));
+        enviandoAcciones = false;
+      }
+    }
+    window.addEventListener('online', intentarEnviarAcciones);
+    setInterval(intentarEnviarAcciones, 15000);
+
+    // ---- Microcortes de Wi-Fi: toda llamada a la PC tiene limite de espera (si la red se cuelga a medias
+    // no se queda esperando para siempre) y una barra avisa cuando no hay conexion con la PC. Al volver la
+    // conexion se reenvian solos los pedidos y acciones guardados. ----
+    (function () {
+      if (window.__fetchRobusto || typeof window.fetch !== 'function') return;
+      window.__fetchRobusto = true;
+      const fetchOriginal = window.fetch.bind(window);
+      let fallos = 0;
+      let barra = null;
+      function asegurarBarra() {
+        if (barra || !document.body) return barra;
+        barra = document.createElement('div');
+        barra.id = 'barraSinRed';
+        barra.style.cssText = 'display:none; position:fixed; left:0; right:0; top:0; z-index:99999; text-align:center; font-size:13px; font-weight:600; padding:6px 10px; padding-top:calc(6px + env(safe-area-inset-top, 0px)); color:#fff;';
+        document.body.appendChild(barra);
+        return barra;
+      }
+      function pendientesTxt() {
+        let n = 0;
+        try { n = JSON.parse(localStorage.getItem('colaPedidosOffline') || '[]').length; } catch (e) {}
+        return n > 0 ? (' Pedidos guardados esperando: ' + n + '.') : '';
+      }
+      function mostrar(sinRed) {
+        const b = asegurarBarra();
+        if (!b) return;
+        if (sinRed) {
+          b.style.background = '#b45309';
+          b.textContent = 'Sin conexion con la PC: reintentando solo. Lo que hagas se guarda en el telefono.' + pendientesTxt();
+          b.style.display = 'block';
+        } else {
+          b.style.background = '#15803d';
+          b.textContent = 'Conexion recuperada.';
+          b.style.display = 'block';
+          setTimeout(function () { if (fallos === 0) b.style.display = 'none'; }, 2500);
+        }
+      }
+      function anotar(ok) {
+        if (ok) {
+          const veniaCaido = fallos >= 2;
+          fallos = 0;
+          if (veniaCaido) { mostrar(false); try { intentarEnviarCola(); intentarEnviarAcciones(); } catch (e) {} }
+        } else {
+          fallos++;
+          if (fallos >= 2) mostrar(true);
+        }
+      }
+      window.fetch = function (input, init) {
+        const url = (typeof input === 'string') ? input : ((input && input.url) || '');
+        const mismoOrigen = url.charAt(0) === '/' || url.indexOf(location.origin) === 0;
+        if (!mismoOrigen) return fetchOriginal(input, init);
+        init = init || {};
+        let timer = null;
+        if (!init.signal && typeof AbortController !== 'undefined') {
+          const ctl = new AbortController();
+          const largo = /catalogo|fotos|zip|respaldo|exportar|importar|almacen|metricas/.test(url);
+          timer = setTimeout(function () { try { ctl.abort(); } catch (e) {} }, largo ? 120000 : 25000);
+          init = Object.assign({}, init, { signal: ctl.signal });
+        }
+        return fetchOriginal(input, init).then(
+          function (r) { anotar(true); return r; },
+          function (e) { anotar(false); throw e; }
+        ).finally(function () { if (timer) clearTimeout(timer); });
+      };
+    })();
 
     // ---- Mis pedidos de hoy ----
     function hoyStr() {
@@ -10764,7 +12284,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
       const horaCorta = (p.hora || '').slice(11);
       let totalTxt = '$' + total.toFixed(2);
       if (p.estado === 'cobrado' && p.metodoPago) totalTxt += ' — ' + p.metodoPago;
-      let acciones = '<button class="mp-btn-imprimir" onclick="imprimirMP(' + p.id + ')">Reimprimir</button>';
+      let acciones = '<button class="mp-btn-imprimir" onclick="imprimirMP(' + p.id + ')">Reimprimir</button><button class="mp-btn-imprimir" onclick="enviarReciboPdf(' + p.id + ')">Recibo PDF</button><button class="mp-btn-imprimir btn-serie" onclick="registrarSerieMP(' + p.id + ')">N&deg; serie</button>';
       if (p.estado === 'pendiente') {
         const elegido = metodoMP[p.id] || p.metodoPago || 'Efectivo';
         const opt = (v, t) => '<option value="' + v + '"' + (elegido === v ? ' selected' : '') + '>' + t + '</option>';
@@ -10796,6 +12316,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
         '<div class="mp-top"><span>Folio #' + p.id + ' — ' + horaCorta + '</span><span class="mp-estado ' + p.estado + '">' + p.estado.toUpperCase() + '</span></div>' +
         '<div class="mp-total" id="mp-total-' + p.id + '">' + totalTxt + '</div>' +
         (p.estado === 'pendiente' ? ('<div data-qrpago="1" id="mp-qr-' + p.id + '" style="text-align:center; display:' + ((((metodoMP[p.id] || p.metodoPago) === 'Transferencia') && qrPago.length) ? 'block' : 'none') + ';">' + htmlQrPago() + '</div>') : '') +
+        (p.clienteNombre ? '<div style="font-size:12px; color:#0369a1; margin-bottom:4px;">Cliente: ' + escaparHtml(p.clienteNombre) + '</div>' : '') +
         (p.nota ? '<div style="font-size:12px; color:#0369a1; margin-bottom:6px;">Tu nota: ' + escaparHtml(p.nota) + '</div>' : '') +
         itemsHtml +
         '<div class="mp-acciones">' + acciones + '</div>' +
@@ -10905,7 +12426,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
     // ---- Permisos que la PC le da a este vendedor (que puede hacer y a donde entrar) ----
     window.__permisos = {};
     let permisosFirma = '';
-    const CLAVES_PERMISOS = ['crearPedidos', 'cobrar', 'cancelar', 'editar', 'imprimir', 'descuentos', 'verStock', 'misPedidos', 'ajustes', 'modoCliente', 'asignados', 'notificaciones', 'mensajes'];
+    const CLAVES_PERMISOS = ['crearPedidos', 'cobrar', 'cancelar', 'editar', 'imprimir', 'descuentos', 'verStock', 'misPedidos', 'ajustes', 'modoCliente', 'asignados', 'notificaciones', 'mensajes', 'venderBajoCosto', 'fiado', 'series'];
     function puede(k) { return !window.__permisos || window.__permisos[k] !== false; }
     function aplicarPermisos(p) {
       window.__permisos = p || {};
@@ -10927,7 +12448,8 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
         const res = await fetch('/api/permisos?vendedor=' + encodeURIComponent(nombre));
         const d = await res.json();
         if (!d || !d.permisos) return;
-        const firma = nombre + '|' + JSON.stringify(d.permisos);
+        window.__descMax = (typeof d.descuentoMaxPct === 'number') ? d.descuentoMaxPct : 100;
+        const firma = nombre + '|' + JSON.stringify(d.permisos) + '|' + window.__descMax;
         if (firma !== permisosFirma) { permisosFirma = firma; aplicarPermisos(d.permisos); }
       } catch (e) {}
     }
@@ -11078,7 +12600,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
       const a = asignadosPendientes.find(x => x.id === id);
       if (a) a.visto = true;
       renderAsignados();
-      try { await fetch('/api/pedidos/asignados/' + id + '/visto', { method: 'POST' }); } catch (e) {}
+      accionConReintento('/api/pedidos/asignados/' + id + '/visto', null);
     }
 
     async function tomarAsignado(id) {
@@ -11116,7 +12638,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
       }
       if (!a.visto) marcarVistoAsignado(id);
       // Se avisa a la caja: desde ahora ya no puede editarlo (los cambios no llegarian a tu carrito).
-      try { fetch('/api/pedidos/asignados/' + id + '/agregado', { method: 'POST', body: JSON.stringify({ vendedor: (nombreInput.value || '').trim() }) }).catch(() => {}); } catch (e) {}
+      accionConReintento('/api/pedidos/asignados/' + id + '/agregado', { vendedor: (nombreInput.value || '').trim() });
       asignadosPendientes.splice(idx, 1);
       renderCarrito();
       renderAsignados();
@@ -11571,7 +13093,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
       const fecha = esHoy ? String(p.hora || '').slice(11, 16) : String(p.hora || '').slice(5, 16);
       const horaTxt = esHoy ? fecha : fecha.replace('-', '/');
       let acciones = '';
-      if (esHoy) acciones += '<button class="mp-btn-imprimir" onclick="imprimirMP(' + p.id + ')">Reimprimir</button>';
+      if (esHoy) acciones += '<button class="mp-btn-imprimir" onclick="imprimirMP(' + p.id + ')">Reimprimir</button><button class="mp-btn-imprimir" onclick="enviarReciboPdf(' + p.id + ')">Recibo PDF</button><button class="mp-btn-imprimir btn-serie" onclick="registrarSerieMP(' + p.id + ')">N&deg; serie</button>';
       if (quedaPorDevolver) acciones += '<button class="mp-btn-editar" onclick="devolverPOS(\'' + key + '\')">Devolver</button>';
       const itemsHtml =
         '<button class="mp-btn-items" id="mp-btnitems-' + key + '" onclick="toggleItemsMP(\'' + key + '\')">' +
@@ -15310,6 +16832,418 @@ while ($listener.IsListening) {
                 Enviar-Respuesta -Context $context -Body (@{ ok = $true } | ConvertTo-Json) -ContentType "application/json; charset=utf-8"
             }
 
+        } elseif ($method -eq "GET" -and $path -eq "/api/auditoria") {
+            if (-not (Es-PeticionPC $request)) {
+                Enviar-Json $context @{ ok = $false; error = "Solo desde la PC." } 403
+            } else {
+                $maxAu = 200; try { $mx = [int]$request.QueryString["max"]; if ($mx -ge 1 -and $mx -le 1000) { $maxAu = $mx } } catch {}
+                $regsAu = Leer-Auditoria $maxAu ([string]$request.QueryString["accion"]) ([string]$request.QueryString["alertas"] -eq "1") ([string]$request.QueryString["q"])
+                Enviar-Json $context @{ ok = $true; registros = $regsAu } 200 4
+            }
+
+        } elseif ($method -eq "GET" -and $path -eq "/api/costo/verificar") {
+            # El movil pregunta si un precio queda por debajo del costo (sin revelar el costo).
+            $skuV = [string]$request.QueryString["sku"]
+            $prV = 0.0
+            [void][double]::TryParse([string]$request.QueryString["precio"], [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$prV)
+            $vendV = [string]$request.QueryString["vendedor"]
+            $costoV = Obtener-Costo $skuV
+            $bajoV = (($null -ne $costoV) -and ($prV -lt ($costoV - 0.005)))
+            Enviar-Json $context @{ ok = $true; bajoCosto = [bool]$bajoV; permitido = [bool](Tiene-Permiso $vendV 'venderBajoCosto') }
+
+        } elseif ($method -eq "GET" -and $path -eq "/api/costos") {
+            if (-not (Es-PeticionPC $request)) {
+                Enviar-Json $context @{ ok = $false; error = "Solo desde la PC." } 403
+            } else {
+                Enviar-Json $context @{ ok = $true; manual = $global:costos.manual; columnaAxis = [string]$global:costos.columnaAxis; ultimaAxis = [string]$global:costos.ultimaAxis; nAxis = [int]$global:costos.axis.Count } 200 4
+            }
+
+        } elseif ($method -eq "POST" -and $path -eq "/api/costos") {
+            $dataCo = Leer-CuerpoJson $request
+            if (-not (Es-PeticionPC $request)) {
+                Enviar-Json $context @{ ok = $false; error = "Solo desde la PC." } 403
+            } elseif (-not $dataCo) {
+                Enviar-Json $context @{ ok = $false; error = "Faltan datos." } 400
+            } else {
+                $colCo = ([string]$dataCo.columnaAxis).Trim()
+                if ($colCo -and ($colCo -notmatch '^[A-Za-z][A-Za-z0-9_]{0,30}$')) {
+                    Enviar-Json $context @{ ok = $false; error = "Nombre de columna no valido (solo letras, numeros y guion bajo)." } 400
+                } else {
+                    $manNuevo = @{}
+                    if ($dataCo.manual) {
+                        foreach ($pp in $dataCo.manual.PSObject.Properties) {
+                            $vv = Fiado-ADouble $pp.Value
+                            if ($vv -gt 0 -and ([string]$pp.Name).Trim()) { $manNuevo[([string]$pp.Name).Trim()] = $vv }
+                        }
+                    }
+                    $global:costos.manual = $manNuevo
+                    $global:costos.columnaAxis = $colCo
+                    Guardar-Costos
+                    Registrar-Auditoria "PC" "costos" ("Costos editados: " + $manNuevo.Count + " manuales, columna AxisPOS: " + $(if ($colCo) { $colCo } else { "ninguna" })) $null $null $false "PC"
+                    Enviar-Json $context @{ ok = $true } 200
+                }
+            }
+
+        } elseif ($method -eq "POST" -and $path -eq "/api/costos/axis") {
+            if (-not (Es-PeticionPC $request)) {
+                Enviar-Json $context @{ ok = $false; error = "Solo desde la PC." } 403
+            } else {
+                try {
+                    $nCo = Actualizar-CostosAxis
+                    Enviar-Json $context @{ ok = $true; n = [int]$nCo } 200
+                } catch {
+                    Enviar-Json $context @{ ok = $false; error = "$($_.Exception.Message)" } 400
+                }
+            }
+
+        } elseif ($method -eq "GET" -and $path -eq "/api/roles") {
+            if (-not (Es-PeticionPC $request)) {
+                Enviar-Json $context @{ ok = $false; error = "Solo desde la PC." } 403
+            } else {
+                $rolesLista = @($global:rolesDef.Keys | ForEach-Object { [pscustomobject]@{ k = [string]$_; t = [string]$global:rolesDef[$_].t; desc = [double]$global:rolesDef[$_].desc } })
+                $vendRoles = @()
+                foreach ($k in @($global:pinesVendedores.Keys | Sort-Object)) {
+                    $nomR = [string]$global:pinesVendedores[$k].nombre
+                    $rolR = "personalizado"; $dmR = 100.0
+                    if ($global:rolesVendedores.ContainsKey($k)) { $rolR = [string]$global:rolesVendedores[$k].rol; $dmR = [double]$global:rolesVendedores[$k].descuentoMaxPct }
+                    $vendRoles += [pscustomobject]@{ nombre = $nomR; rol = $rolR; descuentoMaxPct = $dmR }
+                }
+                Enviar-Json $context @{ ok = $true; roles = $rolesLista; vendedores = @($vendRoles) } 200 5
+            }
+
+        } elseif ($method -eq "POST" -and $path -eq "/api/roles") {
+            $dataRol = Leer-CuerpoJson $request
+            $vendRol = if ($dataRol -and $dataRol.vendedor) { ([string]$dataRol.vendedor).Trim() } else { "" }
+            if (-not (Es-PeticionPC $request)) {
+                Enviar-Json $context @{ ok = $false; error = "Los roles solo se cambian desde la PC." } 403
+            } elseif ((-not $vendRol) -or (-not $global:pinesVendedores.ContainsKey($vendRol.ToLowerInvariant()))) {
+                Enviar-Json $context @{ ok = $false; error = "Ese vendedor no existe." } 404
+            } else {
+                $descRol = $null
+                if ($dataRol.PSObject.Properties.Name -contains 'descuentoMaxPct' -and "$($dataRol.descuentoMaxPct)" -ne "") {
+                    $dv = Fiado-ADouble $dataRol.descuentoMaxPct
+                    if ($dv -ge 0 -and $dv -le 100) { $descRol = $dv }
+                }
+                Aplicar-Rol $vendRol ([string]$dataRol.rol) $descRol
+                Registrar-Auditoria "PC" "roles" ("Rol de " + $vendRol + ": " + [string]$dataRol.rol + ", descuento maximo " + (Descuento-Maximo $vendRol) + "%") $null $null $false "PC"
+                Agregar-AlertaVendedor $vendRol "La caja cambio tu rol o tus limites." $null "permisos"
+                Enviar-Json $context @{ ok = $true } 200
+            }
+
+        } elseif ($method -eq "GET" -and $path -eq "/api/proveedores" -and (Es-PeticionPC $request)) {
+            Enviar-Json $context @{ ok = $true; lista = @($global:proveedores.lista); porSku = $global:proveedores.porSku } 200 4
+
+        } elseif ($method -eq "POST" -and $path -eq "/api/proveedores") {
+            $dataPv = Leer-CuerpoJson $request
+            if (-not (Es-PeticionPC $request)) {
+                Enviar-Json $context @{ ok = $false; error = "Solo desde la PC." } 403
+            } elseif (-not $dataPv) {
+                Enviar-Json $context @{ ok = $false; error = "Faltan datos." } 400
+            } else {
+                if ($dataPv.PSObject.Properties.Name -contains 'lista') {
+                    $nl = New-Object System.Collections.ArrayList
+                    foreach ($p in @($dataPv.lista)) {
+                        $nm = ([string]$p.nombre).Trim()
+                        if ($nm) { [void]$nl.Add([pscustomobject]@{ nombre = $nm; telefono = ([string]$p.telefono).Trim(); nota = ([string]$p.nota).Trim() }) }
+                    }
+                    $global:proveedores.lista = $nl
+                }
+                if ($dataPv.asignar -and $dataPv.asignar.sku) {
+                    $skA = ([string]$dataPv.asignar.sku).Trim()
+                    $prA = ([string]$dataPv.asignar.proveedor).Trim()
+                    if ($prA) { $global:proveedores.porSku[$skA] = $prA } else { $global:proveedores.porSku.Remove($skA) }
+                }
+                Guardar-Proveedores
+                Enviar-Json $context @{ ok = $true } 200
+            }
+
+        } elseif ($method -eq "GET" -and $path -eq "/api/compras/sugerencias" -and (Es-PeticionPC $request)) {
+            # Que comprar: productos que se acaban (por minimo o por ritmo de ventas), con cantidad sugerida.
+            $diasC = 30; try { $dd = [int]$request.QueryString["dias"]; if ($dd -ge 7 -and $dd -le 365) { $diasC = $dd } } catch {}
+            $cobC = 15; try { $cc = [int]$request.QueryString["cobertura"]; if ($cc -ge 1 -and $cc -le 120) { $cobC = $cc } } catch {}
+            $vC = Obtener-VentasProductos $diasC
+            $filasC = New-Object System.Collections.ArrayList
+            foreach ($p in $global:catalogo) {
+                if ($null -eq $p.stock) { continue }
+                $skC = [string]$p.sku
+                $stockC = [double]$p.stock
+                $vend = 0.0
+                if ($skC -and $vC.mapa.ContainsKey($skC)) { $vend = [double]$vC.mapa[$skC].qty }
+                $vel = $vend / $diasC
+                $minC = Minimo-Efectivo $p
+                $porMin = (($minC -gt 0) -and ($stockC -le $minC))
+                $porRitmo = (($vel -gt 0) -and ($stockC -lt ($vel * $cobC)))
+                if ((-not $porMin) -and (-not $porRitmo)) { continue }
+                $objetivo = [math]::Max([math]::Ceiling($vel * $cobC), [double]$(if ($minC -gt 0) { $minC * 2 } else { 0 }))
+                $sug = [math]::Ceiling($objetivo - $stockC)
+                if ($sug -lt 1) { $sug = 1 }
+                $diasRest = $null
+                if ($vel -gt 0) { $diasRest = [math]::Round($stockC / $vel, 1) }
+                $provC = ""
+                if ($skC -and $global:proveedores.porSku.ContainsKey($skC)) { $provC = [string]$global:proveedores.porSku[$skC] }
+                [void]$filasC.Add([pscustomobject]@{ sku = $skC; nombre = [string]$p.nombre; stock = $stockC; minimo = $minC; velDia = [math]::Round($vel, 2); diasRestantes = $diasRest; sugerido = $sug; costo = (Obtener-Costo $skC); proveedor = $provC })
+            }
+            $ordC = @($filasC | Sort-Object -Property @{ Expression = { if ($null -eq $_.diasRestantes) { 99999 } else { [double]$_.diasRestantes } } }, @{ Expression = { [double]$_.stock } } | Select-Object -First 400)
+            Enviar-Json $context @{ ok = $true; fuente = [string]$vC.fuente; dias = $diasC; cobertura = $cobC; items = $ordC; proveedores = @($global:proveedores.lista) } 200 5
+
+        } elseif ($method -eq "GET" -and $path -eq "/api/reportes/estatico") {
+            # Stock estatico: hay existencias pero no se vendio nada en N dias. Capital parado y sugerencia de oferta.
+            if (-not (Es-PeticionPC $request)) {
+                Enviar-Json $context @{ ok = $false; error = "Solo desde la PC." } 403
+            } else {
+                $diasE = 90; try { $de = [int]$request.QueryString["dias"]; if ($de -ge 15 -and $de -le 730) { $diasE = $de } } catch {}
+                $vE = Obtener-VentasProductos $diasE
+                $filasE = New-Object System.Collections.ArrayList
+                $capTotal = 0.0; $sinCosto = 0
+                foreach ($p in $global:catalogo) {
+                    if ($null -eq $p.stock) { continue }
+                    $stockE = [double]$p.stock
+                    if ($stockE -le 0) { continue }
+                    $skE = [string]$p.sku
+                    if ($skE -and $vE.mapa.ContainsKey($skE) -and ([double]$vE.mapa[$skE].qty -gt 0)) { continue }
+                    $costoE = Obtener-Costo $skE
+                    $precioE = [double]$p.precio
+                    $base = $precioE
+                    if ($null -ne $costoE) { $base = $costoE } else { $sinCosto++ }
+                    $capital = [math]::Round($stockE * $base, 2)
+                    $capTotal += $capital
+                    $desc = 15.0
+                    if (($null -ne $costoE) -and ($precioE -gt 0)) {
+                        $margen = (($precioE - $costoE) / $precioE) * 100
+                        $desc = [math]::Floor([math]::Min(30, [math]::Max(0, $margen * 0.5)))
+                    }
+                    $oferta = [math]::Round($precioE * (1 - $desc / 100), 2)
+                    [void]$filasE.Add([pscustomobject]@{ sku = $skE; nombre = [string]$p.nombre; stock = $stockE; precio = $precioE; costo = $costoE; capital = $capital; descSugerido = $desc; precioOferta = $oferta })
+                }
+                $ordE = @($filasE | Sort-Object -Property @{ Expression = { [double]$_.capital } } -Descending | Select-Object -First 300)
+                Enviar-Json $context @{ ok = $true; fuente = [string]$vE.fuente; dias = $diasE; total = $filasE.Count; capitalTotal = [math]::Round($capTotal, 2); sinCosto = $sinCosto; items = $ordE } 200 5
+            }
+
+        } elseif ($method -eq "GET" -and $path -eq "/api/fiado") {
+            if (-not (Es-PeticionPC $request)) {
+                Enviar-Json $context @{ ok = $false; error = "Solo desde la PC." } 403
+            } else {
+                $ahoraF = Get-Date
+                $listaF = @($global:fiado.clientes | ForEach-Object {
+                    $diasF = $null
+                    $refF = if ($_.ultimoMov) { [string]$_.ultimoMov } else { [string]$_.creado }
+                    try { if ($refF) { $diasF = [int][math]::Floor(($ahoraF - [datetime]$refF).TotalDays) } } catch {}
+                    $limF = [double]$_.limite
+                    [pscustomobject]@{ id = [int]$_.id; nombre = [string]$_.nombre; telefono = [string]$_.telefono; limite = $limF; saldo = [double]$_.saldo; disponible = $(if ($limF -gt 0) { [math]::Round($limF - [double]$_.saldo, 2) } else { $null }); ultimoMov = [string]$_.ultimoMov; dias = $diasF }
+                } | Sort-Object -Property @{ Expression = { [double]$_.saldo } } -Descending)
+                $totF = 0.0; foreach ($c in $listaF) { $totF += [double]$c.saldo }
+                Enviar-Json $context @{ ok = $true; clientes = $listaF; total = [math]::Round($totF, 2) } 200 4
+            }
+
+        } elseif ($method -eq "GET" -and $path -eq "/api/fiado/movimientos") {
+            if (-not (Es-PeticionPC $request)) {
+                Enviar-Json $context @{ ok = $false; error = "Solo desde la PC." } 403
+            } else {
+                $idMv = 0; [void][int]::TryParse([string]$request.QueryString["id"], [ref]$idMv)
+                $cMv = Fiado-Cliente $idMv
+                if (-not $cMv) { Enviar-Json $context @{ ok = $false; error = "Cliente no encontrado." } 404 }
+                else {
+                    $movs = @($cMv.movimientos)
+                    [array]::Reverse($movs)
+                    Enviar-Json $context @{ ok = $true; nombre = [string]$cMv.nombre; saldo = [double]$cMv.saldo; movimientos = @($movs | Select-Object -First 100) } 200 4
+                }
+            }
+
+        } elseif ($method -eq "POST" -and $path -match "^/api/fiado/(cliente|cargo|abono|eliminar)$") {
+            $accionF = [string]$Matches[1]
+            $dataF = Leer-CuerpoJson $request
+            if (-not (Es-PeticionPC $request)) {
+                Enviar-Json $context @{ ok = $false; error = "Solo desde la PC." } 403
+            } elseif (-not $dataF) {
+                Enviar-Json $context @{ ok = $false; error = "Faltan datos." } 400
+            } elseif ($accionF -eq "cliente") {
+                $nomF = ([string]$dataF.nombre).Trim()
+                if (-not $nomF) { Enviar-Json $context @{ ok = $false; error = "Falta el nombre del cliente." } 400 }
+                else {
+                    $limNuevo = Fiado-ADouble $dataF.limite
+                    if ($limNuevo -lt 0) { $limNuevo = 0 }
+                    $cF = $null
+                    if ($dataF.id) { $cF = Fiado-Cliente ([int]$dataF.id) }
+                    if ($cF) {
+                        $cF.nombre = $nomF; $cF.telefono = ([string]$dataF.telefono).Trim(); $cF.limite = $limNuevo
+                    } else {
+                        $cF = [pscustomobject]@{ id = [int]$global:fiado.siguienteId; nombre = $nomF; telefono = ([string]$dataF.telefono).Trim(); limite = $limNuevo; saldo = 0.0; creado = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss"); ultimoMov = ""; movimientos = (New-Object System.Collections.ArrayList) }
+                        $global:fiado.siguienteId = [int]$global:fiado.siguienteId + 1
+                        [void]$global:fiado.clientes.Add($cF)
+                    }
+                    Guardar-Fiado
+                    Enviar-Json $context @{ ok = $true; id = [int]$cF.id } 200
+                }
+            } else {
+                $cF = Fiado-Cliente ([int]$dataF.id)
+                $montoF = Fiado-ADouble $dataF.monto
+                if (-not $cF) {
+                    Enviar-Json $context @{ ok = $false; error = "Cliente no encontrado." } 404
+                } elseif ($accionF -eq "eliminar") {
+                    if ([math]::Abs([double]$cF.saldo) -gt 0.005) { Enviar-Json $context @{ ok = $false; error = "No se puede borrar: todavia debe $" + (Formato-Monto $cF.saldo) } 409 }
+                    else { [void]$global:fiado.clientes.Remove($cF); Guardar-Fiado; Enviar-Json $context @{ ok = $true } 200 }
+                } elseif ($montoF -le 0) {
+                    Enviar-Json $context @{ ok = $false; error = "El monto tiene que ser mayor que cero." } 400
+                } elseif ($accionF -eq "cargo") {
+                    $nuevoSaldo = [double]$cF.saldo + $montoF
+                    $excede = (([double]$cF.limite -gt 0) -and ($nuevoSaldo -gt ([double]$cF.limite + 0.005)))
+                    if ($excede -and (-not [bool]$dataF.forzar)) {
+                        Enviar-Json $context @{ ok = $false; excede = $true; error = ("Con este cargo " + $cF.nombre + " pasaria su limite de $" + (Formato-Monto $cF.limite) + " (quedaria debiendo $" + (Formato-Monto $nuevoSaldo) + ").") } 409
+                    } else {
+                        $cF.saldo = [math]::Round($nuevoSaldo, 2)
+                        $cF.ultimoMov = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+                        [void]$cF.movimientos.Add([pscustomobject]@{ fecha = $cF.ultimoMov; tipo = "cargo"; monto = $montoF; concepto = ([string]$dataF.concepto).Trim(); pedido = ([string]$dataF.pedido).Trim(); saldo = $cF.saldo })
+                        Guardar-Fiado
+                        Registrar-Auditoria "PC" "fiado_cargo" ("Fiado a " + $cF.nombre + ": +$" + (Formato-Monto $montoF) + $(if ($excede) { " (AUTORIZADO sobre el limite)" } else { "" }) + " | saldo $" + (Formato-Monto $cF.saldo)) $null $montoF $excede "PC"
+                        Enviar-Json $context @{ ok = $true; saldo = $cF.saldo } 200
+                    }
+                } else {
+                    if ($montoF -gt ([double]$cF.saldo + 0.005)) {
+                        Enviar-Json $context @{ ok = $false; error = ("El abono es mayor que lo que debe (saldo $" + (Formato-Monto $cF.saldo) + ").") } 400
+                    } else {
+                        $cF.saldo = [math]::Round([double]$cF.saldo - $montoF, 2)
+                        $cF.ultimoMov = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+                        [void]$cF.movimientos.Add([pscustomobject]@{ fecha = $cF.ultimoMov; tipo = "abono"; monto = $montoF; concepto = ([string]$dataF.concepto).Trim(); pedido = ""; saldo = $cF.saldo })
+                        Guardar-Fiado
+                        Registrar-Auditoria "PC" "fiado_abono" ("Abono de " + $cF.nombre + ": -$" + (Formato-Monto $montoF) + " | saldo $" + (Formato-Monto $cF.saldo)) $null $montoF $false "PC"
+                        Enviar-Json $context @{ ok = $true; saldo = $cF.saldo } 200
+                    }
+                }
+            }
+
+        } elseif ($method -eq "GET" -and $path -eq "/api/series") {
+            $qS = ([string]$request.QueryString["q"]).Trim().ToLowerInvariant()
+            $estS = [string]$request.QueryString["estado"]
+            $hoyS = (Get-Date).Date
+            $resS = New-Object System.Collections.ArrayList
+            $regsS = @($global:seriesReg.registros)
+            [array]::Reverse($regsS)
+            foreach ($r in $regsS) {
+                if ($estS -and ([string]$r.estado -ne $estS)) { continue }
+                if ($qS) {
+                    $blobS = (([string]$r.serie) + " " + ([string]$r.lote) + " " + ([string]$r.cliente) + " " + ([string]$r.producto) + " " + ([string]$r.sku) + " " + ([string]$r.pedido) + " " + ([string]$r.proveedor)).ToLowerInvariant()
+                    if (-not $blobS.Contains($qS)) { continue }
+                }
+                $venceEn = $null
+                try { if ($r.vence) { $venceEn = [int][math]::Floor(([datetime]$r.vence - $hoyS).TotalDays) } } catch {}
+                [void]$resS.Add([pscustomobject]@{ id = [int]$r.id; fecha = [string]$r.fecha; sku = [string]$r.sku; producto = [string]$r.producto; serie = [string]$r.serie; lote = [string]$r.lote; cliente = [string]$r.cliente; telefono = [string]$r.telefono; pedido = [string]$r.pedido; vendedor = [string]$r.vendedor; garantiaMeses = [int]$r.garantiaMeses; vence = [string]$r.vence; venceEn = $venceEn; proveedor = [string]$r.proveedor; estado = [string]$r.estado; notas = [string]$r.notas })
+                if ($resS.Count -ge 200) { break }
+            }
+            Enviar-Json $context @{ ok = $true; registros = @($resS) } 200 4
+
+        } elseif ($method -eq "POST" -and $path -eq "/api/series") {
+            $dataS = Leer-CuerpoJson $request
+            $serieS = if ($dataS) { ([string]$dataS.serie).Trim() } else { "" }
+            $loteS = if ($dataS) { ([string]$dataS.lote).Trim() } else { "" }
+            $skuS = if ($dataS) { ([string]$dataS.sku).Trim() } else { "" }
+            if (-not $dataS) {
+                Enviar-Json $context @{ ok = $false; error = "Faltan datos." } 400
+            } elseif ((-not $serieS) -and (-not $loteS)) {
+                Enviar-Json $context @{ ok = $false; error = "Escribe el numero de serie o el lote." } 400
+            } elseif ((-not $skuS) -and (-not ([string]$dataS.producto).Trim())) {
+                Enviar-Json $context @{ ok = $false; error = "Falta el producto (SKU o nombre)." } 400
+            } else {
+                $dupS = $null
+                if ($serieS) { $dupS = $global:seriesReg.registros | Where-Object { ([string]$_.serie).ToLowerInvariant() -eq $serieS.ToLowerInvariant() -and [string]$_.sku -eq $skuS } | Select-Object -First 1 }
+                if ($dupS) {
+                    Enviar-Json $context @{ ok = $false; error = ("Esa serie ya esta registrada" + $(if ($dupS.pedido) { " (pedido #" + $dupS.pedido + ")" } else { "" }) + ".") } 409
+                } else {
+                    $prodS = $null
+                    if ($skuS) { $prodS = $global:catalogo | Where-Object { $_.sku -eq $skuS } | Select-Object -First 1 }
+                    $nomS = ([string]$dataS.producto).Trim()
+                    if ((-not $nomS) -and $prodS) { $nomS = [string]$prodS.nombre }
+                    $mesesS = 0; try { $mm = [int]$dataS.garantiaMeses; if ($mm -ge 0 -and $mm -le 120) { $mesesS = $mm } } catch {}
+                    $ahoraS = Get-Date
+                    $venceS = if ($mesesS -gt 0) { $ahoraS.AddMonths($mesesS).ToString("yyyy-MM-dd") } else { "" }
+                    $quienS = if (Es-PeticionPC $request) { "PC" } else { ([string]$dataS.vendedor).Trim() }
+                    $regS = [pscustomobject]@{ id = [int]$global:seriesReg.siguienteId; fecha = $ahoraS.ToString("yyyy-MM-dd HH:mm:ss"); sku = $skuS; producto = $nomS; serie = $serieS; lote = $loteS; cliente = ([string]$dataS.cliente).Trim(); telefono = ([string]$dataS.telefono).Trim(); pedido = ([string]$dataS.pedido).Trim(); vendedor = $quienS; garantiaMeses = $mesesS; vence = $venceS; proveedor = ([string]$dataS.proveedor).Trim(); estado = "vendido"; notas = ([string]$dataS.notas).Trim(); historial = (New-Object System.Collections.ArrayList) }
+                    $global:seriesReg.siguienteId = [int]$global:seriesReg.siguienteId + 1
+                    [void]$global:seriesReg.registros.Add($regS)
+                    Guardar-Series
+                    $pedAud = $null
+                    if ($regS.pedido) { $pedAud = $regS.pedido }
+                    Registrar-Auditoria $quienS "series" ("Serie/lote registrado: " + $nomS + " | serie " + $serieS + " | lote " + $loteS + " | cliente " + $regS.cliente) $pedAud $null $false (Origen-Peticion $request)
+                    Enviar-Json $context @{ ok = $true; id = [int]$regS.id } 200
+                }
+            }
+
+        } elseif ($method -eq "POST" -and $path -match "^/api/series/(\d+)/estado$") {
+            $idSe = [int]$Matches[1]
+            $dataSe = Leer-CuerpoJson $request
+            $regSe = $global:seriesReg.registros | Where-Object { [int]$_.id -eq $idSe } | Select-Object -First 1
+            $nuevoEst = if ($dataSe) { [string]$dataSe.estado } else { "" }
+            if (-not (Es-PeticionPC $request)) {
+                Enviar-Json $context @{ ok = $false; error = "Solo desde la PC." } 403
+            } elseif (-not $regSe) {
+                Enviar-Json $context @{ ok = $false; error = "Registro no encontrado." } 404
+            } elseif (@("vendido", "devuelto", "garantia_proveedor", "reparado") -notcontains $nuevoEst) {
+                Enviar-Json $context @{ ok = $false; error = "Estado no valido." } 400
+            } else {
+                $regSe.estado = $nuevoEst
+                [void]$regSe.historial.Add([pscustomobject]@{ fecha = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss"); estado = $nuevoEst; nota = ([string]$dataSe.nota).Trim() })
+                Guardar-Series
+                Registrar-Auditoria "PC" "series" ("Serie " + $regSe.serie + " (" + $regSe.producto + ") -> " + $nuevoEst + $(if ($dataSe.nota) { ": " + [string]$dataSe.nota } else { "" })) $null $null $false "PC"
+                Enviar-Json $context @{ ok = $true } 200
+            }
+
+        } elseif ($method -eq "GET" -and $path -eq "/api/respaldo") {
+            if (-not [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)) {
+                Enviar-Json $context @{ ok = $false; error = "Solo desde la PC." } 403
+            } else {
+                $listaResp = @()
+                if (Test-Path -LiteralPath $respaldoDirLocal) {
+                    $listaResp = @(Get-ChildItem -LiteralPath $respaldoDirLocal -Filter "respaldo-*.zip" -File -ErrorAction SilentlyContinue | Sort-Object Name -Descending | Select-Object -First 8 | ForEach-Object {
+                        [pscustomobject]@{ nombre = $_.Name; kb = [int][Math]::Round($_.Length / 1KB); fecha = $_.LastWriteTime.ToString("yyyy-MM-dd HH:mm") }
+                    })
+                }
+                Enviar-Json $context @{ ok = $true; cfg = $global:respaldoCfg; carpetaLocal = $respaldoDirLocal; lista = $listaResp; enCurso = [bool]$global:respaldoEnCurso } 200 5
+            }
+
+        } elseif ($method -eq "POST" -and $path -eq "/api/respaldo/config") {
+            $reader = New-Object System.IO.StreamReader($request.InputStream, [System.Text.Encoding]::UTF8)
+            $bodyText = $reader.ReadToEnd()
+            $reader.Close()
+            $data = $null
+            if ($bodyText -and $bodyText.Trim().Length -gt 0) { $data = $bodyText | ConvertFrom-Json }
+            if (-not [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)) {
+                Enviar-Json $context @{ ok = $false; error = "Solo desde la PC." } 403
+            } elseif (-not $data) {
+                Enviar-Json $context @{ ok = $false; error = "Faltan datos." } 400
+            } else {
+                $hrsR = 6.0; try { $hh = [double]$data.cadaHoras; if ($hh -ge 1 -and $hh -le 168) { $hrsR = $hh } } catch {}
+                $consR = 20; try { $cc = [int]$data.conservar; if ($cc -ge 3 -and $cc -le 200) { $consR = $cc } } catch {}
+                $extraNuevo = ([string]$data.carpetaExtra).Trim().Trim('"')
+                $errExtra = ""
+                if ($extraNuevo) {
+                    try {
+                        if (-not (Test-Path -LiteralPath $extraNuevo)) { New-Item -ItemType Directory -Path $extraNuevo -Force | Out-Null }
+                        $pruebaR = Join-Path $extraNuevo ".prueba_escritura"
+                        [System.IO.File]::WriteAllText($pruebaR, "ok")
+                        Remove-Item -LiteralPath $pruebaR -Force
+                    } catch { $errExtra = "No se puede escribir en esa carpeta: " + $_.Exception.Message }
+                }
+                if ($errExtra) {
+                    Enviar-Json $context @{ ok = $false; error = $errExtra } 400
+                } else {
+                    if ($extraNuevo -ne ([string]$global:respaldoCfg.carpetaExtra).Trim()) { $global:respaldoCfg.pendienteExtra = "" }
+                    $global:respaldoCfg.activo = [bool]$data.activo
+                    $global:respaldoCfg.cadaHoras = $hrsR
+                    $global:respaldoCfg.conservar = $consR
+                    $global:respaldoCfg.carpetaExtra = $extraNuevo
+                    Guardar-RespaldoCfg
+                    Enviar-Json $context @{ ok = $true } 200
+                }
+            }
+
+        } elseif ($method -eq "POST" -and $path -eq "/api/respaldo/ahora") {
+            if (-not [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)) {
+                Enviar-Json $context @{ ok = $false; error = "Solo desde la PC." } 403
+            } else {
+                $resR = @(Crear-Respaldo "manual") | Select-Object -Last 1
+                $global:respaldoUltimoIntento = Get-Date
+                Enviar-Json $context @{ ok = [bool]$resR.ok; extraOk = [bool]$resR.extraOk; mensaje = [string]$resR.mensaje } 200
+            }
+
         } elseif ($method -eq "GET" -and $path -eq "/api/pedidos/asignados/mios") {
             # Solo la PC: lista de los pedidos que armo y envio a vendedores (con productos), para poder
             # ver en que estado estan, editarlos o retirarlos.
@@ -15526,6 +17460,9 @@ while ($listener.IsListening) {
                         }
                     }
                 }
+                if ((-not $noPermitido) -and (-not $data.origenAsignados)) {
+                    $noPermitido = Validar-PreciosPedido $vendCrear $data.items (Origen-Peticion $request)
+                }
                 if ($noPermitido) {
                     Enviar-Json $context @{ ok = $false; error = $noPermitido; sinPermiso = $true } 403
                     $continuarPedido = $false
@@ -15640,6 +17577,12 @@ while ($listener.IsListening) {
                 if ((-not $esAutoCli) -and $data.nota -and $data.vendedor -and $global:pinesVendedores.ContainsKey(([string]$data.vendedor).Trim().ToLowerInvariant()) -and (Tiene-Permiso ([string]$data.vendedor) 'mensajes')) {
                     $notaPedido = Limpiar-TextoMensaje $data.nota
                 }
+                # Nombre del cliente (opcional): lo escribe el vendedor y sale en el recibo.
+                $clienteNombrePedido = ""
+                if ((-not $esAutoCli) -and $data.clienteNombre) {
+                    $clienteNombrePedido = (Limpiar-TextoMensaje $data.clienteNombre)
+                    if ($clienteNombrePedido.Length -gt 60) { $clienteNombrePedido = $clienteNombrePedido.Substring(0, 60) }
+                }
                 $pedido = [ordered]@{
                     id                 = $global:nextId
                     clienteId          = $clienteIdRecibido
@@ -15659,11 +17602,13 @@ while ($listener.IsListening) {
                     horaCobro          = $(if ([string]$data.estado -eq "cobrado") { (Get-Date).ToString("yyyy-MM-dd HH:mm:ss") } else { "" })
                     origenAsignados    = $origenAsignados
                     nota               = $notaPedido
+                    clienteNombre      = $clienteNombrePedido
                 }
                 $global:nextId++
                 [void]$global:pedidos.Add([pscustomobject]$pedido)
                 Guardar-Pedidos
                 try { Recalcular-Reservas } catch {}
+                try { Auditar-PedidoNuevo ([pscustomobject]$pedido) (Origen-Peticion $request) } catch {}
                 try {
                     $pNuevoObj = $global:pedidos | Where-Object { [int]$_.id -eq [int]$pedido.id } | Select-Object -First 1
                     if ($pNuevoObj) { [void](Conciliar-PedidoConVentasPrevias $pNuevoObj) }
@@ -15702,6 +17647,7 @@ while ($listener.IsListening) {
             } elseif (-not (Pin-Valido $pedido.vendedor $data.pin)) {
                 Enviar-Respuesta -Context $context -Body (@{ ok = $false; error = "PIN incorrecto."; requierePin = $true } | ConvertTo-Json) -ContentType "application/json; charset=utf-8" -StatusCode 403
             } else {
+                try { Registrar-Auditoria $(if (Es-PeticionPC $request) { "PC" } else { [string]$pedido.vendedor }) "cambio_metodo" ("Pedido #" + $pedido.id + ": metodo de pago " + [string]$pedido.metodoPago + " -> " + $nuevoMetodo) $pedido.id $null $false (Origen-Peticion $request) } catch {}
                 $pedido.metodoPago = $nuevoMetodo
                 $baseTotal = [double]$pedido.totalProductos
                 $pedido.totalCobrado = if ($nuevoMetodo -eq "Transferencia") { [math]::Round($baseTotal * 2, 2) } else { $baseTotal }
@@ -16094,7 +18040,7 @@ while ($listener.IsListening) {
         } elseif ($method -eq "GET" -and $path -eq "/api/permisos") {
             # La app movil pregunta que puede hacer este vendedor.
             $nv = if ($request.QueryString["vendedor"]) { $request.QueryString["vendedor"].Trim() } else { "" }
-            Enviar-Json $context @{ ok = $true; permisos = (Obtener-Permisos $nv) }
+            Enviar-Json $context @{ ok = $true; permisos = (Obtener-Permisos $nv); descuentoMaxPct = (Descuento-Maximo $nv) }
 
         } elseif ($method -eq "GET" -and $path -eq "/api/permisos/todos") {
             # El Panel pide todos los vendedores con sus permisos actuales.
@@ -16135,6 +18081,7 @@ while ($listener.IsListening) {
                 $global:permisosVendedores[$clavePerm] = $guardarPerm
                 Guardar-Permisos
                 if ($cambiosPerm.Count -gt 0) {
+                    try { Registrar-Auditoria "PC" "permisos" ("Permisos de " + $vendPerm + ": " + (Resumir-Lista $cambiosPerm 6)) $null $null $false "PC" } catch {}
                     Agregar-AlertaVendedor $vendPerm ("La caja cambio tus permisos: " + (Resumir-Lista $cambiosPerm 4)) $null "permisos"
                 }
                 Enviar-Json $context @{ ok = $true; permisos = $actualPerm }
@@ -16331,6 +18278,7 @@ while ($listener.IsListening) {
                 $global:nextIdDevolucion++
                 [void]$global:devoluciones.Add($registroDev)
                 Guardar-Devoluciones
+                try { Registrar-Auditoria "PC" "devolucion" ("Devolucion #" + $registroDev.id + " (" + $tipoDev + ") por $" + (Formato-Monto ([double]$registroDev.total)) + $(if ($registroDev.motivo) { " - " + $registroDev.motivo } else { "" })) $null ([double]$registroDev.total) $false "PC" } catch {}
                 $impresoDev = $false
                 $errorDev = ""
                 try { $impresoDev = [bool](Imprimir-Texto (Generar-TextoDevolucion $registroDev)) } catch { $errorDev = "$($_.Exception.Message)" }
@@ -16395,6 +18343,7 @@ while ($listener.IsListening) {
                 $pedido.estado = "cancelado"
                 Guardar-Pedidos
                 try { Recalcular-Reservas } catch {}
+                try { Registrar-Auditoria $(if ($esLocalCanc) { "PC" } else { [string]$pedido.vendedor }) "anulacion" ("Pedido #" + $pedido.id + " de " + [string]$pedido.vendedor + " anulado (total $" + (Formato-Monto ([double]$pedido.totalProductos)) + ")") $pedido.id ([double]$pedido.totalProductos) $false (Origen-Peticion $request) } catch {}
                 if ($esLocalCanc -and $pedido.vendedor) {
                     Agregar-AlertaVendedor ([string]$pedido.vendedor) ("La caja anulo tu pedido #" + $pedido.id + ". El stock se devolvio.") $pedido.id "anulado"
                 }
@@ -16480,6 +18429,43 @@ while ($listener.IsListening) {
 
                     Clave-EnvioGuardar $claveEnvioAgr (@{ ok = $true; repetido = $true } | ConvertTo-Json -Compress)
                     Enviar-Respuesta -Context $context -Body (@{ ok = $true } | ConvertTo-Json) -ContentType "application/json; charset=utf-8"
+                }
+            }
+
+        } elseif ($method -eq "GET" -and $path -eq "/api/sinonimos") {
+            Enviar-Json $context @{ ok = $true; version = [int]$global:sinonimos.version; grupos = $global:sinonimos.grupos; productos = $global:sinonimos.productos } 200 6
+
+        } elseif ($method -eq "POST" -and $path -eq "/api/sinonimos") {
+            $reader = New-Object System.IO.StreamReader($request.InputStream, [System.Text.Encoding]::UTF8)
+            $bodyText = $reader.ReadToEnd()
+            $reader.Close()
+            $data = $null
+            if ($bodyText -and $bodyText.Trim().Length -gt 0) { try { $data = $bodyText | ConvertFrom-Json } catch {} }
+            if (-not [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)) {
+                Enviar-Json $context @{ ok = $false; error = "Solo se edita desde la PC." } 403
+            } elseif (-not $data) {
+                Enviar-Json $context @{ ok = $false; error = "Faltan datos." } 400
+            } else {
+                $limpioS = Sinonimos-Limpiar $data.grupos $data.productos
+                $global:sinonimos.grupos = $limpioS.grupos
+                $global:sinonimos.productos = $limpioS.productos
+                $global:sinonimos.version = [int]$global:sinonimos.version + 1
+                Guardar-Sinonimos
+                Enviar-Json $context @{ ok = $true; version = [int]$global:sinonimos.version } 200
+            }
+
+        } elseif ($method -eq "GET" -and $path -match "^/api/pedidos/(\d+)/recibo-texto$") {
+            # Texto del recibo (el mismo del ticket) para que el movil lo convierta en PDF y lo comparta.
+            $idRt = [int]$Matches[1]
+            $pedidoRt = $global:pedidos | Where-Object { [int]$_.id -eq $idRt } | Select-Object -First 1
+            if (-not $pedidoRt) {
+                Enviar-Json $context @{ ok = $false; error = "Pedido no encontrado" } 404
+            } else {
+                try {
+                    $txtRt = Texto-VistaRecibo (Generar-TextoRecibo $pedidoRt)
+                    Enviar-Json $context @{ ok = $true; id = [int]$pedidoRt.id; texto = $txtRt; ancho = [int]$global:reciboCfg.ancho } 200
+                } catch {
+                    Enviar-Json $context @{ ok = $false; error = "$($_.Exception.Message)" } 500
                 }
             }
 
