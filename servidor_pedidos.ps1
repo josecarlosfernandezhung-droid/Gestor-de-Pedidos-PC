@@ -3138,6 +3138,7 @@ function Revisar-TareasPedidos {
     try { Recalcular-Reservas } catch {}
     try { Revisar-Respaldo } catch { $global:respaldoEnCurso = $false }
     try { Revisar-CostosAxis } catch {}
+    try { Revisar-MinimosAxis } catch {}
 }
 
 # ------------------------------------------------------------------
@@ -3374,8 +3375,8 @@ function Cargar-Sinonimos {
 Cargar-Sinonimos
 
 # ------------------------------------------------------------------
-# SEGURIDAD, COSTOS, COMPRAS, FIADO Y GARANTIAS
-# (roles y limites de descuento, auditoria, costo de reposicion, proveedores, fiado, series/lotes)
+# SEGURIDAD, COSTOS Y COMPRAS
+# (roles y limites de descuento, auditoria, costo de reposicion, proveedores)
 # ------------------------------------------------------------------
 function Es-PeticionPC($request) {
     try { return [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address) } catch { return $false }
@@ -3499,9 +3500,9 @@ function Revisar-CostosAxis {
 $rolesPath = Join-Path $scriptDir "roles_vendedores.json"
 $global:rolesVendedores = @{}
 $global:rolesDef = [ordered]@{
-    administrador = @{ t = "Administrador"; desc = 100.0; p = @{ crearPedidos = $true; cobrar = $true; cancelar = $true; editar = $true; imprimir = $true; descuentos = $true; verStock = $true; misPedidos = $true; ajustes = $true; modoCliente = $true; asignados = $true; notificaciones = $true; mensajes = $true; venderBajoCosto = $true; fiado = $true; series = $true } }
-    cajero        = @{ t = "Cajero"; desc = 10.0; p = @{ crearPedidos = $true; cobrar = $true; cancelar = $true; editar = $true; imprimir = $true; descuentos = $true; verStock = $true; misPedidos = $true; ajustes = $false; modoCliente = $true; asignados = $true; notificaciones = $true; mensajes = $true; venderBajoCosto = $false; fiado = $true; series = $true } }
-    piso          = @{ t = "Vendedor de piso"; desc = 5.0; p = @{ crearPedidos = $true; cobrar = $false; cancelar = $false; editar = $false; imprimir = $true; descuentos = $true; verStock = $true; misPedidos = $true; ajustes = $false; modoCliente = $true; asignados = $true; notificaciones = $true; mensajes = $true; venderBajoCosto = $false; fiado = $false; series = $true } }
+    administrador = @{ t = "Administrador"; desc = 100.0; p = @{ crearPedidos = $true; cobrar = $true; cancelar = $true; editar = $true; imprimir = $true; descuentos = $true; verStock = $true; misPedidos = $true; ajustes = $true; modoCliente = $true; asignados = $true; notificaciones = $true; mensajes = $true; venderBajoCosto = $true } }
+    cajero        = @{ t = "Cajero"; desc = 10.0; p = @{ crearPedidos = $true; cobrar = $true; cancelar = $true; editar = $true; imprimir = $true; descuentos = $true; verStock = $true; misPedidos = $true; ajustes = $false; modoCliente = $true; asignados = $true; notificaciones = $true; mensajes = $true; venderBajoCosto = $false } }
+    piso          = @{ t = "Vendedor de piso"; desc = 5.0; p = @{ crearPedidos = $true; cobrar = $false; cancelar = $false; editar = $false; imprimir = $true; descuentos = $true; verStock = $true; misPedidos = $true; ajustes = $false; modoCliente = $true; asignados = $true; notificaciones = $true; mensajes = $true; venderBajoCosto = $false } }
 }
 function Guardar-Roles {
     Escribir-ArchivoConReintento -ruta $rolesPath -contenido ($global:rolesVendedores | ConvertTo-Json -Depth 4) | Out-Null
@@ -3693,61 +3694,102 @@ function Cargar-Proveedores {
 }
 Cargar-Proveedores
 
-# ---------- Fiado (cuentas por cobrar) ----------
-$fiadoPath = Join-Path $scriptDir "fiado.json"
-$global:fiado = @{ siguienteId = 1; clientes = (New-Object System.Collections.ArrayList) }
-function Guardar-Fiado {
-    Escribir-ArchivoConReintento -ruta $fiadoPath -contenido ($global:fiado | ConvertTo-Json -Depth 6) | Out-Null
-}
-function Cargar-Fiado {
-    try {
-        if (Test-Path -LiteralPath $fiadoPath) {
-            $raw = Get-Content $fiadoPath -Raw -Encoding UTF8
-            if ($raw -and $raw.Trim().Length -gt 0) {
-                $d = $raw | ConvertFrom-Json
-                foreach ($c in @($d.clientes)) {
-                    if (-not $c) { continue }
-                    $movs = New-Object System.Collections.ArrayList
-                    foreach ($m in @($c.movimientos)) { if ($m) { [void]$movs.Add($m) } }
-                    $c | Add-Member -NotePropertyName movimientos -NotePropertyValue $movs -Force
-                    [void]$global:fiado.clientes.Add($c)
-                }
-                if ($d.siguienteId) { $global:fiado.siguienteId = [int]$d.siguienteId }
-            }
-        }
-    } catch {}
-}
-Cargar-Fiado
-function Fiado-Cliente([int]$id) {
-    return ($global:fiado.clientes | Where-Object { [int]$_.id -eq $id } | Select-Object -First 1)
-}
-function Fiado-ADouble($v) { $x = 0.0; [void][double]::TryParse(([string]$v).Replace(',', '.'), [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$x); return $x }
+function Texto-ADouble($v) { $x = 0.0; [void][double]::TryParse(([string]$v).Replace(',', '.'), [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$x); return $x }
 
-# ---------- Garantias y trazabilidad (series / lotes) ----------
-$seriesPath = Join-Path $scriptDir "series_garantias.json"
-$global:seriesReg = @{ siguienteId = 1; registros = (New-Object System.Collections.ArrayList) }
-function Guardar-Series {
-    Escribir-ArchivoConReintento -ruta $seriesPath -contenido ($global:seriesReg | ConvertTo-Json -Depth 6) | Out-Null
+# ------------------------------------------------------------------
+# STOCK MINIMO DESDE AXISPOS
+# Prioridad: 1) el minimo que se fijo a mano en la app (minimos_stock.json), 2) el minimo configurado en
+# AxisPOS para ese producto (si es mayor que 0), 3) el minimo general de la app.
+# El nombre de la columna se detecta solo (SHOW COLUMNS) o se escribe a mano en Ajustes.
+# ------------------------------------------------------------------
+$minAxisPath = Join-Path $scriptDir "minimos_axis.json"
+$global:minAxis = @{ usar = $true; columna = ""; ultima = ""; error = ""; datos = @{} }
+$global:minAxisUltimoIntento = [datetime]::MinValue
+function Guardar-MinAxis {
+    Escribir-ArchivoConReintento -ruta $minAxisPath -contenido ($global:minAxis | ConvertTo-Json -Depth 4) | Out-Null
 }
-function Cargar-Series {
+function Cargar-MinAxis {
     try {
-        if (Test-Path -LiteralPath $seriesPath) {
-            $raw = Get-Content $seriesPath -Raw -Encoding UTF8
+        if (Test-Path -LiteralPath $minAxisPath) {
+            $raw = Get-Content $minAxisPath -Raw -Encoding UTF8
             if ($raw -and $raw.Trim().Length -gt 0) {
                 $d = $raw | ConvertFrom-Json
-                foreach ($r in @($d.registros)) {
-                    if (-not $r) { continue }
-                    $h = New-Object System.Collections.ArrayList
-                    foreach ($x in @($r.historial)) { if ($x) { [void]$h.Add($x) } }
-                    $r | Add-Member -NotePropertyName historial -NotePropertyValue $h -Force
-                    [void]$global:seriesReg.registros.Add($r)
-                }
-                if ($d.siguienteId) { $global:seriesReg.siguienteId = [int]$d.siguienteId }
+                if ($null -ne $d.usar) { $global:minAxis.usar = [bool]$d.usar }
+                if ($d.columna) { $global:minAxis.columna = [string]$d.columna }
+                if ($d.ultima) { $global:minAxis.ultima = [string]$d.ultima }
+                if ($d.error) { $global:minAxis.error = [string]$d.error }
+                $h = @{}
+                if ($d.datos) { foreach ($pp in $d.datos.PSObject.Properties) { $v = 0.0; if ([double]::TryParse([string]$pp.Value, [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$v)) { $h[[string]$pp.Name] = $v } } }
+                $global:minAxis.datos = $h
             }
         }
     } catch {}
 }
-Cargar-Series
+Cargar-MinAxis
+
+# Busca en la tabla de productos de AxisPOS la columna del stock minimo.
+function Detectar-ColumnaMinimoAxis {
+    $texto = Ejecutar-ConsultaAxis "SHOW COLUMNS FROM goods"
+    $cols = New-Object System.Collections.ArrayList
+    foreach ($linea in ($texto -split "`n")) {
+        $campo = (($linea.TrimEnd("`r")) -split "`t")[0].Trim()
+        if ($campo) { [void]$cols.Add($campo) }
+    }
+    foreach ($pref in @('MinStock', 'StockMin', 'MinQtty', 'MinQty', 'MinQuantity', 'MinimumStock', 'MinimumQtty', 'MinCount', 'MinRest', 'MinRemain', 'MinAmount', 'Minimum', 'LowStock', 'StockLimit')) {
+        foreach ($c in $cols) { if ($c -ieq $pref) { return $c } }
+    }
+    foreach ($c in $cols) { if ($c -match '(?i)min' -and $c -match '(?i)(stock|qtty|qty|rest|count|remain|quant|amount|limit)') { return $c } }
+    foreach ($c in $cols) { if ($c -match '(?i)(stock|qtty|qty).*(min|low|limit)') { return $c } }
+    return $null
+}
+function Actualizar-MinimosAxis {
+    if (-not $global:configAxis.activo) { throw "AxisPOS no esta activado en la configuracion." }
+    $colSku = [string]$global:configAxis.columnaSku
+    if (@('Code', 'BarCode1', 'ID') -notcontains $colSku) { throw "columnaSku invalida (usa Code, BarCode1 o ID)." }
+    $col = [string]$global:minAxis.columna
+    if (-not $col) {
+        $col = Detectar-ColumnaMinimoAxis
+        if (-not $col) { throw "No encontre la columna del stock minimo en AxisPOS. Escribe su nombre a mano (pidele a quien instalo AxisPOS que te lo diga)." }
+        $global:minAxis.columna = $col
+    }
+    if ($col -notmatch '^[A-Za-z][A-Za-z0-9_]{0,40}$') { throw "Nombre de columna no valido." }
+    $texto = Ejecutar-ConsultaAxis ("SELECT g." + $colSku + ", g." + $col + " FROM goods g WHERE g.Deleted=0")
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $nuevo = @{}
+    foreach ($linea in ($texto -split "`n")) {
+        $linea = $linea.TrimEnd("`r")
+        if ([string]::IsNullOrWhiteSpace($linea)) { continue }
+        $f = $linea -split "`t"
+        if ($f.Count -lt 2) { continue }
+        $v = 0.0
+        if ([double]::TryParse([string]$f[1], [System.Globalization.NumberStyles]::Float, $inv, [ref]$v) -and $v -gt 0) { $nuevo[([string]$f[0]).Trim()] = $v }
+    }
+    $global:minAxis.datos = $nuevo
+    $global:minAxis.ultima = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+    $global:minAxis.error = ""
+    Guardar-MinAxis
+    return $nuevo.Count
+}
+function Revisar-MinimosAxis {
+    if (-not $global:minAxis.usar) { return }
+    if (-not $global:configAxis.activo) { return }
+    $ahora = Get-Date
+    if (($ahora - $global:minAxisUltimoIntento).TotalMinutes -lt 15) { return }
+    $global:minAxisUltimoIntento = $ahora
+    try { [void](Actualizar-MinimosAxis) }
+    catch {
+        $global:minAxis.error = "$($_.Exception.Message)"
+        try { Guardar-MinAxis } catch {}
+        Write-Host ("Aviso: no se pudieron leer los minimos de AxisPOS: " + $_.Exception.Message)
+    }
+}
+# De donde sale el minimo de un producto: "propio" (fijado en la app), "axis" o "general".
+function Origen-Minimo($p) {
+    $sku = [string]$p.sku
+    if ($sku -and $global:minimosStock.ContainsKey($sku)) { return "propio" }
+    if ($sku -and $global:minAxis.usar -and $global:minAxis.datos.ContainsKey($sku) -and ([double]$global:minAxis.datos[$sku] -gt 0)) { return "axis" }
+    return "general"
+}
 
 function Config-ParaPanel {
     $c = $global:configApp | Select-Object *
@@ -4526,9 +4568,7 @@ $global:catalogoPermisos = @(
     @{ k = 'asignados';     t = 'Recibir pedidos de la caja';      d = 'Le llegan los pedidos que arma la PC.' },
     @{ k = 'notificaciones'; t = 'Recibir notificaciones';         d = 'Avisos de precios, stock, anulaciones y permisos.' },
     @{ k = 'mensajes';       t = 'Enviar mensajes a la caja';      d = 'Puede escribir una nota en sus pedidos o mandar mensajes cortos a la caja.' },
-    @{ k = 'venderBajoCosto'; t = 'Vender por debajo del costo';    d = 'Puede dejar un producto a un precio menor que su costo de reposicion.' },
-    @{ k = 'fiado';          t = 'Vender a credito (fiado)';        d = 'Puede registrar ventas a credito a clientes con cuenta.' },
-    @{ k = 'series';         t = 'Registrar series y lotes';        d = 'Puede registrar el numero de serie o lote de lo que vende (garantias).' }
+    @{ k = 'venderBajoCosto'; t = 'Vender por debajo del costo';    d = 'Puede dejar un producto a un precio menor que su costo de reposicion.' }
 )
 
 function Permisos-Completos {
@@ -4589,7 +4629,6 @@ function Permiso-De-Ruta([string]$method, [string]$path) {
         if ($path -match "^/api/pedidos/\d+/metodo$") { return "editar" }
         if ($path -match "^/api/pedidos/\d+/imprimir$") { return "imprimir" }
         if ($path -eq "/api/mensajes") { return "mensajes" }
-        if ($path -eq "/api/series") { return "series" }
     } elseif ($method -eq "GET") {
         if ($path -eq "/api/pedidos") { return "misPedidos" }
         if ($path -eq "/api/pedidos/asignados") { return "asignados" }
@@ -4689,6 +4728,10 @@ Cargar-Minimos
 function Minimo-Efectivo($p) {
     $sku = [string]$p.sku
     if ($sku -and $global:minimosStock.ContainsKey($sku)) { return [double]$global:minimosStock[$sku] }
+    if ($sku -and $global:minAxis.usar -and $global:minAxis.datos.ContainsKey($sku)) {
+        $vAx = [double]$global:minAxis.datos[$sku]
+        if ($vAx -gt 0) { return $vAx }
+    }
     return [double]$global:configApp.umbralStockBajo
 }
 
@@ -5765,9 +5808,8 @@ $htmlPC = @'
       <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="cerrarMenuPC(); abrirAuditoria();">Auditoría (quién hizo qué)</button>
       <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="cerrarMenuPC(); abrirCostos();">Costos de reposición</button>
       <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="cerrarMenuPC(); abrirComprasProv();">Compras a proveedores</button>
+      <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="cerrarMenuPC(); abrirMinAxis();">Stock mínimo de AxisPOS</button>
       <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="cerrarMenuPC(); abrirEstatico();">Stock estático (baja rotación)</button>
-      <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="cerrarMenuPC(); abrirFiado();">Fiado (cuentas por cobrar)</button>
-      <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="cerrarMenuPC(); abrirSeries();">Garantías y series / lotes</button>
       <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="window.open('/metricas', '_blank')">Ver metricas (F8)</button>
 
       <button class="btn-nuevo-pedido" style="width:100%; background:#0369a1; margin-bottom:10px;" onclick="cerrarMenuPC(); abrirPines();">PIN de vendedores</button>
@@ -7562,21 +7604,55 @@ $htmlPC = @'
         cont.innerHTML = '<div class="np-vacio" style="color:#f87171;">No se pudo leer AxisPOS: ' + escaparHtml(e.message || e) + '</div>';
       }
     }
+    function tarjetaRepos(x) {
+      const colores = { A: '#16a34a', B: '#ca8a04', C: '#64748b' };
+      const razon = { ventas: 'por ventas', minimo: 'por mínimo', ambos: 'ventas y mínimo' }[x.razon] || '';
+      const tend = x.tendencia === 'sube' ? ' <span style="color:#86efac;">&#9650; sube</span>' : (x.tendencia === 'baja' ? ' <span style="color:#fca5a5;">&#9660; baja</span>' : '');
+      const clase = (x.clase && colores[x.clase]) ? '<span style="background:' + colores[x.clase] + '; color:#fff; border-radius:4px; padding:0 6px; font-weight:700;">' + x.clase + '</span> ' : '';
+      return '<div style="background:#0f172a; border:1px solid #334155; border-radius:10px; padding:10px; margin-bottom:8px; font-size:13px; line-height:1.5;">' +
+        '<div style="display:flex; justify-content:space-between; gap:8px;"><b style="color:#fff;">' + escaparHtml(x.nombre) + '</b><span style="color:#86efac; font-weight:800; white-space:nowrap;">Bajar ' + x.bajar + '</span></div>' +
+        '<div style="color:#94a3b8;">' + clase + escaparHtml(x.sku || 'sin SKU') + (razon ? ' · ' + razon : '') + '</div>' +
+        '<div>En el piso: <b>' + x.piso + '</b>' + (x.minimo > 0 ? ' (mínimo ' + x.minimo + ')' : '') + ' · vende <b>' + (x.ritmo != null ? x.ritmo : x.porDia) + '</b>/día' + tend +
+          (x.diasPiso != null ? ' · alcanza <b>' + x.diasPiso + '</b> días' : '') + ' · vendió ' + x.vendido + '</div>' +
+        '<div style="margin-top:4px;">' + (x.almacenes || []).map(function (a) {
+          return '<div style="display:flex; justify-content:space-between; border-top:1px dashed #334155; padding:2px 0;"><span>' + escaparHtml(a.nombre || ('Almacén ' + a.id)) + ': hay <b>' + a.stock + '</b></span>' +
+            '<span style="color:' + (a.bajar > 0 ? '#86efac' : '#64748b') + ';">' + (a.bajar > 0 ? 'bajar ' + a.bajar : 'no hace falta') + '</span></div>';
+        }).join('') + '</div></div>';
+    }
+    function seccionRepos(titulo, lista, abierta, detalle) {
+      if (!lista || !lista.length) return '';
+      return '<details' + (abierta ? ' open' : '') + ' style="margin-top:12px;"><summary style="cursor:pointer; color:#7dd3fc; font-size:13px; font-weight:700;">' + titulo + ' (' + lista.length + ')</summary>' +
+        '<div style="font-size:12px; margin-top:6px;">' + lista.map(function (x) {
+          return '<div style="display:flex; justify-content:space-between; gap:8px; border-top:1px solid #1e293b; padding:4px 0;"><span style="min-width:0;">' + escaparHtml(x.nombre) + '</span><span style="color:#94a3b8; text-align:right;">' + detalle(x) + '</span></div>';
+        }).join('') + '</div></details>';
+    }
     function pintarResultadoRepos(d) {
       const out = document.getElementById('reposResultado');
       const items = d.items || [];
+      const res = d.resumen || {};
+      // Lista para copiar, agrupada por almacen de origen (asi se arma la bajada de cada almacen)
+      const grupos = {};
+      items.forEach(function (x) {
+        (x.almacenes || []).forEach(function (a) {
+          if (a.bajar > 0) {
+            if (!grupos[a.id]) grupos[a.id] = { nombre: a.nombre, filas: [] };
+            grupos[a.id].filas.push(a.bajar + ' x ' + x.nombre + (x.sku ? ' [' + x.sku + ']' : ''));
+          }
+        });
+      });
       reposTexto = 'Bajar del almacen (ventas de ' + d.dias + ' dias, cubrir ' + d.cobertura + ' dias) - ' + d.generado + '\n' +
-        items.map(function (x) { return x.bajar + ' x ' + x.nombre + (x.sku ? ' [' + x.sku + ']' : ''); }).join('\n');
-      if (!items.length) {
-        out.innerHTML = '<div class="np-vacio">No hace falta bajar nada: el piso alcanza para ' + d.cobertura + ' dias segun las ventas de los ultimos ' + d.dias + ' dias.</div>';
-        return;
-      }
-      out.innerHTML = '<div style="font-size:12px; color:#94a3b8; margin-bottom:6px;">' + items.length + ' productos &middot; calculado ' + escaparHtml(d.generado) + '</div>' +
-        '<div style="overflow-x:auto;"><table style="width:100%; border-collapse:collapse; font-size:13px;">' +
-        '<tr style="color:#94a3b8; text-align:left;"><th>Producto</th><th>Piso</th><th>Almacen</th><th>Vendido</th><th>Alcanza</th><th>Bajar</th></tr>' +
-        items.map(function (x) {
-          return '<tr style="border-top:1px solid #334155;"><td style="padding:6px 4px;">' + escaparHtml(x.nombre) + '</td><td>' + x.piso + '</td><td>' + x.origen + '</td><td>' + x.vendido + '</td><td>' + x.diasPiso + ' d</td><td style="color:#86efac; font-weight:700;">' + x.bajar + '</td></tr>';
-        }).join('') + '</table></div>';
+        Object.keys(grupos).map(function (k) { return '\n== ' + (grupos[k].nombre || ('Almacen ' + k)) + ' ==\n' + grupos[k].filas.join('\n'); }).join('\n');
+      let html = '<div style="font-size:12px; color:#94a3b8; margin-bottom:8px;">Calculado ' + escaparHtml(d.generado) + ' · ventas de ' + d.dias + ' días · cubrir ' + d.cobertura + ' días</div>' +
+        '<div style="background:#0f172a; border:1px solid #334155; border-radius:8px; padding:10px; margin-bottom:10px; font-size:13px; line-height:1.55;">' +
+        '<b style="color:#fff;">' + (res.productosABajar || 0) + ' productos · ' + (res.unidadesABajar || 0) + ' unidades por bajar</b><br>' +
+        'En el piso se vendieron ' + (res.unidadesVendidas || 0) + ' unidades de ' + (res.productosConVentas || 0) + ' productos; ' + (res.sinMovimiento || 0) + ' con existencia no se movieron.<br>' +
+        (res.porAlmacen || []).map(function (a) { return 'De <b>' + escaparHtml(a.nombre || ('Almacén ' + a.id)) + '</b>: ' + a.unidades + ' unidades en ' + a.productos + ' productos'; }).join('<br>') + '</div>';
+      html += items.length ? items.map(tarjetaRepos).join('') :
+        '<div class="np-vacio">No hace falta bajar nada: el piso alcanza para ' + d.cobertura + ' días según las ventas de los últimos ' + d.dias + ' días.</div>';
+      html += seccionRepos('Lo que más se vende', d.masVendidos, true, function (x) { return 'vendió ' + x.vendido + ' · piso ' + x.piso + ' · almacenes ' + x.origen + (x.diasPiso != null ? ' · alcanza ' + x.diasPiso + ' d' : '') + (x.bajar > 0 ? ' · <b style="color:#86efac;">bajar ' + x.bajar + '</b>' : ''); });
+      html += seccionRepos('Lo que menos se vende (pero se vende)', d.menosVendidos, false, function (x) { return 'vendió ' + x.vendido + ' · piso ' + x.piso + ' · almacenes ' + x.origen; });
+      html += seccionRepos('Con existencia y sin ventas en el periodo', d.sinMovimiento, false, function (x) { return 'piso ' + x.piso + ' · almacenes ' + x.origen; });
+      out.innerHTML = html;
     }
     async function calcularRepos(forzar) {
       const r = document.querySelector('input[name="reposPiso"]:checked');
@@ -7740,8 +7816,7 @@ $htmlPC = @'
       ['modCostos', function () { var e = document.getElementById('modCostos'); if (e) e.style.display = 'none'; }],
       ['modComp', function () { var e = document.getElementById('modComp'); if (e) e.style.display = 'none'; }],
       ['modEst', function () { var e = document.getElementById('modEst'); if (e) e.style.display = 'none'; }],
-      ['modFiado', function () { var e = document.getElementById('modFiado'); if (e) e.style.display = 'none'; }],
-      ['modSeries', function () { var e = document.getElementById('modSeries'); if (e) e.style.display = 'none'; }],
+      ['modMinAx', function () { var e = document.getElementById('modMinAx'); if (e) e.style.display = 'none'; }],
       ['configOverlay', function () { cerrarConfig(); }],
       ['consultaOverlay', function () { cerrarConsulta(); }],
       ['reposOverlay', function () { cerrarRepos(); }]
@@ -8079,7 +8154,7 @@ $htmlPC = @'
         c.innerHTML = comprasItems.map((i, idx) =>
           '<div class="np-resultado"><label style="display:flex; gap:8px; align-items:center; flex:1; min-width:0;">' +
           '<input type="checkbox" ' + (i.incluir ? 'checked' : '') + ' onchange="comprasItems[' + idx + '].incluir = this.checked; resumenCompras()">' +
-          '<span style="min-width:0;">' + escaparHtml(i.nombre) + '<br><small style="color:#94a3b8;">' + escaparHtml(i.sku || 'sin SKU') + ' · hay ' + i.stock + ' · mín. ' + i.minimo + (i.personalizado ? ' (propio)' : '') + '</small></span></label>' +
+          '<span style="min-width:0;">' + escaparHtml(i.nombre) + '<br><small style="color:#94a3b8;">' + escaparHtml(i.sku || 'sin SKU') + ' · hay ' + i.stock + ' · mín. ' + i.minimo + (i.personalizado ? ' (propio)' : (i.origenMin === 'axis' ? ' (AxisPOS)' : '')) + '</small></span></label>' +
           '<input type="number" min="1" value="' + i.comprar + '" style="width:72px; padding:6px; border-radius:6px; border:1px solid #334155; background:#0f172a; color:#e2e8f0;" onchange="comprasItems[' + idx + '].comprar = Math.max(1, parseFloat(this.value) || 1); resumenCompras()">' +
           '</div>'
         ).join('');
@@ -8332,7 +8407,7 @@ $htmlPC = @'
     }
 
     // ---- Red / IP fija ----
-    // ================= Seguridad, costos, compras, stock estatico, fiado y garantias =================
+    // ================= Seguridad, costos, compras y stock estatico =================
     function pcModal(id, titulo) {
       let o = document.getElementById(id);
       if (!o) {
@@ -8371,7 +8446,7 @@ $htmlPC = @'
     const PC_AREA = 'width:100%; background:#0f172a; color:#e2e8f0; border:1px solid #334155; border-radius:8px; padding:8px; font-size:13px; margin-bottom:8px;';
 
     // ---- Auditoria ----
-    const ACC_AUD = ['descuento', 'descuento_bloqueado', 'venta_bajo_costo', 'bajo_costo_bloqueado', 'anulacion', 'cambio_metodo', 'devolucion', 'permisos', 'roles', 'precio_catalogo', 'costos', 'fiado_cargo', 'fiado_abono', 'series'];
+    const ACC_AUD = ['descuento', 'descuento_bloqueado', 'venta_bajo_costo', 'bajo_costo_bloqueado', 'anulacion', 'cambio_metodo', 'devolucion', 'permisos', 'roles', 'precio_catalogo', 'costos'];
     function abrirAuditoria() {
       const c = pcModal('modAud', 'Auditoría de acciones sensibles');
       c.innerHTML = '<div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:8px; align-items:center;">' +
@@ -8452,9 +8527,9 @@ $htmlPC = @'
       const ta = pcById('cpProv');
       if (ta && !ta.value) ta.value = (comprasDatos.proveedores || []).map(p => p.nombre + ', ' + (p.telefono || '')).join('\n');
       pcById('cpInfo').textContent = 'Ventas tomadas de ' + (comprasDatos.fuente === 'axispos' ? 'AxisPOS' : 'los pedidos de la app (no incluye ventas hechas solo en AxisPOS)') + '. Cantidades editables.';
-      renderCompras();
+      renderComprasProv();
     }
-    function renderCompras() {
+    function renderComprasProv() {
       const items = (comprasDatos && comprasDatos.items) || [];
       if (!items.length) { pcById('cpLista').innerHTML = '<div class="np-vacio">Nada que reponer con estos datos.</div>'; return; }
       const nombresProv = (comprasDatos.proveedores || []).map(p => p.nombre);
@@ -8467,8 +8542,8 @@ $htmlPC = @'
           const it = items[i];
           total += (Number(it.costo) || 0) * (Number(comprasQty[i]) || 0);
           return '<div style="' + PC_CAJA + '"><b style="color:#fff;">' + escaparHtml(it.nombre) + '</b><br>' +
-            '<span style="color:#94a3b8;">Hay ' + it.stock + ' · mín ' + it.minimo + ' · vende ' + it.velDia + '/día' + (it.diasRestantes != null ? ' · alcanza ' + it.diasRestantes + ' días' : '') + '</span><br>' +
-            'Pedir: <input type="number" min="0" value="' + comprasQty[i] + '" style="width:70px; background:#1e293b; color:#fff; border:1px solid #475569; border-radius:6px; padding:3px;" onchange="comprasQty[' + i + ']=parseFloat(this.value)||0; renderCompras();"> ' +
+            '<span style="color:#94a3b8;">Hay ' + it.stock + ' · mín ' + it.minimo + (it.origenMin === 'axis' ? ' (AxisPOS)' : '') + ' · vende ' + it.velDia + '/día' + (it.diasRestantes != null ? ' · alcanza ' + it.diasRestantes + ' días' : '') + '</span><br>' +
+            'Pedir: <input type="number" min="0" value="' + comprasQty[i] + '" style="width:70px; background:#1e293b; color:#fff; border:1px solid #475569; border-radius:6px; padding:3px;" onchange="comprasQty[' + i + ']=parseFloat(this.value)||0; renderComprasProv();"> ' +
             (it.costo != null ? ' · costo ' + pcMoney(it.costo) : '') +
             ' &nbsp; Proveedor: <select style="background:#1e293b; color:#fff; border:1px solid #475569; border-radius:6px; padding:3px;" onchange="asignarProveedor(' + i + ', this.value)"><option value="">(sin proveedor)</option>' +
             nombresProv.map(n => '<option value="' + escaparHtml(n) + '"' + (n === it.proveedor ? ' selected' : '') + '>' + escaparHtml(n) + '</option>').join('') + '</select></div>';
@@ -8481,12 +8556,12 @@ $htmlPC = @'
     async function asignarProveedor(i, nombre) {
       const it = comprasDatos.items[i];
       const r = await pcApi('/api/proveedores', { asignar: { sku: it.sku, proveedor: nombre } });
-      if (r.ok) { it.proveedor = nombre; renderCompras(); } else mostrarBanner('No se pudo asignar el proveedor.', 4000);
+      if (r.ok) { it.proveedor = nombre; renderComprasProv(); } else mostrarBanner('No se pudo asignar el proveedor.', 4000);
     }
     async function guardarProveedores() {
       const lista = pcById('cpProv').value.split('\n').map(l => { const p = l.split(','); return { nombre: (p[0] || '').trim(), telefono: (p[1] || '').trim(), nota: (p[2] || '').trim() }; }).filter(p => p.nombre);
       const r = await pcApi('/api/proveedores', { lista: lista });
-      if (r.ok) { comprasDatos.proveedores = lista; renderCompras(); mostrarBanner('Proveedores guardados.'); } else mostrarBanner('No se pudo guardar.', 4000);
+      if (r.ok) { comprasDatos.proveedores = lista; renderComprasProv(); mostrarBanner('Proveedores guardados.'); } else mostrarBanner('No se pudo guardar.', 4000);
     }
     function textoPedidoProv(g) {
       const items = comprasDatos.items;
@@ -8498,6 +8573,30 @@ $htmlPC = @'
     function waPedidoProv(g) {
       const p = (comprasDatos.proveedores || []).find(x => x.nombre === g);
       window.open('https://wa.me/' + pcTelWa(p && p.telefono) + '?text=' + encodeURIComponent(textoPedidoProv(g)), '_blank');
+    }
+
+    // ---- Stock minimo tomado de AxisPOS ----
+    async function abrirMinAxis() {
+      const c = pcModal('modMinAx', 'Stock mínimo de AxisPOS');
+      const r = await pcApi('/api/minimos/axis');
+      const d = r.d || {};
+      c.innerHTML = '<p style="font-size:12px; color:#94a3b8; margin-bottom:10px;">Toma el stock mínimo que ya tienes configurado en AxisPOS para cada producto. Prioridad: 1) el mínimo que fijes aquí en la app (Lista de compras), 2) el de AxisPOS, 3) el mínimo general. Si un producto tiene 0 en AxisPOS, se usa el general.</p>' +
+        (d.axisActivo === false ? '<div style="' + PC_CAJA + 'color:#fca5a5;">AxisPOS no está activado en la configuración del servidor.</div>' : '') +
+        '<label style="font-size:13px; display:flex; align-items:center; gap:8px; margin-bottom:10px;"><input type="checkbox" id="maUsar"' + (d.usar !== false ? ' checked' : '') + '> Usar los mínimos de AxisPOS</label>' +
+        '<label style="font-size:13px; display:block; margin-bottom:4px;">Columna del mínimo en AxisPOS (déjala vacía para que se detecte sola):</label>' +
+        '<input id="maCol" class="np-input" value="' + escaparHtml(d.columna || '') + '" placeholder="se detecta sola">' +
+        '<div style="' + PC_CAJA + '">Productos con mínimo en AxisPOS: <b>' + (d.n || 0) + '</b>' + (d.ultima ? '<br>Última lectura: ' + escaparHtml(d.ultima) : '') +
+        (d.error ? '<br><span style="color:#fca5a5;">' + escaparHtml(d.error) + '</span>' : '') + '</div>' +
+        '<button style="' + PC_BTN + '" onclick="guardarMinAxis(false)">Guardar</button> <button style="' + PC_BTN + '" onclick="guardarMinAxis(true)">Guardar y leer de AxisPOS ahora</button><div id="maMsg" style="font-size:12px; margin-top:8px;"></div>';
+    }
+    async function guardarMinAxis(cargar) {
+      const msg = pcById('maMsg');
+      msg.style.color = '#cbd5e1'; msg.textContent = cargar ? 'Leyendo AxisPOS...' : 'Guardando...';
+      const r = await pcApi('/api/minimos/axis', { usar: pcById('maUsar').checked, columna: pcById('maCol').value.trim(), cargar: !!cargar });
+      if (!r.ok) { msg.style.color = '#fca5a5'; msg.textContent = (r.d && r.d.error) || 'No se pudo.'; return; }
+      msg.style.color = '#86efac';
+      msg.textContent = cargar ? ('Listo: ' + r.d.n + ' productos con mínimo en AxisPOS (columna ' + r.d.columna + ').') : 'Guardado.';
+      if (cargar) pcById('maCol').value = r.d.columna || pcById('maCol').value;
     }
 
     // ---- Stock estatico (baja rotacion) ----
@@ -8526,113 +8625,6 @@ $htmlPC = @'
     function copiarEstatico() {
       if (!estaticoDatos) return;
       pcCopiar('Ofertas de liquidación:\n' + (estaticoDatos.items || []).filter(it => it.descSugerido > 0).map(it => '- ' + it.nombre + ': ' + pcMoney(it.precioOferta) + ' (antes ' + pcMoney(it.precio) + ')').join('\n'));
-    }
-
-    // ---- Fiado (cuentas por cobrar) ----
-    async function abrirFiado() { pcModal('modFiado', 'Fiado (cuentas por cobrar)'); renderFiado(); }
-    async function renderFiado() {
-      const r = await pcApi('/api/fiado');
-      const cont = pcById('modFiado_c');
-      if (!r.ok) { cont.innerHTML = '<div class="np-vacio">' + escaparHtml((r.d && r.d.error) || 'No se pudo cargar.') + '</div>'; return; }
-      const cl = r.d.clientes || [];
-      cont.innerHTML = '<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;"><span style="font-size:14px;">Total por cobrar: <b style="color:#fbbf24;">' + pcMoney(r.d.total) + '</b></span>' +
-        '<button style="' + PC_BTN + '" onclick="fiadoCliente(0)">+ Nuevo cliente</button></div>' +
-        (cl.length ? cl.map(c => '<div style="' + PC_CAJA + '"><b style="color:#fff;">' + escaparHtml(c.nombre) + '</b>' + (c.telefono ? ' <span style="color:#94a3b8;">' + escaparHtml(c.telefono) + '</span>' : '') + '<br>' +
-          'Debe <b style="color:' + (c.saldo > 0 ? '#fca5a5' : '#86efac') + ';">' + pcMoney(c.saldo) + '</b>' + (c.limite > 0 ? ' de ' + pcMoney(c.limite) + ' (disponible ' + pcMoney(c.disponible) + ')' : ' · sin límite') +
-          (c.saldo > 0 && c.dias != null ? ' · <span style="color:' + (c.dias >= 30 ? '#fca5a5' : '#94a3b8') + ';">' + c.dias + ' días sin movimiento</span>' : '') + '<br>' +
-          '<button style="' + PC_BTN + '" onclick="fiadoCargo(' + c.id + ')">Cargo</button><button style="' + PC_BTN + '" onclick="fiadoAbono(' + c.id + ')">Abono</button>' +
-          (c.saldo > 0 ? '<button style="' + PC_BTN + '" onclick="fiadoRecordar(' + c.id + ')">Recordar por WhatsApp</button>' : '') +
-          '<button style="' + PC_BTN + 'background:#475569;" onclick="fiadoMovs(' + c.id + ')">Movimientos</button><button style="' + PC_BTN + 'background:#475569;" onclick="fiadoCliente(' + c.id + ')">Editar</button></div>').join('')
-          : '<div class="np-vacio">Todavía no hay clientes con cuenta. Crea el primero con "+ Nuevo cliente".</div>') +
-        '<div id="fiadoMovs"></div>';
-      window.__fiadoLista = cl;
-    }
-    async function fiadoCliente(id) {
-      const ex = (window.__fiadoLista || []).find(x => x.id === id) || {};
-      const nombre = prompt('Nombre del cliente:', ex.nombre || ''); if (nombre === null) return;
-      const tel = prompt('Teléfono (para recordatorios por WhatsApp, opcional):', ex.telefono || ''); if (tel === null) return;
-      const lim = prompt('Límite de crédito (0 = sin límite):', ex.limite != null ? ex.limite : '0'); if (lim === null) return;
-      const r = await pcApi('/api/fiado/cliente', { id: id || undefined, nombre: nombre, telefono: tel, limite: lim });
-      if (!r.ok) mostrarBanner((r.d && r.d.error) || 'No se pudo guardar.', 4000);
-      renderFiado();
-    }
-    async function fiadoCargo(id) {
-      const monto = prompt('Monto fiado ($):'); if (monto === null) return;
-      const concepto = prompt('Concepto / productos (opcional):', '') || '';
-      const pedido = prompt('Número de pedido (opcional):', '') || '';
-      let r = await pcApi('/api/fiado/cargo', { id: id, monto: monto, concepto: concepto, pedido: pedido });
-      if (!r.ok && r.d && r.d.excede) {
-        if (!confirm(r.d.error + '\n\n¿Autorizar de todas formas? Quedará registrado en la auditoría.')) return;
-        r = await pcApi('/api/fiado/cargo', { id: id, monto: monto, concepto: concepto, pedido: pedido, forzar: true });
-      }
-      if (!r.ok) mostrarBanner((r.d && r.d.error) || 'No se pudo registrar.', 4000);
-      renderFiado();
-    }
-    async function fiadoAbono(id) {
-      const monto = prompt('Monto que paga ahora ($):'); if (monto === null) return;
-      const concepto = prompt('Nota (opcional):', '') || '';
-      const r = await pcApi('/api/fiado/abono', { id: id, monto: monto, concepto: concepto });
-      if (!r.ok) mostrarBanner((r.d && r.d.error) || 'No se pudo registrar.', 4000);
-      renderFiado();
-    }
-    function fiadoRecordar(id) {
-      const c = (window.__fiadoLista || []).find(x => x.id === id); if (!c) return;
-      const txt = 'Hola ' + c.nombre + ', te recordamos que tienes un saldo pendiente de ' + pcMoney(c.saldo) + '. Cuando puedas pasar a saldarlo, gracias.';
-      window.open('https://wa.me/' + pcTelWa(c.telefono) + '?text=' + encodeURIComponent(txt), '_blank');
-    }
-    async function fiadoMovs(id) {
-      const r = await pcApi('/api/fiado/movimientos?id=' + id);
-      const cont = pcById('fiadoMovs');
-      if (!r.ok) { cont.innerHTML = ''; return; }
-      cont.innerHTML = '<h3 style="font-size:14px; margin:12px 0 6px; color:#fff;">Movimientos de ' + escaparHtml(r.d.nombre) + '</h3>' +
-        ((r.d.movimientos || []).map(m => '<div style="' + PC_CAJA + '"><span style="color:#94a3b8;">' + escaparHtml(m.fecha) + '</span> · <b style="color:' + (m.tipo === 'cargo' ? '#fca5a5' : '#86efac') + ';">' + (m.tipo === 'cargo' ? '+' : '-') + pcMoney(m.monto) + '</b> · saldo ' + pcMoney(m.saldo) +
-          (m.concepto ? '<br>' + escaparHtml(m.concepto) : '') + (m.pedido ? ' · pedido #' + escaparHtml(m.pedido) : '') + '</div>').join('') || '<div class="np-vacio">Sin movimientos.</div>');
-    }
-
-    // ---- Garantias y trazabilidad (series / lotes) ----
-    const EST_SERIE = { vendido: 'Vendido', devuelto: 'Devuelto por el cliente', garantia_proveedor: 'En garantía con el proveedor', reparado: 'Reparado / repuesto' };
-    function abrirSeries() {
-      const c = pcModal('modSeries', 'Garantías y series / lotes');
-      c.innerHTML = '<details style="margin-bottom:10px;"><summary style="cursor:pointer; font-size:13px; color:#7dd3fc;">+ Registrar serie o lote</summary><div style="display:grid; grid-template-columns:1fr 1fr; gap:6px; margin-top:8px;">' +
-        ['sku:SKU del producto', 'serie:Número de serie', 'lote:Lote', 'cliente:Cliente', 'telefono:Teléfono', 'pedido:Pedido #', 'garantiaMeses:Meses de garantía', 'proveedor:Proveedor'].map(x => { const p = x.split(':'); return '<input id="se_' + p[0] + '" class="np-input" style="margin:0;" placeholder="' + p[1] + '"' + (p[0] === 'garantiaMeses' ? ' type="number" min="0" value="12"' : '') + '>'; }).join('') +
-        '</div><input id="se_notas" class="np-input" style="margin-top:6px;" placeholder="Notas"><button style="' + PC_BTN + '" onclick="guardarSerie()">Guardar</button><div id="seMsg" style="font-size:12px; margin-top:6px;"></div></details>' +
-        '<div style="display:flex; gap:6px; margin-bottom:8px;"><input id="seQ" class="np-input" style="margin:0; flex:1;" placeholder="Buscar por serie, lote, cliente, producto o pedido" oninput="cargarSeries()"><select id="seEst" class="np-select" style="width:auto; margin:0;" onchange="cargarSeries()"><option value="">Todos</option>' +
-        Object.keys(EST_SERIE).map(k => '<option value="' + k + '">' + EST_SERIE[k] + '</option>').join('') + '</select></div><div id="seLista"></div>';
-      cargarSeries();
-    }
-    async function cargarSeries() {
-      const r = await pcApi('/api/series?q=' + encodeURIComponent(pcById('seQ').value) + '&estado=' + encodeURIComponent(pcById('seEst').value));
-      const lista = (r.d && r.d.registros) || [];
-      window.__seriesLista = lista;
-      pcById('seLista').innerHTML = lista.length ? lista.map(s => {
-        let vence = '';
-        if (s.vence) vence = s.venceEn < 0 ? '<span style="color:#fca5a5;">garantía vencida (' + escaparHtml(s.vence) + ')</span>' : '<span style="color:#86efac;">garantía hasta ' + escaparHtml(s.vence) + ' (' + s.venceEn + ' días)</span>';
-        return '<div style="' + PC_CAJA + '"><b style="color:#fff;">' + escaparHtml(s.producto || s.sku) + '</b> <span style="color:#94a3b8;">' + escaparHtml(s.sku) + '</span><br>' +
-          (s.serie ? 'Serie: <b>' + escaparHtml(s.serie) + '</b> ' : '') + (s.lote ? 'Lote: <b>' + escaparHtml(s.lote) + '</b> ' : '') + '<br>' +
-          (s.cliente ? 'Cliente: ' + escaparHtml(s.cliente) + (s.telefono ? ' (' + escaparHtml(s.telefono) + ')' : '') + ' · ' : '') + (s.pedido ? 'Pedido #' + escaparHtml(s.pedido) + ' · ' : '') + escaparHtml(s.fecha.slice(0, 10)) + (s.vendedor ? ' · ' + escaparHtml(s.vendedor) : '') + '<br>' +
-          (s.proveedor ? 'Proveedor: ' + escaparHtml(s.proveedor) + '<br>' : '') + (vence ? vence + '<br>' : '') +
-          'Estado: <b>' + escaparHtml(EST_SERIE[s.estado] || s.estado) + '</b>' + (s.notas ? '<br><span style="color:#94a3b8;">' + escaparHtml(s.notas) + '</span>' : '') + '<br>' +
-          '<button style="' + PC_BTN + '" onclick="cambiarEstadoSerie(' + s.id + ')">Cambiar estado</button></div>';
-      }).join('') : '<div class="np-vacio">No hay registros.</div>';
-    }
-    async function guardarSerie() {
-      const campos = ['sku', 'serie', 'lote', 'cliente', 'telefono', 'pedido', 'garantiaMeses', 'proveedor', 'notas'];
-      const body = {};
-      campos.forEach(k => { body[k] = pcById('se_' + k).value.trim(); });
-      const msg = pcById('seMsg');
-      const r = await pcApi('/api/series', body);
-      msg.style.color = r.ok ? '#86efac' : '#fca5a5';
-      msg.textContent = r.ok ? 'Registrado.' : ((r.d && r.d.error) || 'No se pudo guardar.');
-      if (r.ok) { ['serie', 'lote', 'cliente', 'telefono', 'pedido', 'notas'].forEach(k => { pcById('se_' + k).value = ''; }); cargarSeries(); }
-    }
-    async function cambiarEstadoSerie(id) {
-      const claves = Object.keys(EST_SERIE);
-      const n = parseInt(prompt('Nuevo estado:\n' + claves.map((k, i) => (i + 1) + ') ' + EST_SERIE[k]).join('\n')), 10);
-      if (!(n >= 1 && n <= claves.length)) return;
-      const nota = prompt('Nota (opcional):', '') || '';
-      const r = await pcApi('/api/series/' + id + '/estado', { estado: claves[n - 1], nota: nota });
-      if (!r.ok) mostrarBanner((r.d && r.d.error) || 'No se pudo cambiar.', 4000);
-      cargarSeries();
     }
 
     // ---- Roles dentro de la ventana de permisos ----
@@ -9398,7 +9390,6 @@ $htmlVendedor = @'
   body.modoPOS #posFiltros { display:flex; }
   body.autoservicio #notaPedido, body.modoCliente #notaPedido, body.sin-mensajes #notaPedido { display:none !important; }
   body.autoservicio #clienteNombrePedido, body.modoCliente #clienteNombrePedido { display:none !important; }
-  body.sin-series .btn-serie { display:none !important; }
   body.sin-verStock #btnDescargarStock { display:none !important; }
   #estadoCatalogo { font-size:13px; color:#16a34a; margin-bottom:8px; font-weight:600; }
   #estadoCatalogo.error { color:#991b1b; }
@@ -9439,6 +9430,7 @@ $htmlVendedor = @'
   .mp-acciones button, .mp-acciones select { flex:1; min-width:90px; padding:8px 6px; border-radius:7px; border:none; font-size:12px; font-weight:600; cursor:pointer; }
   .mp-btn-cobrar { background:#16a34a; color:#fff; }
   .mp-btn-imprimir { background:#475569; color:#fff; }
+  .mp-ficha-axis { display:inline-block; background:#dcfce7; color:#166534; border:1px solid #86efac; border-radius:999px; padding:2px 10px; font-size:12px; font-weight:700; margin:2px 0 6px; }
   .mp-btn-editar { background:#2563eb; color:#fff; }
   .mp-btn-cancelar { background:#b91c1c; color:#fff; }
   .mp-select { border:1px solid var(--borde); background:var(--input-bg); color:var(--texto); }
@@ -10943,31 +10935,6 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
       } catch (e) {}
     }
 
-    // ---- Garantias: registrar numero de serie / lote de un pedido ----
-    async function registrarSerieMP(id) {
-      try {
-        const lista = await (await fetch('/api/pedidos')).json();
-        const p = lista.find(x => x.id === id);
-        if (!p) { alert('No encontre ese pedido.'); return; }
-        const items = p.items || [];
-        let it = items[0];
-        if (items.length > 1) {
-          const n = parseInt(prompt('Cual producto? Escribe el numero:\n' + items.map((x, i) => (i + 1) + ') ' + x.nombre).join('\n')), 10);
-          if (!(n >= 1 && n <= items.length)) return;
-          it = items[n - 1];
-        }
-        if (!it) return;
-        const serie = (prompt('Numero de serie de ' + it.nombre + ' (vacio si solo hay lote):') || '').trim();
-        const lote = (prompt('Lote (opcional):') || '').trim();
-        if (!serie && !lote) return;
-        const meses = parseInt(prompt('Meses de garantia (0 si no tiene):', '12'), 10) || 0;
-        const res = await fetch('/api/series', { method: 'POST', body: JSON.stringify({ sku: it.sku, producto: it.nombre, serie: serie, lote: lote, pedido: p.id, cliente: p.clienteNombre || '', garantiaMeses: meses, vendedor: (nombreInput.value || '').trim() }) });
-        const d = await res.json().catch(() => null);
-        if (!res.ok || !d || !d.ok) { alert((d && d.error) || 'No se pudo registrar.'); return; }
-        mostrarMensaje('Serie / lote registrado.', true);
-      } catch (e) { alert('No se pudo registrar (revisa la conexion con la PC).'); }
-    }
-
     // ---- Fotos locales en este telefono (sin pasar por la PC) ----
     // Lector de .zip minimo en JS puro (sin librerias externas: el .zip que
     // genera la app del catalogo no usa zip64 ni contraseña, asi que con
@@ -12183,7 +12150,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
     }
 
     function firmaMP(p) {
-      return [p.id, p.estado, p.metodoPago || '', p.totalCobrado, p.totalProductos].join('|');
+      return [p.id, p.estado, p.metodoPago || '', p.totalCobrado, p.totalProductos, p.ventaAxis || ''].join('|');
     }
 
     async function cargarMisPedidos(auto) {
@@ -12284,7 +12251,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
       const horaCorta = (p.hora || '').slice(11);
       let totalTxt = '$' + total.toFixed(2);
       if (p.estado === 'cobrado' && p.metodoPago) totalTxt += ' — ' + p.metodoPago;
-      let acciones = '<button class="mp-btn-imprimir" onclick="imprimirMP(' + p.id + ')">Reimprimir</button><button class="mp-btn-imprimir" onclick="enviarReciboPdf(' + p.id + ')">Recibo PDF</button><button class="mp-btn-imprimir btn-serie" onclick="registrarSerieMP(' + p.id + ')">N&deg; serie</button>';
+      let acciones = '<button class="mp-btn-imprimir" onclick="imprimirMP(' + p.id + ')">Reimprimir</button><button class="mp-btn-imprimir" onclick="enviarReciboPdf(' + p.id + ')">Recibo PDF</button>';
       if (p.estado === 'pendiente') {
         const elegido = metodoMP[p.id] || p.metodoPago || 'Efectivo';
         const opt = (v, t) => '<option value="' + v + '"' + (elegido === v ? ' selected' : '') + '>' + t + '</option>';
@@ -12314,6 +12281,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
         '</div>';
       return '<div class="mp-card" data-sig="' + firmaMP(p) + '">' +
         '<div class="mp-top"><span>Folio #' + p.id + ' — ' + horaCorta + '</span><span class="mp-estado ' + p.estado + '">' + p.estado.toUpperCase() + '</span></div>' +
+        (p.ventaAxis ? '<div class="mp-ficha-axis">&#10003; Confirmado en AxisPOS &middot; venta #' + escaparHtml(String(p.ventaAxis)) + '</div>' : '') +
         '<div class="mp-total" id="mp-total-' + p.id + '">' + totalTxt + '</div>' +
         (p.estado === 'pendiente' ? ('<div data-qrpago="1" id="mp-qr-' + p.id + '" style="text-align:center; display:' + ((((metodoMP[p.id] || p.metodoPago) === 'Transferencia') && qrPago.length) ? 'block' : 'none') + ';">' + htmlQrPago() + '</div>') : '') +
         (p.clienteNombre ? '<div style="font-size:12px; color:#0369a1; margin-bottom:4px;">Cliente: ' + escaparHtml(p.clienteNombre) + '</div>' : '') +
@@ -12426,7 +12394,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
     // ---- Permisos que la PC le da a este vendedor (que puede hacer y a donde entrar) ----
     window.__permisos = {};
     let permisosFirma = '';
-    const CLAVES_PERMISOS = ['crearPedidos', 'cobrar', 'cancelar', 'editar', 'imprimir', 'descuentos', 'verStock', 'misPedidos', 'ajustes', 'modoCliente', 'asignados', 'notificaciones', 'mensajes', 'venderBajoCosto', 'fiado', 'series'];
+    const CLAVES_PERMISOS = ['crearPedidos', 'cobrar', 'cancelar', 'editar', 'imprimir', 'descuentos', 'verStock', 'misPedidos', 'ajustes', 'modoCliente', 'asignados', 'notificaciones', 'mensajes', 'venderBajoCosto'];
     function puede(k) { return !window.__permisos || window.__permisos[k] !== false; }
     function aplicarPermisos(p) {
       window.__permisos = p || {};
@@ -13093,7 +13061,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
       const fecha = esHoy ? String(p.hora || '').slice(11, 16) : String(p.hora || '').slice(5, 16);
       const horaTxt = esHoy ? fecha : fecha.replace('-', '/');
       let acciones = '';
-      if (esHoy) acciones += '<button class="mp-btn-imprimir" onclick="imprimirMP(' + p.id + ')">Reimprimir</button><button class="mp-btn-imprimir" onclick="enviarReciboPdf(' + p.id + ')">Recibo PDF</button><button class="mp-btn-imprimir btn-serie" onclick="registrarSerieMP(' + p.id + ')">N&deg; serie</button>';
+      if (esHoy) acciones += '<button class="mp-btn-imprimir" onclick="imprimirMP(' + p.id + ')">Reimprimir</button><button class="mp-btn-imprimir" onclick="enviarReciboPdf(' + p.id + ')">Recibo PDF</button>';
       if (quedaPorDevolver) acciones += '<button class="mp-btn-editar" onclick="devolverPOS(\'' + key + '\')">Devolver</button>';
       const itemsHtml =
         '<button class="mp-btn-items" id="mp-btnitems-' + key + '" onclick="toggleItemsMP(\'' + key + '\')">' +
@@ -15717,16 +15685,57 @@ function Leer-CajaAxis([string]$desde, [string]$hasta, [string]$usuario, [bool]$
     }
 }
 
+function Texto-SqlVentasPiso([string]$colSku, [int]$piso, [int]$d) {
+    $dPre = $d + 2
+    return "SELECT g.$colSku, ROUND(SUM(CASE WHEN o.OperType = 34 OR o.Qtty < 0 OR o.Sign > 0 THEN -ABS(o.Qtty) ELSE ABS(o.Qtty) END), 4) FROM operations o JOIN goods g ON g.ID = o.GoodID WHERE o.OperType IN (2, 34) AND o.Sign <> 0 AND o.Acct > 0 AND o.ObjectID = $piso AND o.Timestamp >= DATE_SUB(NOW(), INTERVAL $dPre DAY) AND IF(o.UserRealTime IS NULL OR o.UserRealTime < '2000-01-01', o.Timestamp, o.UserRealTime) >= DATE_SUB(NOW(), INTERVAL $d DAY) GROUP BY g.ID, g.$colSku"
+}
+
+# Unidades vendidas por SKU en el piso en los ultimos d dias (las devoluciones restan).
+function Leer-VentasPisoMapa([string]$colSku, [int]$piso, [int]$d) {
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $mapa = @{}
+    $texto = Ejecutar-ConsultaAxis (Texto-SqlVentasPiso $colSku $piso $d)
+    foreach ($linea in ($texto -split "`n")) {
+        $linea = $linea.TrimEnd("`r")
+        if ([string]::IsNullOrWhiteSpace($linea)) { continue }
+        $f = $linea -split "`t"
+        if ($f.Count -lt 2) { continue }
+        $sku = ([string]$f[0]).Trim()
+        if ([string]::IsNullOrWhiteSpace($sku) -or $sku -eq 'NULL') { continue }
+        $vq = 0.0
+        [void][double]::TryParse([string]$f[1], [System.Globalization.NumberStyles]::Float, $inv, [ref]$vq)
+        $mapa[$sku] = $vq
+    }
+    return $mapa
+}
+
+# Que bajar de los almacenes al piso. Cuenta lo que se vende (con su tendencia reciente) y, si el producto
+# tiene un minimo propio o de AxisPOS, tambien ese minimo. Reparte lo que hay que bajar entre los almacenes
+# de origen (en el orden en que se marcaron) y devuelve ademas lo mas vendido y lo que no se mueve.
 function Calcular-Reposicion([int]$piso, $origenes, [int]$dias, [int]$cobertura) {
     $c = $global:configAxis
     $colSku = [string]$c.columnaSku
     if (@('Code','BarCode1','ID') -notcontains $colSku) { throw "columnaSku invalida (usa Code, BarCode1 o ID)." }
     $inv = [System.Globalization.CultureInfo]::InvariantCulture
-    $listaOrigen = (@($origenes) | ForEach-Object { [string][int]$_ }) -join ','
+    $origList = @(@($origenes) | ForEach-Object { [int]$_ })
+    $listaOrigen = ($origList | ForEach-Object { [string]$_ }) -join ','
     $todos = [string]$piso + ',' + $listaOrigen
-    $diasPre = $dias + 2
 
-    # 1) Existencia de cada producto en el piso y en los almacenes de origen.
+    # Nombres de los almacenes
+    $nombresAlm = @{}
+    try {
+        $tN = Ejecutar-ConsultaAxis "SELECT ID, Name FROM objects WHERE ID IN ($todos)"
+        foreach ($lin in ($tN -split "`n")) {
+            $lin = $lin.TrimEnd("`r")
+            if ([string]::IsNullOrWhiteSpace($lin)) { continue }
+            $ff = $lin -split "`t"
+            $idN = 0
+            if (($ff.Count -ge 2) -and [int]::TryParse(([string]$ff[0]).Trim(), [ref]$idN)) { $nombresAlm[$idN] = (Texto-LimpioAxis ([string]$ff[1])) }
+        }
+    } catch { }
+    $nombreDe = { param($id) if ($nombresAlm.ContainsKey([int]$id)) { return [string]$nombresAlm[[int]$id] } else { return "" } }
+
+    # 1) Existencia de cada producto en el piso y en CADA almacen de origen.
     $sql1 = "SELECT g.$colSku, g.Name, s.ObjectID, ROUND(SUM(s.Qtty), 4) FROM goods g JOIN store s ON s.GoodID = g.ID WHERE g.Deleted = 0 AND TRIM(g.Name) <> '' AND s.ObjectID IN ($todos) GROUP BY g.ID, g.$colSku, g.Name, s.ObjectID"
     $texto1 = Ejecutar-ConsultaAxis $sql1
     $prods = @{}
@@ -15742,38 +15751,82 @@ function Calcular-Reposicion([int]$piso, $origenes, [int]$dias, [int]$cobertura)
         $qty = 0.0
         [void][double]::TryParse([string]$f[3], [System.Globalization.NumberStyles]::Float, $inv, [ref]$qty)
         if (-not $prods.ContainsKey($sku)) {
-            $prods[$sku] = [pscustomobject]@{ sku = $sku; nombre = (Texto-LimpioAxis ([string]$f[1])); piso = 0.0; origen = 0.0; vendido = 0.0 }
+            $prods[$sku] = [pscustomobject]@{ sku = $sku; nombre = (Texto-LimpioAxis ([string]$f[1])); piso = 0.0; origen = 0.0; vendido = 0.0; reciente = 0.0; alm = @{} }
         }
-        if ($obj -eq $piso) { $prods[$sku].piso = [double]$prods[$sku].piso + $qty } else { $prods[$sku].origen = [double]$prods[$sku].origen + $qty }
+        if ($obj -eq $piso) {
+            $prods[$sku].piso = [double]$prods[$sku].piso + $qty
+        } else {
+            $prods[$sku].origen = [double]$prods[$sku].origen + $qty
+            $prods[$sku].alm[$obj] = [double]$prods[$sku].alm[$obj] + $qty
+        }
     }
 
-    # 2) Lo vendido en el piso en los ultimos dias. Las devoluciones (tipo 34 en esta base) restan.
-    $sql2 = "SELECT g.$colSku, ROUND(SUM(CASE WHEN o.OperType = 34 OR o.Qtty < 0 OR o.Sign > 0 THEN -ABS(o.Qtty) ELSE ABS(o.Qtty) END), 4) FROM operations o JOIN goods g ON g.ID = o.GoodID WHERE o.OperType IN (2, 34) AND o.Sign <> 0 AND o.Acct > 0 AND o.ObjectID = $piso AND o.Timestamp >= DATE_SUB(NOW(), INTERVAL $diasPre DAY) AND IF(o.UserRealTime IS NULL OR o.UserRealTime < '2000-01-01', o.Timestamp, o.UserRealTime) >= DATE_SUB(NOW(), INTERVAL $dias DAY) GROUP BY g.ID, g.$colSku"
-    $texto2 = Ejecutar-ConsultaAxis $sql2
-    foreach ($linea in ($texto2 -split "`n")) {
-        $linea = $linea.TrimEnd("`r")
-        if ([string]::IsNullOrWhiteSpace($linea)) { continue }
-        $f = $linea -split "`t"
-        if ($f.Count -lt 2) { continue }
-        $sku = ([string]$f[0]).Trim()
-        if (-not $prods.ContainsKey($sku)) { continue }
-        $vq = 0.0
-        [void][double]::TryParse([string]$f[1], [System.Globalization.NumberStyles]::Float, $inv, [ref]$vq)
-        $prods[$sku].vendido = $vq
+    # 2) Ventas del piso en el periodo y, para ver la tendencia, en los ultimos 7 dias.
+    $vMapa = Leer-VentasPisoMapa $colSku $piso $dias
+    foreach ($k in @($vMapa.Keys)) { if ($prods.ContainsKey($k)) { $prods[$k].vendido = [double]$vMapa[$k] } }
+    $usaTendencia = ($dias -ge 14)
+    if ($usaTendencia) {
+        try {
+            $rMapa = Leer-VentasPisoMapa $colSku $piso 7
+            foreach ($k in @($rMapa.Keys)) { if ($prods.ContainsKey($k)) { $prods[$k].reciente = [double]$rMapa[$k] } }
+        } catch { $usaTendencia = $false }
     }
 
-    # 3) Cuanto conviene bajar: lo que se vende en "cobertura" dias, menos lo que ya hay en el piso, sin pasar de lo que hay en el almacen.
+    # 3) Minimos explicitos (propios o de AxisPOS) del catalogo
+    $catPorSku = @{}
+    foreach ($pc in $global:catalogo) { if ($pc.sku) { $catPorSku[[string]$pc.sku] = $pc } }
+
+    # 4) Calculo por producto
     $items = New-Object System.Collections.ArrayList
+    $conVentas = New-Object System.Collections.ArrayList
+    $sinMov = New-Object System.Collections.ArrayList
     foreach ($p in $prods.Values) {
-        $vend = [double]$p.vendido
+        $vend = [math]::Max(0.0, [double]$p.vendido)
         $org = [double]$p.origen
-        if (($vend -le 0) -or ($org -lt 1)) { continue }
         $pisoStock = [math]::Max(0.0, [double]$p.piso)
         $porDia = $vend / $dias
-        $falta = ($porDia * $cobertura) - $pisoStock
+        $ritmo = $porDia
+        $tend = ""
+        if ($usaTendencia -and ($vend -gt 0)) {
+            $rec = [math]::Max(0.0, [double]$p.reciente) / 7
+            $ritmo = (0.6 * $rec) + (0.4 * $porDia)
+            if ($porDia -gt 0) {
+                $ratio = $rec / $porDia
+                if ($ratio -ge 1.25) { $tend = "sube" } elseif ($ratio -le 0.75) { $tend = "baja" } else { $tend = "estable" }
+            }
+        }
+        $minimo = 0.0
+        if ($catPorSku.ContainsKey([string]$p.sku)) {
+            $pcat = $catPorSku[[string]$p.sku]
+            if ((Origen-Minimo $pcat) -ne "general") { $minimo = [double](Minimo-Efectivo $pcat) }
+        }
+        $fichaP = @{ sku = [string]$p.sku; nombre = [string]$p.nombre; vendido = [math]::Round($vend, 2); porDia = [math]::Round($porDia, 2); piso = [math]::Round($pisoStock, 2); origen = [math]::Round($org, 2); diasPiso = $(if ($ritmo -gt 0) { [math]::Round($pisoStock / $ritmo, 1) } else { $null }); bajar = 0.0 }
+        if ($vend -gt 0) { [void]$conVentas.Add($fichaP) }
+        elseif (($pisoStock + $org) -ge 1) { [void]$sinMov.Add($fichaP) }
+        if ($org -lt 1) { continue }
+        $demanda = [math]::Ceiling($ritmo * $cobertura)
+        $objetivo = [math]::Max($demanda, $minimo)
+        $falta = $objetivo - $pisoStock
         if ($falta -le 0) { continue }
+        $porVentas = ($demanda -gt $pisoStock)
+        $porMin = (($minimo -gt 0) -and ($pisoStock -lt $minimo))
+        $razon = "ventas"
+        if ($porVentas -and $porMin) { $razon = "ambos" } elseif ($porMin) { $razon = "minimo" }
         $sug = [math]::Min([math]::Ceiling($falta), [math]::Floor($org))
         if ($sug -lt 1) { continue }
+        # Reparto entre los almacenes de origen, en el orden elegido
+        $resta = [double]$sug
+        $detalle = New-Object System.Collections.ArrayList
+        foreach ($oid in $origList) {
+            $st = 0.0
+            if ($p.alm.ContainsKey($oid)) { $st = [double]$p.alm[$oid] }
+            if ($st -lt 1) { continue }
+            $toma = [math]::Min([math]::Floor($st), $resta)
+            if ($toma -lt 0) { $toma = 0.0 }
+            $resta = $resta - $toma
+            [void]$detalle.Add([pscustomobject]@{ id = [int]$oid; nombre = (& $nombreDe $oid); stock = [math]::Round($st, 2); bajar = [double]$toma })
+        }
+        $fichaP.bajar = [double]$sug
         [void]$items.Add([pscustomobject]@{
             sku = [string]$p.sku
             nombre = [string]$p.nombre
@@ -15781,12 +15834,58 @@ function Calcular-Reposicion([int]$piso, $origenes, [int]$dias, [int]$cobertura)
             origen = [math]::Round($org, 2)
             vendido = [math]::Round($vend, 2)
             porDia = [math]::Round($porDia, 2)
-            diasPiso = [math]::Round($pisoStock / $porDia, 1)
+            ritmo = [math]::Round($ritmo, 2)
+            tendencia = $tend
+            diasPiso = $fichaP.diasPiso
+            minimo = $minimo
+            razon = $razon
+            clase = ""
             bajar = [double]$sug
+            almacenes = @($detalle.ToArray())
         })
     }
-    $orden = @($items | Sort-Object @{ Expression = { [double]$_.diasPiso } }, @{ Expression = { [double]$_.vendido }; Descending = $true } | Select-Object -First 200)
-    return $orden
+
+    # 5) Clasificacion por ventas: A = lo que da el 80% de las unidades vendidas, B = hasta el 95%, C = el resto.
+    $ordV = @($conVentas | Sort-Object -Property @{ Expression = { [double]$_.vendido } } -Descending)
+    $totalV = 0.0
+    foreach ($x in $ordV) { $totalV += [double]$x.vendido }
+    $claseSku = @{}
+    $acum = 0.0
+    foreach ($x in $ordV) {
+        $antes = $acum
+        $acum += [double]$x.vendido
+        if ($antes -lt (0.8 * $totalV)) { $claseSku[[string]$x.sku] = "A" } elseif ($antes -lt (0.95 * $totalV)) { $claseSku[[string]$x.sku] = "B" } else { $claseSku[[string]$x.sku] = "C" }
+    }
+    foreach ($it in $items) { if ($claseSku.ContainsKey([string]$it.sku)) { $it.clase = [string]$claseSku[[string]$it.sku] } }
+
+    # 6) Resumen y reparto por almacen
+    $porAlm = @{}
+    foreach ($oid in $origList) { $porAlm[$oid] = @{ unidades = 0.0; productos = 0 } }
+    $uniBajar = 0.0
+    foreach ($it in $items) {
+        $uniBajar += [double]$it.bajar
+        foreach ($a in @($it.almacenes)) {
+            if ([double]$a.bajar -gt 0) {
+                $porAlm[[int]$a.id].unidades = [double]$porAlm[[int]$a.id].unidades + [double]$a.bajar
+                $porAlm[[int]$a.id].productos = [int]$porAlm[[int]$a.id].productos + 1
+            }
+        }
+    }
+    $porAlmLista = @($origList | ForEach-Object { [pscustomobject]@{ id = [int]$_; nombre = (& $nombreDe $_); unidades = [double]$porAlm[$_].unidades; productos = [int]$porAlm[$_].productos } })
+    $resumen = @{
+        productosABajar = $items.Count
+        unidadesABajar = [math]::Round($uniBajar, 2)
+        productosConVentas = $conVentas.Count
+        unidadesVendidas = [math]::Round($totalV, 2)
+        sinMovimiento = $sinMov.Count
+        pisoNombre = (& $nombreDe $piso)
+        porAlmacen = $porAlmLista
+    }
+    $masVendidos = @($ordV | Select-Object -First 10)
+    $menosVendidos = @($ordV | Where-Object { ([double]$_.piso + [double]$_.origen) -ge 1 } | Sort-Object -Property @{ Expression = { [double]$_.vendido } } | Select-Object -First 10)
+    $sinMovLista = @($sinMov | Sort-Object -Property @{ Expression = { [double]$_.piso + [double]$_.origen } } -Descending | Select-Object -First 40)
+    $orden = @($items | Sort-Object @{ Expression = { if ($null -eq $_.diasPiso) { 99999 } else { [double]$_.diasPiso } } }, @{ Expression = { [double]$_.vendido }; Descending = $true } | Select-Object -First 200)
+    return @{ items = $orden; resumen = $resumen; masVendidos = $masVendidos; menosVendidos = $menosVendidos; sinMovimiento = $sinMovLista }
 }
 
 # ------------------------------------------------------------------
@@ -16318,13 +16417,13 @@ while ($listener.IsListening) {
                 $enCache = $null
                 if ($global:reposCache.ContainsKey($claveR)) { $enCache = $global:reposCache[$claveR] }
                 if (($null -ne $enCache) -and (([string]$request.QueryString["fresco"]) -ne "1") -and (($ahoraR - $enCache.hora).TotalSeconds -lt 300)) {
-                    Enviar-Json $context $enCache.resp
+                    Enviar-Json $context $enCache.resp 200 8
                 } else {
-                    $filasR = Calcular-Reposicion $pisoQ @($origQ) $diasQ $cobQ
-                    $respR = @{ ok = $true; piso = $pisoQ; origen = @($origQ); dias = $diasQ; cobertura = $cobQ; generado = $ahoraR.ToString("yyyy-MM-dd HH:mm:ss"); items = @($filasR) }
+                    $calcR = Calcular-Reposicion $pisoQ @($origQ) $diasQ $cobQ
+                    $respR = @{ ok = $true; piso = $pisoQ; origen = @($origQ); dias = $diasQ; cobertura = $cobQ; generado = $ahoraR.ToString("yyyy-MM-dd HH:mm:ss"); items = @($calcR.items); resumen = $calcR.resumen; masVendidos = @($calcR.masVendidos); menosVendidos = @($calcR.menosVendidos); sinMovimiento = @($calcR.sinMovimiento) }
                     if ($global:reposCache.Count -gt 20) { $global:reposCache = @{} }
                     $global:reposCache[$claveR] = @{ hora = $ahoraR; resp = $respR }
-                    Enviar-Json $context $respR
+                    Enviar-Json $context $respR 200 8
                 }
             } catch {
                 Enviar-Json $context @{ ok = $false; error = [string]$_.Exception.Message }
@@ -16872,7 +16971,7 @@ while ($listener.IsListening) {
                     $manNuevo = @{}
                     if ($dataCo.manual) {
                         foreach ($pp in $dataCo.manual.PSObject.Properties) {
-                            $vv = Fiado-ADouble $pp.Value
+                            $vv = Texto-ADouble $pp.Value
                             if ($vv -gt 0 -and ([string]$pp.Name).Trim()) { $manNuevo[([string]$pp.Name).Trim()] = $vv }
                         }
                     }
@@ -16921,7 +17020,7 @@ while ($listener.IsListening) {
             } else {
                 $descRol = $null
                 if ($dataRol.PSObject.Properties.Name -contains 'descuentoMaxPct' -and "$($dataRol.descuentoMaxPct)" -ne "") {
-                    $dv = Fiado-ADouble $dataRol.descuentoMaxPct
+                    $dv = Texto-ADouble $dataRol.descuentoMaxPct
                     if ($dv -ge 0 -and $dv -le 100) { $descRol = $dv }
                 }
                 Aplicar-Rol $vendRol ([string]$dataRol.rol) $descRol
@@ -16981,7 +17080,7 @@ while ($listener.IsListening) {
                 if ($vel -gt 0) { $diasRest = [math]::Round($stockC / $vel, 1) }
                 $provC = ""
                 if ($skC -and $global:proveedores.porSku.ContainsKey($skC)) { $provC = [string]$global:proveedores.porSku[$skC] }
-                [void]$filasC.Add([pscustomobject]@{ sku = $skC; nombre = [string]$p.nombre; stock = $stockC; minimo = $minC; velDia = [math]::Round($vel, 2); diasRestantes = $diasRest; sugerido = $sug; costo = (Obtener-Costo $skC); proveedor = $provC })
+                [void]$filasC.Add([pscustomobject]@{ sku = $skC; nombre = [string]$p.nombre; stock = $stockC; minimo = $minC; origenMin = (Origen-Minimo $p); velDia = [math]::Round($vel, 2); diasRestantes = $diasRest; sugerido = $sug; costo = (Obtener-Costo $skC); proveedor = $provC })
             }
             $ordC = @($filasC | Sort-Object -Property @{ Expression = { if ($null -eq $_.diasRestantes) { 99999 } else { [double]$_.diasRestantes } } }, @{ Expression = { [double]$_.stock } } | Select-Object -First 400)
             Enviar-Json $context @{ ok = $true; fuente = [string]$vC.fuente; dias = $diasC; cobertura = $cobC; items = $ordC; proveedores = @($global:proveedores.lista) } 200 5
@@ -17019,171 +17118,45 @@ while ($listener.IsListening) {
                 Enviar-Json $context @{ ok = $true; fuente = [string]$vE.fuente; dias = $diasE; total = $filasE.Count; capitalTotal = [math]::Round($capTotal, 2); sinCosto = $sinCosto; items = $ordE } 200 5
             }
 
-        } elseif ($method -eq "GET" -and $path -eq "/api/fiado") {
+        } elseif ($method -eq "GET" -and $path -eq "/api/minimos/axis") {
             if (-not (Es-PeticionPC $request)) {
                 Enviar-Json $context @{ ok = $false; error = "Solo desde la PC." } 403
             } else {
-                $ahoraF = Get-Date
-                $listaF = @($global:fiado.clientes | ForEach-Object {
-                    $diasF = $null
-                    $refF = if ($_.ultimoMov) { [string]$_.ultimoMov } else { [string]$_.creado }
-                    try { if ($refF) { $diasF = [int][math]::Floor(($ahoraF - [datetime]$refF).TotalDays) } } catch {}
-                    $limF = [double]$_.limite
-                    [pscustomobject]@{ id = [int]$_.id; nombre = [string]$_.nombre; telefono = [string]$_.telefono; limite = $limF; saldo = [double]$_.saldo; disponible = $(if ($limF -gt 0) { [math]::Round($limF - [double]$_.saldo, 2) } else { $null }); ultimoMov = [string]$_.ultimoMov; dias = $diasF }
-                } | Sort-Object -Property @{ Expression = { [double]$_.saldo } } -Descending)
-                $totF = 0.0; foreach ($c in $listaF) { $totF += [double]$c.saldo }
-                Enviar-Json $context @{ ok = $true; clientes = $listaF; total = [math]::Round($totF, 2) } 200 4
+                Enviar-Json $context @{ ok = $true; usar = [bool]$global:minAxis.usar; columna = [string]$global:minAxis.columna; ultima = [string]$global:minAxis.ultima; error = [string]$global:minAxis.error; n = [int]$global:minAxis.datos.Count; axisActivo = [bool]$global:configAxis.activo } 200 4
             }
 
-        } elseif ($method -eq "GET" -and $path -eq "/api/fiado/movimientos") {
+        } elseif ($method -eq "POST" -and $path -match "^/api/minimos/axis(/cargar)?$") {
+            $soloCargar = [bool]$Matches[1]
+            $dataMa = Leer-CuerpoJson $request
             if (-not (Es-PeticionPC $request)) {
                 Enviar-Json $context @{ ok = $false; error = "Solo desde la PC." } 403
             } else {
-                $idMv = 0; [void][int]::TryParse([string]$request.QueryString["id"], [ref]$idMv)
-                $cMv = Fiado-Cliente $idMv
-                if (-not $cMv) { Enviar-Json $context @{ ok = $false; error = "Cliente no encontrado." } 404 }
-                else {
-                    $movs = @($cMv.movimientos)
-                    [array]::Reverse($movs)
-                    Enviar-Json $context @{ ok = $true; nombre = [string]$cMv.nombre; saldo = [double]$cMv.saldo; movimientos = @($movs | Select-Object -First 100) } 200 4
-                }
-            }
-
-        } elseif ($method -eq "POST" -and $path -match "^/api/fiado/(cliente|cargo|abono|eliminar)$") {
-            $accionF = [string]$Matches[1]
-            $dataF = Leer-CuerpoJson $request
-            if (-not (Es-PeticionPC $request)) {
-                Enviar-Json $context @{ ok = $false; error = "Solo desde la PC." } 403
-            } elseif (-not $dataF) {
-                Enviar-Json $context @{ ok = $false; error = "Faltan datos." } 400
-            } elseif ($accionF -eq "cliente") {
-                $nomF = ([string]$dataF.nombre).Trim()
-                if (-not $nomF) { Enviar-Json $context @{ ok = $false; error = "Falta el nombre del cliente." } 400 }
-                else {
-                    $limNuevo = Fiado-ADouble $dataF.limite
-                    if ($limNuevo -lt 0) { $limNuevo = 0 }
-                    $cF = $null
-                    if ($dataF.id) { $cF = Fiado-Cliente ([int]$dataF.id) }
-                    if ($cF) {
-                        $cF.nombre = $nomF; $cF.telefono = ([string]$dataF.telefono).Trim(); $cF.limite = $limNuevo
-                    } else {
-                        $cF = [pscustomobject]@{ id = [int]$global:fiado.siguienteId; nombre = $nomF; telefono = ([string]$dataF.telefono).Trim(); limite = $limNuevo; saldo = 0.0; creado = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss"); ultimoMov = ""; movimientos = (New-Object System.Collections.ArrayList) }
-                        $global:fiado.siguienteId = [int]$global:fiado.siguienteId + 1
-                        [void]$global:fiado.clientes.Add($cF)
+                $errMa = ""
+                if ($dataMa -and (-not $soloCargar)) {
+                    $colMa = ([string]$dataMa.columna).Trim()
+                    if ($colMa -and ($colMa -notmatch '^[A-Za-z][A-Za-z0-9_]{0,40}$')) { $errMa = "Nombre de columna no valido (solo letras, numeros y guion bajo)." }
+                    else {
+                        if ($colMa -ne [string]$global:minAxis.columna) { $global:minAxis.datos = @{}; $global:minAxis.ultima = "" }
+                        $global:minAxis.columna = $colMa
+                        $global:minAxis.usar = [bool]$dataMa.usar
+                        Guardar-MinAxis
                     }
-                    Guardar-Fiado
-                    Enviar-Json $context @{ ok = $true; id = [int]$cF.id } 200
                 }
-            } else {
-                $cF = Fiado-Cliente ([int]$dataF.id)
-                $montoF = Fiado-ADouble $dataF.monto
-                if (-not $cF) {
-                    Enviar-Json $context @{ ok = $false; error = "Cliente no encontrado." } 404
-                } elseif ($accionF -eq "eliminar") {
-                    if ([math]::Abs([double]$cF.saldo) -gt 0.005) { Enviar-Json $context @{ ok = $false; error = "No se puede borrar: todavia debe $" + (Formato-Monto $cF.saldo) } 409 }
-                    else { [void]$global:fiado.clientes.Remove($cF); Guardar-Fiado; Enviar-Json $context @{ ok = $true } 200 }
-                } elseif ($montoF -le 0) {
-                    Enviar-Json $context @{ ok = $false; error = "El monto tiene que ser mayor que cero." } 400
-                } elseif ($accionF -eq "cargo") {
-                    $nuevoSaldo = [double]$cF.saldo + $montoF
-                    $excede = (([double]$cF.limite -gt 0) -and ($nuevoSaldo -gt ([double]$cF.limite + 0.005)))
-                    if ($excede -and (-not [bool]$dataF.forzar)) {
-                        Enviar-Json $context @{ ok = $false; excede = $true; error = ("Con este cargo " + $cF.nombre + " pasaria su limite de $" + (Formato-Monto $cF.limite) + " (quedaria debiendo $" + (Formato-Monto $nuevoSaldo) + ").") } 409
-                    } else {
-                        $cF.saldo = [math]::Round($nuevoSaldo, 2)
-                        $cF.ultimoMov = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
-                        [void]$cF.movimientos.Add([pscustomobject]@{ fecha = $cF.ultimoMov; tipo = "cargo"; monto = $montoF; concepto = ([string]$dataF.concepto).Trim(); pedido = ([string]$dataF.pedido).Trim(); saldo = $cF.saldo })
-                        Guardar-Fiado
-                        Registrar-Auditoria "PC" "fiado_cargo" ("Fiado a " + $cF.nombre + ": +$" + (Formato-Monto $montoF) + $(if ($excede) { " (AUTORIZADO sobre el limite)" } else { "" }) + " | saldo $" + (Formato-Monto $cF.saldo)) $null $montoF $excede "PC"
-                        Enviar-Json $context @{ ok = $true; saldo = $cF.saldo } 200
+                if ($errMa) {
+                    Enviar-Json $context @{ ok = $false; error = $errMa } 400
+                } elseif ($soloCargar -or ($dataMa -and [bool]$dataMa.cargar)) {
+                    try {
+                        $nMa = Actualizar-MinimosAxis
+                        $global:minAxisUltimoIntento = Get-Date
+                        Enviar-Json $context @{ ok = $true; n = [int]$nMa; columna = [string]$global:minAxis.columna } 200
+                    } catch {
+                        $global:minAxis.error = "$($_.Exception.Message)"
+                        try { Guardar-MinAxis } catch {}
+                        Enviar-Json $context @{ ok = $false; error = "$($_.Exception.Message)" } 400
                     }
                 } else {
-                    if ($montoF -gt ([double]$cF.saldo + 0.005)) {
-                        Enviar-Json $context @{ ok = $false; error = ("El abono es mayor que lo que debe (saldo $" + (Formato-Monto $cF.saldo) + ").") } 400
-                    } else {
-                        $cF.saldo = [math]::Round([double]$cF.saldo - $montoF, 2)
-                        $cF.ultimoMov = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
-                        [void]$cF.movimientos.Add([pscustomobject]@{ fecha = $cF.ultimoMov; tipo = "abono"; monto = $montoF; concepto = ([string]$dataF.concepto).Trim(); pedido = ""; saldo = $cF.saldo })
-                        Guardar-Fiado
-                        Registrar-Auditoria "PC" "fiado_abono" ("Abono de " + $cF.nombre + ": -$" + (Formato-Monto $montoF) + " | saldo $" + (Formato-Monto $cF.saldo)) $null $montoF $false "PC"
-                        Enviar-Json $context @{ ok = $true; saldo = $cF.saldo } 200
-                    }
+                    Enviar-Json $context @{ ok = $true } 200
                 }
-            }
-
-        } elseif ($method -eq "GET" -and $path -eq "/api/series") {
-            $qS = ([string]$request.QueryString["q"]).Trim().ToLowerInvariant()
-            $estS = [string]$request.QueryString["estado"]
-            $hoyS = (Get-Date).Date
-            $resS = New-Object System.Collections.ArrayList
-            $regsS = @($global:seriesReg.registros)
-            [array]::Reverse($regsS)
-            foreach ($r in $regsS) {
-                if ($estS -and ([string]$r.estado -ne $estS)) { continue }
-                if ($qS) {
-                    $blobS = (([string]$r.serie) + " " + ([string]$r.lote) + " " + ([string]$r.cliente) + " " + ([string]$r.producto) + " " + ([string]$r.sku) + " " + ([string]$r.pedido) + " " + ([string]$r.proveedor)).ToLowerInvariant()
-                    if (-not $blobS.Contains($qS)) { continue }
-                }
-                $venceEn = $null
-                try { if ($r.vence) { $venceEn = [int][math]::Floor(([datetime]$r.vence - $hoyS).TotalDays) } } catch {}
-                [void]$resS.Add([pscustomobject]@{ id = [int]$r.id; fecha = [string]$r.fecha; sku = [string]$r.sku; producto = [string]$r.producto; serie = [string]$r.serie; lote = [string]$r.lote; cliente = [string]$r.cliente; telefono = [string]$r.telefono; pedido = [string]$r.pedido; vendedor = [string]$r.vendedor; garantiaMeses = [int]$r.garantiaMeses; vence = [string]$r.vence; venceEn = $venceEn; proveedor = [string]$r.proveedor; estado = [string]$r.estado; notas = [string]$r.notas })
-                if ($resS.Count -ge 200) { break }
-            }
-            Enviar-Json $context @{ ok = $true; registros = @($resS) } 200 4
-
-        } elseif ($method -eq "POST" -and $path -eq "/api/series") {
-            $dataS = Leer-CuerpoJson $request
-            $serieS = if ($dataS) { ([string]$dataS.serie).Trim() } else { "" }
-            $loteS = if ($dataS) { ([string]$dataS.lote).Trim() } else { "" }
-            $skuS = if ($dataS) { ([string]$dataS.sku).Trim() } else { "" }
-            if (-not $dataS) {
-                Enviar-Json $context @{ ok = $false; error = "Faltan datos." } 400
-            } elseif ((-not $serieS) -and (-not $loteS)) {
-                Enviar-Json $context @{ ok = $false; error = "Escribe el numero de serie o el lote." } 400
-            } elseif ((-not $skuS) -and (-not ([string]$dataS.producto).Trim())) {
-                Enviar-Json $context @{ ok = $false; error = "Falta el producto (SKU o nombre)." } 400
-            } else {
-                $dupS = $null
-                if ($serieS) { $dupS = $global:seriesReg.registros | Where-Object { ([string]$_.serie).ToLowerInvariant() -eq $serieS.ToLowerInvariant() -and [string]$_.sku -eq $skuS } | Select-Object -First 1 }
-                if ($dupS) {
-                    Enviar-Json $context @{ ok = $false; error = ("Esa serie ya esta registrada" + $(if ($dupS.pedido) { " (pedido #" + $dupS.pedido + ")" } else { "" }) + ".") } 409
-                } else {
-                    $prodS = $null
-                    if ($skuS) { $prodS = $global:catalogo | Where-Object { $_.sku -eq $skuS } | Select-Object -First 1 }
-                    $nomS = ([string]$dataS.producto).Trim()
-                    if ((-not $nomS) -and $prodS) { $nomS = [string]$prodS.nombre }
-                    $mesesS = 0; try { $mm = [int]$dataS.garantiaMeses; if ($mm -ge 0 -and $mm -le 120) { $mesesS = $mm } } catch {}
-                    $ahoraS = Get-Date
-                    $venceS = if ($mesesS -gt 0) { $ahoraS.AddMonths($mesesS).ToString("yyyy-MM-dd") } else { "" }
-                    $quienS = if (Es-PeticionPC $request) { "PC" } else { ([string]$dataS.vendedor).Trim() }
-                    $regS = [pscustomobject]@{ id = [int]$global:seriesReg.siguienteId; fecha = $ahoraS.ToString("yyyy-MM-dd HH:mm:ss"); sku = $skuS; producto = $nomS; serie = $serieS; lote = $loteS; cliente = ([string]$dataS.cliente).Trim(); telefono = ([string]$dataS.telefono).Trim(); pedido = ([string]$dataS.pedido).Trim(); vendedor = $quienS; garantiaMeses = $mesesS; vence = $venceS; proveedor = ([string]$dataS.proveedor).Trim(); estado = "vendido"; notas = ([string]$dataS.notas).Trim(); historial = (New-Object System.Collections.ArrayList) }
-                    $global:seriesReg.siguienteId = [int]$global:seriesReg.siguienteId + 1
-                    [void]$global:seriesReg.registros.Add($regS)
-                    Guardar-Series
-                    $pedAud = $null
-                    if ($regS.pedido) { $pedAud = $regS.pedido }
-                    Registrar-Auditoria $quienS "series" ("Serie/lote registrado: " + $nomS + " | serie " + $serieS + " | lote " + $loteS + " | cliente " + $regS.cliente) $pedAud $null $false (Origen-Peticion $request)
-                    Enviar-Json $context @{ ok = $true; id = [int]$regS.id } 200
-                }
-            }
-
-        } elseif ($method -eq "POST" -and $path -match "^/api/series/(\d+)/estado$") {
-            $idSe = [int]$Matches[1]
-            $dataSe = Leer-CuerpoJson $request
-            $regSe = $global:seriesReg.registros | Where-Object { [int]$_.id -eq $idSe } | Select-Object -First 1
-            $nuevoEst = if ($dataSe) { [string]$dataSe.estado } else { "" }
-            if (-not (Es-PeticionPC $request)) {
-                Enviar-Json $context @{ ok = $false; error = "Solo desde la PC." } 403
-            } elseif (-not $regSe) {
-                Enviar-Json $context @{ ok = $false; error = "Registro no encontrado." } 404
-            } elseif (@("vendido", "devuelto", "garantia_proveedor", "reparado") -notcontains $nuevoEst) {
-                Enviar-Json $context @{ ok = $false; error = "Estado no valido." } 400
-            } else {
-                $regSe.estado = $nuevoEst
-                [void]$regSe.historial.Add([pscustomobject]@{ fecha = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss"); estado = $nuevoEst; nota = ([string]$dataSe.nota).Trim() })
-                Guardar-Series
-                Registrar-Auditoria "PC" "series" ("Serie " + $regSe.serie + " (" + $regSe.producto + ") -> " + $nuevoEst + $(if ($dataSe.nota) { ": " + [string]$dataSe.nota } else { "" })) $null $null $false "PC"
-                Enviar-Json $context @{ ok = $true } 200
             }
 
         } elseif ($method -eq "GET" -and $path -eq "/api/respaldo") {
@@ -18100,6 +18073,7 @@ while ($listener.IsListening) {
                     [pscustomobject]@{
                         sku = $skuR; nombre = $_.nombre; stock = $_.stock; minimo = $mm; sugerido = $sug
                         personalizado = [bool]($skuR -and $global:minimosStock.ContainsKey($skuR))
+                        origenMin = (Origen-Minimo $_)
                     }
                 })
             Enviar-Json $context @{ ok = $true; umbral = [int]$global:configApp.umbralStockBajo; items = $itemsReab } 200 5
