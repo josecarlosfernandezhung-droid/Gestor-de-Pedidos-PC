@@ -4390,6 +4390,8 @@ function Generar-TextoRecibo($p) {
         foreach ($l in @(Partir-Texto ([string]$it.nombre) $ancho)) { [void]$sb.AppendLine($l) }
         $detalle = "$(Formato-Cantidad $cant) x $(Formato-Monto $precioUnit) $(Formato-Monto $lineaTotal)"
         [void]$sb.AppendLine((Alinear-Der $detalle $ancho))
+        $serTk = @($it.series | Where-Object { $_ })
+        if ($serTk.Count -gt 0) { foreach ($lsn in @(Partir-Texto ("S/N: " + ($serTk -join ", ")) $ancho)) { [void]$sb.AppendLine($lsn) } }
     }
     if (-not $hayItems) { $subtotal = [double]$p.totalCobrado }
     $total = [math]::Round($subtotal, 2)
@@ -5567,6 +5569,125 @@ function Limpiar-TextoMensaje($t) {
 }
 
 # ------------------------------------------------------------------
+# NUMEROS DE SERIE Y GARANTIA (opcional)
+# El vendedor puede anotar (o escanear) el numero de serie de una herramienta ANTES de mandar el pedido.
+# Se guarda dentro de la propia linea del pedido (items[].series): no hay archivos nuevos ni pasos extra.
+# La garantia corre desde el cobro (o desde el pedido si aun no se cobra). Dias configurables (por defecto 7).
+# ------------------------------------------------------------------
+$garantiaCfgPath = Join-Path $scriptDir "garantia_config.json"
+$global:garantiaDias = 7
+function Cargar-GarantiaCfg {
+    try {
+        if (Test-Path -LiteralPath $garantiaCfgPath) {
+            $rawG = Get-Content $garantiaCfgPath -Raw -Encoding UTF8
+            if ($rawG -and $rawG.Trim().Length -gt 0) {
+                $dG = $rawG | ConvertFrom-Json
+                $nG = 0; try { $nG = [int]$dG.dias } catch { $nG = 0 }
+                if ($nG -ge 1 -and $nG -le 3650) { $global:garantiaDias = $nG }
+            }
+        }
+    } catch {}
+}
+function Guardar-GarantiaCfg {
+    try { Escribir-ArchivoConReintento -ruta $garantiaCfgPath -contenido (@{ dias = [int]$global:garantiaDias } | ConvertTo-Json) | Out-Null } catch {}
+}
+Cargar-GarantiaCfg
+
+function Series-DeTexto($texto) {
+    $res = New-Object System.Collections.ArrayList
+    foreach ($x in @(([string]$texto) -split '[,;\r\n\t ]+')) {
+        $s = ([string]$x).Trim().ToUpperInvariant()
+        if ($s.Length -eq 0) { continue }
+        if ($s.Length -gt 40) { $s = $s.Substring(0, 40) }
+        if ($res -notcontains $s) { [void]$res.Add($s) }
+    }
+    return @($res.ToArray())
+}
+
+# Pedido (no cancelado) que ya tiene esa serie para ese producto.
+function Serie-EnUso([string]$sku, [string]$serie) {
+    foreach ($pS in @($global:pedidos)) {
+        if (-not $pS -or [string]$pS.estado -eq "cancelado") { continue }
+        foreach ($itS in @($pS.items)) {
+            if (-not $itS) { continue }
+            if ([string]$itS.sku -ne $sku) { continue }
+            foreach ($sS in @($itS.series)) { if ([string]$sS -eq $serie) { return $pS } }
+        }
+    }
+    return $null
+}
+
+# Pasa "serieTxt" (lo que escribe/escanea el vendedor) a items[].series. Devuelve un texto de error o "".
+function Normalizar-SeriesItems($items) {
+    $vistas = @{}
+    foreach ($it in @($items)) {
+        if (-not $it) { continue }
+        $txt = ""
+        try { if ($it.PSObject.Properties['serieTxt']) { $txt = [string]$it.serieTxt } } catch {}
+        try { $it.PSObject.Properties.Remove('serieTxt') } catch {}
+        try { $it.PSObject.Properties.Remove('series') } catch {}
+        $ser = @(Series-DeTexto $txt)
+        if ($ser.Count -eq 0) { continue }
+        $cant = 1.0; try { $cant = [double]$it.cantidad } catch { $cant = 1.0 }
+        $maxS = [int][math]::Ceiling($cant)
+        if ($maxS -lt 1) { $maxS = 1 }
+        if ($ser.Count -gt $maxS) { return ("" + [string]$it.nombre + ": pusiste " + $ser.Count + " series para " + $maxS + " unidad(es).") }
+        $sk = [string]$it.sku
+        foreach ($s in $ser) {
+            $k = $sk + "|" + $s
+            if ($vistas.ContainsKey($k)) { return ("La serie " + $s + " esta repetida en este pedido.") }
+            $vistas[$k] = $true
+            $ya = Serie-EnUso $sk $s
+            if ($ya) { return ("La serie " + $s + " ya esta registrada en el pedido #" + $ya.id + " (" + ([string]$ya.hora).Substring(0, [math]::Min(10, ([string]$ya.hora).Length)) + "). Revisala.") }
+        }
+        $it | Add-Member -NotePropertyName series -NotePropertyValue $ser -Force
+    }
+    return ""
+}
+
+function Skus-ConSerie {
+    $h = @{}
+    foreach ($pS in @($global:pedidos)) {
+        if (-not $pS -or [string]$pS.estado -eq "cancelado") { continue }
+        foreach ($itS in @($pS.items)) {
+            if ($itS -and @($itS.series).Count -gt 0 -and @($itS.series)[0]) { $h[[string]$itS.sku] = $true }
+        }
+    }
+    return @($h.Keys)
+}
+
+function Buscar-Series([string]$q) {
+    $qq = ([string]$q).Trim().ToUpperInvariant()
+    $hoy = (Get-Date).Date
+    $res = New-Object System.Collections.ArrayList
+    $lista = @($global:pedidos | Sort-Object { [int]$_.id } -Descending)
+    foreach ($pS in $lista) {
+        if (-not $pS -or [string]$pS.estado -eq "cancelado") { continue }
+        foreach ($itS in @($pS.items)) {
+            if (-not $itS) { continue }
+            foreach ($sS in @($itS.series)) {
+                if (-not $sS) { continue }
+                $txt = (([string]$sS) + " " + [string]$itS.nombre + " " + [string]$itS.sku + " " + [string]$pS.clienteNombre + " " + [string]$pS.vendedor + " " + [string]$pS.id).ToUpperInvariant()
+                if ($qq -and ($txt.IndexOf($qq) -lt 0)) { continue }
+                $base = [string]$pS.hora
+                if ([string]$pS.estado -eq "cobrado" -and [string]$pS.horaCobro) { $base = [string]$pS.horaCobro }
+                $f0 = $hoy
+                try { $f0 = ([datetime]::ParseExact($base, "yyyy-MM-dd HH:mm:ss", [System.Globalization.CultureInfo]::InvariantCulture)).Date } catch {}
+                $vence = $f0.AddDays([int]$global:garantiaDias)
+                [void]$res.Add([pscustomobject]@{
+                    serie = [string]$sS; producto = [string]$itS.nombre; sku = [string]$itS.sku
+                    pedidoId = [int]$pS.id; fecha = $f0.ToString("yyyy-MM-dd"); cliente = [string]$pS.clienteNombre
+                    vendedor = [string]$pS.vendedor; estado = [string]$pS.estado
+                    vence = $vence.ToString("yyyy-MM-dd"); diasRestantes = [int]($vence - $hoy).TotalDays
+                })
+                if ($res.Count -ge 80) { return @($res.ToArray()) }
+            }
+        }
+    }
+    return @($res.ToArray())
+}
+
+# ------------------------------------------------------------------
 # HTML: Panel Receptor (se abre en la PC)
 # ------------------------------------------------------------------
 $htmlPC = @'
@@ -5574,6 +5695,7 @@ $htmlPC = @'
 <html lang="es">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Panel de Pedidos - Toto Tools</title>
 <link rel="manifest" href="/manifest-pc.json">
 <link rel="icon" href="/icon-pc-192.png">
@@ -5656,6 +5778,25 @@ $htmlPC = @'
       display: block; position: fixed; top:0; left:0; width:100%;
       background:#fff; color:#000; padding:24px;
     }
+  }
+
+  /* ── El Panel abierto desde un movil: se ajusta a la pantalla. En la PC no cambia nada (solo aplica a pantallas angostas). ── */
+  @media (max-width: 760px) {
+    body { padding: 10px; }
+    h1 { font-size: 18px; }
+    header { gap: 8px; margin-bottom: 10px; padding-bottom: 10px; }
+    .share { width: 100%; font-size: 12px; word-break: break-all; }
+    .catalogoInfo { margin-bottom: 10px; }
+    .toolbar { gap: 8px; margin-bottom: 12px; }
+    .toolbar .btn-nuevo-pedido { flex: 1 1 100%; }
+    #grid { grid-template-columns: 1fr; gap: 12px; }
+    .card { padding: 14px; }
+    input, select, textarea { font-size: 16px; }
+    button { min-height: 38px; }
+    #panelStockBajo { left: 8px !important; right: 8px !important; top: 56px !important; width: auto !important; max-width: none !important; }
+    [id$="Overlay"] { padding-left: 6px; padding-right: 6px; }
+    [id$="Overlay"] > div { width: 100% !important; max-width: 100% !important; max-height: 94vh !important; overflow: auto !important; padding: 16px !important; }
+    [id$="Overlay"] table { display: block; overflow-x: auto; max-width: 100%; }
   }
 </style>
 </head>
@@ -5765,6 +5906,8 @@ $htmlPC = @'
       <button class="btn-toggle" style="width:100%; margin-bottom:10px; text-align:left;" onclick="cerrarMenuPC(); abrirConsulta();">Consultar precio y stock (Alt+C)</button>
 
       <button class="btn-toggle" style="width:100%; margin-bottom:10px; text-align:left;" onclick="cerrarMenuPC(); abrirRepos();">Que bajar del almacen (Alt+B)</button>
+
+      <button class="btn-toggle" style="width:100%; margin-bottom:10px; text-align:left;" onclick="cerrarMenuPC(); abrirSeries();" title="Busca un numero de serie y mira si sigue en garantia">Series y garantia de lo vendido</button>
 
       <label style="font-size:14px; display:flex; align-items:center; gap:8px; margin-bottom:14px;" title="Se imprime como TOTAL USD en los recibos. Deja vacio o 0 para no imprimirlo.">Tasa USD: <input type="number" id="tasaDolar" min="0" step="any" placeholder="0" style="width:90px; padding:6px 8px; border-radius:6px; border:1px solid #334155; background:#0f172a; color:#e2e8f0;" onchange="guardarTasaDolar()"></label>
 
@@ -8445,6 +8588,43 @@ $htmlPC = @'
     const PC_CAJA = 'background:#0f172a; border:1px solid #334155; border-radius:8px; padding:9px 10px; margin-bottom:7px; font-size:13px; line-height:1.45;';
     const PC_AREA = 'width:100%; background:#0f172a; color:#e2e8f0; border:1px solid #334155; border-radius:8px; padding:8px; font-size:13px; margin-bottom:8px;';
 
+    // ---- Series y garantia (se llena desde el movil al armar el pedido) ----
+    let serTimer = null;
+    function abrirSeries() {
+      const c = pcModal('serOverlay', 'Series y garantia');
+      c.innerHTML = '<div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:8px;">' +
+        '<input id="serQ" type="text" placeholder="Serie, producto, cliente, vendedor o folio" oninput="clearTimeout(serTimer); serTimer=setTimeout(serBuscar,250)" style="flex:1; min-width:200px; background:#0f172a; color:#e2e8f0; border:1px solid #334155; border-radius:8px; padding:9px; font-size:14px;">' +
+        '<label style="font-size:12px; color:#94a3b8;">Garantia (dias) <input id="serDias" type="number" min="1" max="3650" style="width:64px; background:#0f172a; color:#e2e8f0; border:1px solid #334155; border-radius:6px; padding:5px;" onchange="serGuardarDias(this.value)"></label></div>' +
+        '<div id="serRes" style="font-size:13px; color:#94a3b8;">Cargando...</div>';
+      serBuscar();
+      setTimeout(function () { const q = document.getElementById('serQ'); if (q) q.focus(); }, 50);
+    }
+    async function serGuardarDias(v) {
+      const r = await pcApi('/api/series/config', { dias: Number(v) });
+      if (!r.ok) alert(r.d.error || 'No se pudo guardar.'); else serBuscar();
+    }
+    async function serBuscar() {
+      const q = (document.getElementById('serQ') || {}).value || '';
+      const r = await pcApi('/api/series/buscar?q=' + encodeURIComponent(q));
+      const cont = document.getElementById('serRes');
+      if (!cont) return;
+      if (!r.ok) { cont.textContent = r.d.error || 'No se pudo consultar.'; return; }
+      const dd = document.getElementById('serDias');
+      if (dd && document.activeElement !== dd) dd.value = r.d.dias;
+      const lista = r.d.items || [];
+      if (!lista.length) { cont.innerHTML = q ? 'Sin resultados.' : 'Aun no hay series registradas. Se anotan en el movil, en cada producto del pedido (opcional).'; return; }
+      cont.innerHTML = lista.map(function (x) {
+        let est, col;
+        if (x.estado !== 'cobrado') { est = 'Pedido sin cobrar'; col = '#94a3b8'; }
+        else if (x.diasRestantes >= 0) { est = 'En garantia hasta ' + x.vence + ' (' + (x.diasRestantes === 0 ? 'vence hoy' : 'quedan ' + x.diasRestantes + ' d') + ')'; col = '#86efac'; }
+        else { est = 'Garantia vencida el ' + x.vence + ' (hace ' + (-x.diasRestantes) + ' d)'; col = '#f87171'; }
+        const txt = 'Serie ' + x.serie + ' - ' + x.producto + ' - Pedido #' + x.pedidoId + ' (' + x.fecha + ')' + (x.cliente ? ' - ' + x.cliente : '');
+        return '<div style="' + PC_CAJA + '"><b style="color:#fff; font-size:14px;">' + escaparHtml(x.serie) + '</b> &middot; ' + escaparHtml(x.producto) +
+          '<br><span style="color:#94a3b8;">Pedido #' + x.pedidoId + ' &middot; ' + escaparHtml(x.fecha) + (x.cliente ? ' &middot; ' + escaparHtml(x.cliente) : '') + ' &middot; ' + escaparHtml(x.vendedor) + '</span>' +
+          '<br><span style="color:' + col + ';">' + est + '</span> <button style="' + PC_BTN + '" onclick="pcCopiar(' + escaparHtml(JSON.stringify(txt)).replace(/"/g, '&quot;') + ')">Copiar</button></div>';
+      }).join('');
+    }
+
     // ---- Auditoria ----
     const ACC_AUD = ['descuento', 'descuento_bloqueado', 'venta_bajo_costo', 'bajo_costo_bloqueado', 'anulacion', 'cambio_metodo', 'devolucion', 'permisos', 'roles', 'precio_catalogo', 'costos'];
     function abrirAuditoria() {
@@ -10849,52 +11029,151 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
     cargarSinonimos();
     setInterval(cargarSinonimos, 300000);
 
-    // ---- Recibo digital en PDF: se arma en el telefono con el mismo texto del ticket y se comparte
-    // (WhatsApp, correo, Drive...) con el menu de compartir de Android. ----
-    function pdfDesdeJpeg(jpg, w, h) {
-      const pw = Math.round(w * 0.5), ph = Math.round(h * 0.5);
+    // Recibo en PDF con el mismo diseno de la factura modelo: nombre del negocio arriba a la izquierda,
+    // logo a la derecha, linea de folio / fecha / status, tabla con Cantidad - Descripcion - Precio - SubTotal,
+    // total grande y el pie centrado. Se dibuja en el telefono (hoja A4) y se comparte como PDF.
+    function pdfDesdeJpegs(paginas) {
+      const PW = 595, PH = 842;
       const enc = new TextEncoder();
       const partes = []; const offs = []; let pos = 0;
       function add(x) { const b = (typeof x === 'string') ? enc.encode(x) : x; partes.push(b); pos += b.length; }
+      const n = paginas.length;
       add('%PDF-1.4\n');
       offs[1] = pos; add('1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n');
-      offs[2] = pos; add('2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n');
-      offs[3] = pos; add('3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ' + pw + ' ' + ph + '] /Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>\nendobj\n');
-      offs[4] = pos; add('4 0 obj\n<< /Type /XObject /Subtype /Image /Width ' + w + ' /Height ' + h + ' /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ' + jpg.length + ' >>\nstream\n');
-      add(jpg); add('\nendstream\nendobj\n');
-      const cont = 'q ' + pw + ' 0 0 ' + ph + ' 0 0 cm /Im0 Do Q';
-      offs[5] = pos; add('5 0 obj\n<< /Length ' + cont.length + ' >>\nstream\n' + cont + '\nendstream\nendobj\n');
+      offs[2] = pos; add('2 0 obj\n<< /Type /Pages /Kids [' + paginas.map(function (_, i) { return (3 + 3 * i) + ' 0 R'; }).join(' ') + '] /Count ' + n + ' >>\nendobj\n');
+      paginas.forEach(function (p, i) {
+        const po = 3 + 3 * i, io = 4 + 3 * i, co = 5 + 3 * i;
+        offs[po] = pos; add(po + ' 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ' + PW + ' ' + PH + '] /Resources << /XObject << /Im0 ' + io + ' 0 R >> >> /Contents ' + co + ' 0 R >>\nendobj\n');
+        offs[io] = pos; add(io + ' 0 obj\n<< /Type /XObject /Subtype /Image /Width ' + p.w + ' /Height ' + p.h + ' /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ' + p.jpg.length + ' >>\nstream\n');
+        add(p.jpg); add('\nendstream\nendobj\n');
+        const cont = 'q ' + PW + ' 0 0 ' + PH + ' 0 0 cm /Im0 Do Q';
+        offs[co] = pos; add(co + ' 0 obj\n<< /Length ' + cont.length + ' >>\nstream\n' + cont + '\nendstream\nendobj\n');
+      });
+      const total = 3 + 3 * n;
       const xref = pos;
-      let x = 'xref\n0 6\n0000000000 65535 f \n';
-      for (let i = 1; i <= 5; i++) x += String(offs[i]).padStart(10, '0') + ' 00000 n \n';
-      add(x + 'trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n' + xref + '\n%%EOF');
+      let x = 'xref\n0 ' + total + '\n0000000000 65535 f \n';
+      for (let i = 1; i < total; i++) x += String(offs[i]).padStart(10, '0') + ' 00000 n \n';
+      add(x + 'trailer\n<< /Size ' + total + ' /Root 1 0 R >>\nstartxref\n' + xref + '\n%%EOF');
       return new Blob(partes, { type: 'application/pdf' });
     }
+    function montoRecibo(n) {
+      n = Number(n) || 0;
+      const entero = Math.abs(n - Math.round(n)) < 0.005;
+      const s = (entero ? Math.round(n) : n).toFixed(entero ? 0 : 2).split('.');
+      s[0] = s[0].replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+      return s.join(',');
+    }
+    function cantidadRecibo(n) {
+      n = Number(n) || 0;
+      return (Math.abs(n - Math.round(n)) < 0.0005 ? String(Math.round(n)) : String(Math.round(n * 1000) / 1000).replace('.', ','));
+    }
+    function cargarImagenRecibo(src) {
+      return new Promise(function (ok, mal) { const im = new Image(); im.onload = function () { ok(im); }; im.onerror = mal; im.src = src; });
+    }
     async function reciboComoPdf(id) {
-      const res = await fetch('/api/pedidos/' + id + '/recibo-texto');
+      const res = await fetch('/api/pedidos/' + id + '/recibo-datos');
       const d = await res.json().catch(() => null);
       if (!res.ok || !d || !d.ok) throw new Error((d && d.error) || 'No se pudo obtener el recibo.');
-      const lineas = String(d.texto || '').replace(/\r/g, '').split('\n').filter(l => !/^\s*\[ (LOGO|QR[^\]]*)\]\s*$/.test(l));
-      while (lineas.length && !lineas[lineas.length - 1].trim()) lineas.pop();
-      while (lineas.length && !lineas[0].trim()) lineas.shift();
-      const cols = Math.max(Math.max(24, d.ancho || 32), ...lineas.map(l => l.length));
-      const fuente = 28, alto = Math.round(fuente * 1.4), margen = 36;
-      const fam = fuente + 'px "Courier New", Courier, monospace';
-      const medidor = document.createElement('canvas').getContext('2d');
-      medidor.font = fam;
-      const cw = medidor.measureText('M').width;
-      const W = Math.ceil(cw * cols + margen * 2), H = lineas.length * alto + margen * 2;
-      const cv = document.createElement('canvas');
-      cv.width = W; cv.height = H;
-      const ctx = cv.getContext('2d');
-      ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, W, H);
-      ctx.fillStyle = '#000000'; ctx.font = fam; ctx.textBaseline = 'top';
-      lineas.forEach((l, i) => ctx.fillText(l, margen, margen + i * alto));
-      const b64 = cv.toDataURL('image/jpeg', 0.92).split(',')[1];
-      const bin = atob(b64);
-      const bytes = new Uint8Array(bin.length);
-      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-      return pdfDesdeJpeg(bytes, W, H);
+      const neg = d.negocio || {};
+      const S = 2, DW = 900, DH = 1273, IZQ = 62, DER = 862;
+      const FUENTE = 'system-ui, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
+      const lienzos = [];
+      let cv = null, ctx = null;
+      function nuevaPagina() {
+        cv = document.createElement('canvas');
+        cv.width = DW * S; cv.height = DH * S;
+        ctx = cv.getContext('2d');
+        ctx.scale(S, S);
+        ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, DW, DH);
+        ctx.fillStyle = '#000000'; ctx.textBaseline = 'middle';
+        lienzos.push(cv);
+      }
+      function fuente(px, peso) { ctx.font = (peso || '400') + ' ' + px + 'px ' + FUENTE; }
+      function texto(t, x, y, px, alin, peso, color) {
+        fuente(px, peso); ctx.textAlign = alin || 'left'; ctx.fillStyle = color || '#000000'; ctx.fillText(t, x, y); ctx.fillStyle = '#000000';
+      }
+      function ancho(t, px, peso) { fuente(px, peso); return ctx.measureText(t).width; }
+      function linea(y, grosor) { ctx.fillStyle = '#000000'; ctx.fillRect(IZQ, y - grosor / 2, DER - IZQ, grosor); }
+      function partir(t, px, maxAncho, peso) {
+        const out = []; let actual = '';
+        String(t || '').split(/\s+/).forEach(function (pal) {
+          const prueba = actual ? actual + ' ' + pal : pal;
+          if (actual && ancho(prueba, px, peso) > maxAncho) { out.push(actual); actual = pal; } else actual = prueba;
+        });
+        if (actual) out.push(actual);
+        return out.length ? out : [''];
+      }
+      function encabezadoTabla(y) {
+        linea(y, 4);
+        texto('Cantidad', 139, y + 17, 22, 'center');
+        texto('Descripci\u00f3n', 215, y + 17, 22, 'left');
+        texto('Precio', 693, y + 17, 22, 'right');
+        texto('SubTotal', 853, y + 17, 22, 'right');
+        linea(y + 33, 3);
+        return y + 59;     // centro de la primera fila: 26 px bajo la linea fina
+      }
+
+      nuevaPagina();
+      // Logo a la derecha
+      if (d.logo) {
+        try {
+          const im = await cargarImagenRecibo(d.logo);
+          const caja = 262, r = Math.min(caja / im.width, caja / im.height);
+          const w = im.width * r, h = im.height * r;
+          ctx.drawImage(im, 852 - w, 54 + (caja - h) / 2, w, h);
+        } catch (e) {}
+      }
+      // Nombre del negocio, cliente y datos de contacto (a la izquierda del logo)
+      let yTxt = 177;
+      const lineasNombre = partir(String(neg.nombre || '').toUpperCase(), 34, 510, '500');
+      lineasNombre.forEach(function (l, i) { texto(l, IZQ, yTxt + i * 40, 34, 'left', '500'); });
+      yTxt += (lineasNombre.length - 1) * 40 + 44;
+      if (d.cliente) { texto(String(d.cliente).toUpperCase(), IZQ, yTxt, 20); yTxt += 30; }
+      [neg.nit ? 'NIT: ' + neg.nit : '', neg.direccion || '', neg.telefono ? 'Tel: ' + neg.telefono : ''].forEach(function (t) {
+        if (t) { texto(t, IZQ, yTxt, 15, 'left', '400', '#444444'); yTxt += 22; }
+      });
+      // Texto extra del encabezado (por ejemplo la garantia)
+      let yExtra = Math.max(384, yTxt + 28);
+      const extras = String(neg.extra || '').split(/\r?\n/).filter(function (l) { return l.trim(); });
+      extras.forEach(function (l, i) { texto(l.trim(), IZQ, yExtra + i * 24, 16); });
+      const yFolio = (extras.length ? yExtra + (extras.length - 1) * 24 : yExtra) + 81;
+      // Folio / fecha / status
+      let xf = IZQ;
+      ['Folio: ' + d.id, 'Fecha: ' + d.fecha, 'Status:  ' + (d.estado === 'cobrado' ? 'PAGADO' : 'PENDIENTE')].forEach(function (t) {
+        texto(t, xf, yFolio, 15); xf += ancho(t, 15) + 26;
+      });
+      // Tabla
+      let yc = encabezadoTabla(yFolio + 26);
+      (d.items || []).forEach(function (it) {
+        const desc = partir(it.nombre, 21, 340);
+        const sn = (it.series && it.series.length) ? partir('S/N: ' + it.series.join(', '), 17, 340) : [];
+        const paso = Math.max(46, desc.length * 22 + 2 + sn.length * 20);
+        if (yc + paso > DH - 120) { nuevaPagina(); yc = encabezadoTabla(60); }
+        const y0 = yc - (desc.length - 1) * 11;
+        desc.forEach(function (l, i) { texto(l, 215, y0 + i * 22, 21); });
+        sn.forEach(function (l, i) { texto(l, 215, y0 + (desc.length - 1) * 22 + 24 + i * 20, 17); });
+        texto(cantidadRecibo(it.cantidad), 139, yc, 21, 'center');
+        texto(montoRecibo(it.precio), 692, yc, 21, 'right');
+        texto(montoRecibo(it.subtotal), 853, yc, 21, 'right');
+        yc += paso + 1;
+      });
+      // Total
+      let yTot = yc + 23;
+      if (yTot + 190 > DH) { nuevaPagina(); yTot = 90; }
+      linea(yTot, 4);
+      texto('Total', 544, yTot + 43, 28, 'right');
+      texto('$' + montoRecibo(d.total), 854, yTot + 43, 32, 'right');
+      // Pie
+      const pie = partir(neg.pie || '', 16, 760);
+      pie.forEach(function (l, i) { if (l) texto(l, 461, yTot + 178 + i * 24, 16, 'center'); });
+
+      const paginas = lienzos.map(function (c) {
+        const bin = atob(c.toDataURL('image/jpeg', 0.92).split(',')[1]);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        return { jpg: bytes, w: c.width, h: c.height };
+      });
+      return pdfDesdeJpegs(paginas);
     }
     async function enviarReciboPdf(id) {
       if (!id) return;
@@ -11220,7 +11499,8 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
       } catch (e) {}
     }
     // Ajuste del escaner: 'continuo' (como siempre) o 'uno' (un producto por toque a la camara y vuelve al pedido).
-    function escanerModoUno() { try { return localStorage.getItem('escanerModoV1') === 'uno'; } catch (e) { return false; } }
+    let serieDestino = null;
+    function escanerModoUno() { if (serieDestino) return true; try { return localStorage.getItem('escanerModoV1') === 'uno'; } catch (e) { return false; } }
     function pintarModoEscaner() {
       const b = document.getElementById('btnModoEscaner');
       if (b) b.textContent = escanerModoUno() ? 'Escaner: un producto por toque (tocar para cambiar a continuo)' : 'Escaner: continuo (tocar para cambiar a un producto por toque)';
@@ -11254,6 +11534,16 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
       const ahora = Date.now();
       if (!sinEspera && codigo === escanerUltimoCodigo && ahora - escanerUltimoMs < 2200) return false;   // el mismo codigo seguido: se ignora
       escanerUltimoCodigo = codigo; escanerUltimoMs = ahora;
+      if (serieDestino) {
+        const itS = carrito.find(function (x) { return x.sku === serieDestino; });
+        if (!itS) return false;
+        const ya = String(itS.serieTxt || '').split(/[\s,;]+/).filter(Boolean);
+        if (ya.indexOf(codigo) < 0) ya.push(codigo);
+        itS.serieTxt = ya.join(', ');
+        escanerSonido(true); escanerEstado('Serie: ' + codigo, true);
+        renderCarrito();
+        return true;
+      }
       const p = buscarProductoPorCodigo(codigo);
       if (!p) { escanerSonido(false); escanerEstado('El codigo ' + codigo + ' no esta en el catalogo.', false); return false; }
       if (ocultandoSinStock() && productoSinStock(p)) { escanerSonido(false); escanerEstado(p.nombre + ': agotado.', false); return false; }
@@ -11455,6 +11745,32 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
       return (sel && sel.value === 'Transferencia') ? 2 : 1;
     }
 
+    // ---- Numero de serie opcional (para la garantia): se anota o se escanea antes de mandar el pedido ----
+    let skusConSerie = new Set();
+    async function cargarSkusSerie() {
+      try {
+        const r = await fetch('/api/series/skus');
+        const d = await r.json();
+        if (d && d.ok && Array.isArray(d.skus)) skusConSerie = new Set(d.skus.map(String));
+      } catch (e) {}
+    }
+    setTimeout(cargarSkusSerie, 2500);
+    setInterval(cargarSkusSerie, 180000);
+    function serieHtml(i) {
+      if (autoservicioActivo) return '';
+      const ab = (typeof i.serieTxt === 'string') || skusConSerie.has(String(i.sku));
+      const s = String(i.sku).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+      if (!ab) return '<div style="margin-top:3px;"><a href="javascript:void(0)" style="color:#60a5fa; font-size:12px;" onclick="abrirSerie(\'' + s + '\')">+ N&deg; de serie (garantia)</a></div>';
+      return '<div style="margin-top:4px; display:flex; gap:6px; align-items:center;">' +
+        '<input type="text" placeholder="N&deg; de serie (opcional)" autocapitalize="characters" value="' + escaparHtml(i.serieTxt || '') + '" oninput="fijarSerie(\'' + s + '\', this.value)" style="flex:1; min-width:0; font-size:16px; padding:6px 8px; border-radius:6px; border:1px solid #475569; background:#0f172a; color:#e2e8f0;">' +
+        '<button type="button" onclick="escanearSerie(\'' + s + '\')" title="Escanear el codigo de la serie" style="background:#475569; color:#fff; border:none; border-radius:6px; padding:7px 10px; font-size:16px;">&#128247;</button></div>';
+    }
+    function abrirSerie(sku) { const it = carrito.find(function (x) { return x.sku === sku; }); if (it) { it.serieTxt = it.serieTxt || ''; renderCarrito(); } }
+    function fijarSerie(sku, v) { const it = carrito.find(function (x) { return x.sku === sku; }); if (it) it.serieTxt = String(v || ''); }
+    async function escanearSerie(sku) {
+      serieDestino = sku;
+      try { await abrirEscaner(); } finally { serieDestino = null; }
+    }
     function renderCarrito() {
       const cont = document.getElementById('carrito');
       if (autoservicioActivo && borradorClienteListo) { try { localStorage.setItem('borradorClienteV1', JSON.stringify(carrito)); } catch (e) {} }
@@ -11469,7 +11785,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
             ? ('$' + precioMostrado.toFixed(2) + ' c/u' + notaTransf)
             : ('$<input type="number" class="qty-input" style="width:64px;" inputmode="decimal" min="0" step="any" value="' + i.precio.toFixed(2) + '" onfocus="this.select()" onchange="fijarPrecio(\'' + i.sku + '\', this.value)"> c/u' + (factor === 2 ? ' (x2 en transferencia)' : '') + ' — toca para aplicar descuento');
           return '<div class="carrito-item">' +
-            '<div>' + (skusBajoCosto.has(i.sku) ? '<span style="color:#f87171;">&#9888; </span>' : '') + i.nombre + '<div class="sku">' + precioHtml + '</div></div>' +
+            '<div>' + (skusBajoCosto.has(i.sku) ? '<span style="color:#f87171;">&#9888; </span>' : '') + i.nombre + '<div class="sku">' + precioHtml + '</div>' + serieHtml(i) + '</div>' +
             '<div class="qty-controls">' +
               '<button onclick="cambiarCantidad(\'' + i.sku + '\', -1)">-</button>' +
               '<input type="number" class="qty-input" inputmode="decimal" min="0" step="any" value="' + i.cantidad + '" onfocus="this.select()" onchange="fijarCantidad(\'' + i.sku + '\', this.value)">' +
@@ -12271,7 +12587,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
       // Lista de lo que se anoto en el pedido (para rectificar si se quedo algo)
       const abierto = expandidosMP.has(p.id);
       const lineas = (p.items || []).map(it =>
-        '<div><span>' + it.cantidad + ' x ' + escaparHtml(it.nombre) + '</span><span>$' + (it.precio * it.cantidad).toFixed(2) + '</span></div>'
+        '<div><span>' + it.cantidad + ' x ' + escaparHtml(it.nombre) + '</span><span>$' + (it.precio * it.cantidad).toFixed(2) + '</span></div>' + ((it.series && it.series.length) ? '<div style="font-size:12px; color:#94a3b8;">S/N: ' + escaparHtml(it.series.join(', ')) + '</div>' : '')
       ).join('');
       const itemsHtml =
         '<button class="mp-btn-items" id="mp-btnitems-' + p.id + '" onclick="toggleItemsMP(' + p.id + ')">' +
@@ -12373,7 +12689,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
         await cargarCatalogo();
         carrito = (pedido.items || []).map(it => {
           const enCatalogo = catalogo.find(p => p.sku === it.sku);
-          return { sku: it.sku, nombre: it.nombre, precio: it.precio, cantidad: it.cantidad, stock: enCatalogo ? enCatalogo.stock : null };
+          return { sku: it.sku, nombre: it.nombre, precio: it.precio, cantidad: it.cantidad, stock: enCatalogo ? enCatalogo.stock : null, serieTxt: (it.series && it.series.length) ? it.series.join(', ') : undefined };
         });
         const selMetodo = document.getElementById('metodoPago');
         if (selMetodo && pedido.metodoPago) selMetodo.value = pedido.metodoPago;
@@ -12535,7 +12851,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
         const total = (a.items || []).reduce((s, it) => s + it.precio * it.cantidad, 0);
         const horaCorta = (a.hora || '').slice(11);
         const lineas = (a.items || []).map(it =>
-          '<div><span>' + it.cantidad + ' x ' + escaparHtml(it.nombre) + '</span><span>$' + (it.precio * it.cantidad).toFixed(2) + '</span></div>'
+          '<div><span>' + it.cantidad + ' x ' + escaparHtml(it.nombre) + '</span><span>$' + (it.precio * it.cantidad).toFixed(2) + '</span></div>' + ((it.series && it.series.length) ? '<div style="font-size:12px; color:#94a3b8;">S/N: ' + escaparHtml(it.series.join(', ')) + '</div>' : '')
         ).join('');
         const esTodos = !!a.todos;
         const btnVisto = a.visto
@@ -14526,6 +14842,26 @@ body{
 .denom-check{
   width:26px;height:26px;flex-shrink:0;
   accent-color:var(--cup);
+}
+
+/* ── PANTALLA DE PC: el contador se centra con un ancho comodo y deja de estirarse ── */
+@media (min-width:900px){
+  html{background:#d9e6ef;}
+  body{max-width:1180px;margin:0 auto;box-shadow:0 0 36px rgba(15,60,90,.18);}
+  .hdr{padding:12px 24px;}
+  .hdr-title{font-size:18px;}
+  .tab-btn{font-size:14px;padding:12px 4px;}
+  .top-bar{padding:8px 24px;}
+  .bill-row{padding:7px 16px;gap:10px;}
+  .denom{font-size:18px;width:64px;}
+  .qinp{font-size:16px;}
+  .sub{font-size:15px;width:84px;}
+  .arqueo-container{display:grid;grid-template-columns:1fr 1fr;align-items:start;gap:16px;padding:20px 24px;}
+  .arqueo-container > *:nth-child(n+3){grid-column:1 / -1;}
+}
+@media (min-width:900px) and (max-height:720px){
+  .bill-row{padding:4px 16px;}
+  .qinp{padding:1px 0 2px;}
 }
 </style>
 </head>
@@ -17478,6 +17814,9 @@ while ($listener.IsListening) {
 
             if ($continuarPedido) {
             $items = @($data.items)
+            $errSerie = ""
+            if ($esAutoCli) { foreach ($itSx in $items) { try { $itSx.PSObject.Properties.Remove('serieTxt'); $itSx.PSObject.Properties.Remove('series') } catch {} } }
+            else { try { $errSerie = Normalizar-SeriesItems $items } catch { $errSerie = "" } }
 
             # --- Validar stock disponible antes de aceptar el pedido ---
             $erroresStock = New-Object System.Collections.ArrayList
@@ -17491,7 +17830,9 @@ while ($listener.IsListening) {
                 }
             }
 
-            if ($erroresStock.Count -gt 0) {
+            if ($errSerie) {
+                Enviar-Respuesta -Context $context -Body (@{ ok = $false; error = $errSerie } | ConvertTo-Json) -ContentType "application/json; charset=utf-8" -StatusCode 400
+            } elseif ($erroresStock.Count -gt 0) {
                 $msg = "No hay stock suficiente -> " + ($erroresStock -join "; ")
                 if ($esAutoCli) { $msg = "Algunos productos ya no estan disponibles en esa cantidad. Baja la cantidad o pregunta en caja." }
                 Enviar-Respuesta -Context $context -Body (@{ ok = $false; error = $msg } | ConvertTo-Json) -ContentType "application/json; charset=utf-8" -StatusCode 409
@@ -17777,6 +18118,32 @@ while ($listener.IsListening) {
                 Enviar-Respuesta -Context $context -Body (@{ ok = $true } | ConvertTo-Json) -ContentType "application/json; charset=utf-8"
             }
 
+        } elseif ($method -eq "GET" -and $path -eq "/api/series/skus") {
+            Enviar-Json $context @{ ok = $true; skus = @(Skus-ConSerie) } 200 3
+        } elseif ($method -eq "GET" -and $path -eq "/api/series/buscar") {
+            if (-not (Es-PeticionPC $request)) {
+                Enviar-Json $context @{ ok = $false; error = "Solo desde la PC." } 403
+            } else {
+                $qSer = [string]$request.QueryString["q"]
+                Enviar-Json $context @{ ok = $true; dias = [int]$global:garantiaDias; items = @(Buscar-Series $qSer) } 200 4
+            }
+        } elseif ($method -eq "POST" -and $path -eq "/api/series/config") {
+            $readerSc = New-Object System.IO.StreamReader($request.InputStream, [System.Text.Encoding]::UTF8)
+            $bodySc = $readerSc.ReadToEnd()
+            $readerSc.Close()
+            if (-not (Es-PeticionPC $request)) {
+                Enviar-Json $context @{ ok = $false; error = "Solo desde la PC." } 403
+            } else {
+                $nSc = 0
+                try { $nSc = [int](($bodySc | ConvertFrom-Json).dias) } catch { $nSc = 0 }
+                if ($nSc -lt 1 -or $nSc -gt 3650) {
+                    Enviar-Json $context @{ ok = $false; error = "Pon un numero de dias entre 1 y 3650." } 400
+                } else {
+                    $global:garantiaDias = $nSc
+                    Guardar-GarantiaCfg
+                    Enviar-Json $context @{ ok = $true; dias = $nSc } 200 3
+                }
+            }
         } elseif ($method -eq "GET" -and $path -eq "/etiquetas") {
             Enviar-Respuesta -Context $context -Body (Inyectar-Guardian $htmlEtiquetas)
 
@@ -18426,6 +18793,35 @@ while ($listener.IsListening) {
                 $global:sinonimos.version = [int]$global:sinonimos.version + 1
                 Guardar-Sinonimos
                 Enviar-Json $context @{ ok = $true; version = [int]$global:sinonimos.version } 200
+            }
+
+        } elseif ($method -eq "GET" -and $path -match "^/api/pedidos/(\d+)/recibo-datos$") {
+            # Datos del recibo ya ordenados (negocio, logo, lineas, total) para armar el PDF en el telefono.
+            $idRd = [int]$Matches[1]
+            $pedidoRd = $global:pedidos | Where-Object { [int]$_.id -eq $idRd } | Select-Object -First 1
+            if (-not $pedidoRd) {
+                Enviar-Json $context @{ ok = $false; error = "Pedido no encontrado" } 404
+            } else {
+                $rcD = $global:reciboCfg
+                $factorD = 1
+                if ([string]$pedidoRd.metodoPago -eq "Transferencia") { $factorD = 2 }
+                $itemsD = New-Object System.Collections.ArrayList
+                $totalD = 0.0
+                foreach ($itD in @($pedidoRd.items)) {
+                    if (-not $itD) { continue }
+                    $cantD = [double]$itD.cantidad
+                    $precioD = [double]$itD.precio * $factorD
+                    $subD = $precioD * $cantD
+                    $totalD += $subD
+                    [void]$itemsD.Add([pscustomobject]@{ series = @($itD.series | Where-Object { $_ }); cantidad = $cantD; nombre = [string]$itD.nombre; precio = [math]::Round($precioD, 2); subtotal = [math]::Round($subD, 2) })
+                }
+                if ($itemsD.Count -eq 0) { try { $totalD = [double]$pedidoRd.totalCobrado } catch {} }
+                $logoD = ""
+                try { if ($rcD.logo -and $rcD.logo.activo -and $rcD.logo.png) { $logoD = [string]$rcD.logo.png } } catch {}
+                $fechaD = [string]$pedidoRd.hora
+                if ($fechaD.Length -ge 10) { $fechaD = $fechaD.Substring(0, 10) }
+                $negD = @{ nombre = [string]$rcD.nombre; nit = [string]$rcD.nit; direccion = [string]$rcD.direccion; telefono = [string]$rcD.telefono; extra = [string]$rcD.encabezadoExtra; pie = [string]$rcD.pie }
+                Enviar-Json $context @{ ok = $true; id = [int]$pedidoRd.id; fecha = $fechaD; estado = [string]$pedidoRd.estado; vendedor = [string]$pedidoRd.vendedor; cliente = [string]$pedidoRd.clienteNombre; metodo = [string]$pedidoRd.metodoPago; negocio = $negD; logo = $logoD; items = @($itemsD.ToArray()); total = [math]::Round($totalD, 2) } 200 5
             }
 
         } elseif ($method -eq "GET" -and $path -match "^/api/pedidos/(\d+)/recibo-texto$") {
