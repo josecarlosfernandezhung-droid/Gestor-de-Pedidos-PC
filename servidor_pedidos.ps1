@@ -3703,7 +3703,7 @@ function Texto-ADouble($v) { $x = 0.0; [void][double]::TryParse(([string]$v).Rep
 # El nombre de la columna se detecta solo (SHOW COLUMNS) o se escribe a mano en Ajustes.
 # ------------------------------------------------------------------
 $minAxisPath = Join-Path $scriptDir "minimos_axis.json"
-$global:minAxis = @{ usar = $true; columna = ""; ultima = ""; error = ""; datos = @{} }
+$global:minAxis = @{ usar = $true; columna = ""; ultima = ""; error = ""; datos = @{}; maxRef = "" }
 $global:minAxisUltimoIntento = [datetime]::MinValue
 function Guardar-MinAxis {
     Escribir-ArchivoConReintento -ruta $minAxisPath -contenido ($global:minAxis | ConvertTo-Json -Depth 4) | Out-Null
@@ -3718,6 +3718,7 @@ function Cargar-MinAxis {
                 if ($d.columna) { $global:minAxis.columna = [string]$d.columna }
                 if ($d.ultima) { $global:minAxis.ultima = [string]$d.ultima }
                 if ($d.error) { $global:minAxis.error = [string]$d.error }
+                if ($d.maxRef) { $global:minAxis.maxRef = [string]$d.maxRef }
                 $h = @{}
                 if ($d.datos) { foreach ($pp in $d.datos.PSObject.Properties) { $v = 0.0; if ([double]::TryParse([string]$pp.Value, [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$v)) { $h[[string]$pp.Name] = $v } } }
                 $global:minAxis.datos = $h
@@ -3789,6 +3790,124 @@ function Origen-Minimo($p) {
     if ($sku -and $global:minimosStock.ContainsKey($sku)) { return "propio" }
     if ($sku -and $global:minAxis.usar -and $global:minAxis.datos.ContainsKey($sku) -and ([double]$global:minAxis.datos[$sku] -gt 0)) { return "axis" }
     return "general"
+}
+
+# ------------------------------------------------------------------
+# NOTAS RAPIDAS (POST-IT) DEL MOSTRADOR
+# Recados del dia que se ven flotando en el Panel de la PC. Se guardan aqui para que no se pierdan al reiniciar.
+# ------------------------------------------------------------------
+$postitsPath = Join-Path $scriptDir "postits.json"
+$global:postits = @{ siguienteId = 1; notas = (New-Object System.Collections.ArrayList) }
+function Guardar-Postits {
+    Escribir-ArchivoConReintento -ruta $postitsPath -contenido ($global:postits | ConvertTo-Json -Depth 5) | Out-Null
+}
+function Cargar-Postits {
+    try {
+        if (Test-Path -LiteralPath $postitsPath) {
+            $raw = Get-Content $postitsPath -Raw -Encoding UTF8
+            if ($raw -and $raw.Trim().Length -gt 0) {
+                $d = $raw | ConvertFrom-Json
+                foreach ($n in @($d.notas)) { if ($n) { [void]$global:postits.notas.Add($n) } }
+                if ($d.siguienteId) { $global:postits.siguienteId = [int]$d.siguienteId }
+            }
+        }
+    } catch {}
+}
+Cargar-Postits
+function Limpiar-TextoPostit($t) {
+    $s = [regex]::Replace([string]$t, '[\x00-\x08\x0B\x0C\x0E-\x1F]', '')
+    $s = $s.Trim()
+    if ($s.Length -gt 300) { $s = $s.Substring(0, 300) }
+    return $s
+}
+
+# ------------------------------------------------------------------
+# CANTIDAD NOMINAL / MAXIMA DE AXISPOS (cuanto cabe en el piso o el estante)
+# Se usa en "Que bajar del almacen" cuando se pone 0 dias a cubrir, y como tope cuando no es 0.
+# Se guarda como "tabla.columna" (goods.MaxStock, store.MaxQtty...). Si esta vacio se detecta solo.
+# ------------------------------------------------------------------
+$global:maxAxisCache = @{ clave = ""; hora = [datetime]::MinValue; datos = @{} }
+function Detectar-ColumnaMaximoAxis {
+    foreach ($tabla in @('goods', 'store')) {
+        $cols = New-Object System.Collections.ArrayList
+        try {
+            $texto = Ejecutar-ConsultaAxis ("SHOW COLUMNS FROM " + $tabla)
+            foreach ($linea in ($texto -split "`n")) {
+                $campo = (($linea.TrimEnd("`r")) -split "`t")[0].Trim()
+                if ($campo) { [void]$cols.Add($campo) }
+            }
+        } catch { continue }
+        foreach ($pref in @('Nominal', 'NominalQtty', 'NominalQty', 'NominalQuantity', 'NominalStock', 'NomQtty', 'MaxStock', 'StockMax', 'MaxQtty', 'MaxQty', 'MaxQuantity', 'MaximumStock', 'MaximumQtty', 'Maximum', 'MaxCount', 'MaxAmount', 'MaxRest', 'MaxRemain', 'NormQtty', 'Norm')) {
+            foreach ($c in $cols) { if ($c -ieq $pref) { return ($tabla + "." + $c) } }
+        }
+        foreach ($c in $cols) { if ($c -match '(?i)nominal') { return ($tabla + "." + $c) } }
+        foreach ($c in $cols) {
+            if (($c -match '(?i)max') -and ($c -match '(?i)(stock|qtty|qty|rest|count|quant|amount|remain|limit)') -and ($c -notmatch '(?i)(price|sum|disc|cost|time|date)')) { return ($tabla + "." + $c) }
+        }
+    }
+    return $null
+}
+# Devuelve un hashtable sku -> cantidad nominal/maxima (solo los que tienen un valor mayor que 0).
+function Leer-MaximosAxis([int]$piso) {
+    $c = $global:configAxis
+    if (-not $c.activo) { throw "AxisPOS no esta activo (config_axis.json)." }
+    $colSku = [string]$c.columnaSku
+    if (@('Code', 'BarCode1', 'ID') -notcontains $colSku) { throw "columnaSku invalida (usa Code, BarCode1 o ID)." }
+    $ref = ([string]$global:minAxis.maxRef).Trim()
+    if (-not $ref) {
+        $ref = Detectar-ColumnaMaximoAxis
+        if (-not $ref) { throw "No encontre en AxisPOS la columna de la cantidad nominal o maxima. Escribela a mano en Ajustes > Stock minimo de AxisPOS (por ejemplo store.MaxQtty)." }
+        $global:minAxis.maxRef = $ref
+        try { Guardar-MinAxis } catch {}
+    }
+    if ($ref -notmatch '^(goods|store)\.[A-Za-z][A-Za-z0-9_]{0,40}$') { throw "La columna nominal/maxima va como tabla.columna (goods.MaxStock o store.MaxQtty)." }
+    $partes = $ref.Split('.')
+    $tabla = $partes[0]; $col = $partes[1]
+    $clave = $ref + "|" + [string]$piso
+    $cc = $global:maxAxisCache
+    if (($cc.clave -eq $clave) -and ((((Get-Date) - $cc.hora).TotalMinutes) -lt 10)) { return $cc.datos }
+    if ($tabla -eq 'goods') {
+        $sql = "SELECT g.$colSku, g.$col FROM goods g WHERE g.Deleted=0"
+    } else {
+        $sql = "SELECT g.$colSku, MAX(s.$col) FROM goods g JOIN store s ON s.GoodID = g.ID WHERE g.Deleted=0 AND s.ObjectID = $piso GROUP BY g.ID, g.$colSku"
+    }
+    $texto = Ejecutar-ConsultaAxis $sql
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $mapa = @{}
+    foreach ($linea in ($texto -split "`n")) {
+        $linea = $linea.TrimEnd("`r")
+        if ([string]::IsNullOrWhiteSpace($linea)) { continue }
+        $f = $linea -split "`t"
+        if ($f.Count -lt 2) { continue }
+        $v = 0.0
+        if ([double]::TryParse([string]$f[1], [System.Globalization.NumberStyles]::Float, $inv, [ref]$v) -and $v -gt 0) { $mapa[([string]$f[0]).Trim()] = $v }
+    }
+    $global:maxAxisCache = @{ clave = $clave; hora = (Get-Date); datos = $mapa }
+    return $mapa
+}
+
+# Descuentos que la PC da al armar un pedido para un vendedor (queda constancia en la auditoria).
+function Auditar-DescuentosAsignado($a) {
+    try {
+        foreach ($it in @($a.items)) {
+            $sku = [string]$it.sku
+            if ([string]::IsNullOrWhiteSpace($sku)) { continue }
+            $prod = $global:catalogo | Where-Object { $_.sku -eq $sku } | Select-Object -First 1
+            if (-not $prod) { continue }
+            $cat = [double]$prod.precio
+            $pr = 0.0; try { $pr = [double]$it.precio } catch { continue }
+            if (($cat -gt 0) -and ($pr -lt ($cat - 0.005))) {
+                $pct = [math]::Round((($cat - $pr) / $cat) * 100, 1)
+                Registrar-Auditoria "PC" "descuento" ("Pedido armado #" + $a.id + " para " + $(if ($a.todos) { "todos" } else { [string]$a.vendedor }) + ": " + $prod.nombre + " a $" + (Formato-Monto $pr) + " en vez de $" + (Formato-Monto $cat) + " (-" + $pct + "%)") $null $pr $false "PC"
+                $costo = Obtener-Costo $sku
+                if (($null -ne $costo) -and ($pr -lt ($costo - 0.005))) {
+                    $txt = "Pedido armado #" + $a.id + ": " + $prod.nombre + " a $" + (Formato-Monto $pr) + ", por debajo del costo de reposicion."
+                    Registrar-Auditoria "PC" "venta_bajo_costo" $txt $null $pr $true "PC"
+                    Avisar-PC "ALERTA" $txt
+                }
+            }
+        }
+    } catch {}
 }
 
 function Config-ParaPanel {
@@ -5554,11 +5673,21 @@ function Cargar-MensajesPc {
 }
 
 function Guardar-MensajesPc {
-    while ($global:mensajesPc.Count -gt 100) { $global:mensajesPc.RemoveAt(0) }
+    while ($global:mensajesPc.Count -gt 300) { $global:mensajesPc.RemoveAt(0) }
     Escribir-ArchivoConReintento -ruta $mensajesPcPath -contenido (ConvertTo-Json -InputObject @($global:mensajesPc) -Depth 4) | Out-Null
 }
 
 Cargar-MensajesPc
+
+# Mensaje que la PC envio a un vendedor (o a todos): solo queda anotado en el historial de la PC.
+function Registrar-MensajeSaliente([string]$para, [string]$texto) {
+    try {
+        $regOut = [pscustomobject]@{ id = $global:nextIdMensaje; vendedor = $para; texto = $texto; hora = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss"); leido = $true; sentido = "enviado" }
+        $global:nextIdMensaje++
+        [void]$global:mensajesPc.Add($regOut)
+        Guardar-MensajesPc
+    } catch {}
+}
 
 # Deja el texto en una sola linea y de hasta 200 caracteres.
 function Limpiar-TextoMensaje($t) {
@@ -5760,6 +5889,7 @@ $htmlPC = @'
   .np-select { width:100%; padding:9px; border-radius:6px; border:1px solid #334155; background:#0f172a; color:#e2e8f0; font-size:14px; margin-bottom:10px; }
   .np-input { width:100%; padding:9px; border-radius:6px; border:1px solid #334155; background:#0f172a; color:#e2e8f0; font-size:14px; margin-bottom:8px; }
   .np-resultado { display:flex; justify-content:space-between; align-items:center; padding:8px 0; border-bottom:1px solid #334155; font-size:13px; }
+  .np-resultado.np-sel { background:#0b3a5c; box-shadow:inset 3px 0 0 #38bdf8; }
   .np-resultado .np-miniatura { width:38px; height:38px; border-radius:6px; object-fit:cover; margin-right:8px; flex-shrink:0; cursor:zoom-in; background:#0f172a; }
   .np-resultado .np-info { flex:1; min-width:0; }
   .np-resultado .np-info b { display:block; }
@@ -5804,7 +5934,7 @@ $htmlPC = @'
   <header>
     <h1>Panel de Pedidos - Toto Tools</h1>
     <div class="share">Vendedores conectan en: <b id="shareUrl">...</b></div>
-    <button id="btnStockBajo" class="btn-toggle" style="font-size:15px; position:relative;" onclick="togglePanelStockBajo()" title="Productos con stock bajo">&#128276;<span id="badgeStockBajo" style="display:none; position:absolute; top:-6px; right:-6px; min-width:18px; height:18px; padding:0 4px; border-radius:9px; background:#ef4444; color:#fff; font-size:11px; font-weight:bold; align-items:center; justify-content:center;">0</span></button>
+    <button id="btnStockBajo" class="btn-toggle" style="font-size:15px; position:relative;" onclick="togglePanelStockBajo()" title="Avisos: mensajes y stock bajo (Alt+M)">&#128276;<span id="badgeStockBajo" style="display:none; position:absolute; top:-6px; right:-6px; min-width:18px; height:18px; padding:0 4px; border-radius:9px; background:#ef4444; color:#fff; font-size:11px; font-weight:bold; align-items:center; justify-content:center;">0</span></button>
     <button id="btnMenuPC" class="btn-toggle" style="font-size:15px;" onclick="abrirMenuPC()" title="Atajo: F10 (F1 muestra todos los atajos)">&#9881; Ajustes (F10)</button>
   </header>
 
@@ -5813,15 +5943,18 @@ $htmlPC = @'
   <div class="toolbar">
     <label><input type="checkbox" id="soloPendientes" checked> Mostrar solo pendientes y por revisar</label>
     <span id="contadorRevisar"></span>
-    <button class="btn-nuevo-pedido" onclick="abrirNuevoPedido()" title="Atajo: F2">Nuevo pedido para vendedor (F2)</button>
+    <button class="btn-nuevo-pedido" id="btnNuevoPedidoPC" onclick="abrirNuevoPedido()" title="Atajo: F2">Nuevo pedido para vendedor (F2)</button>
     <button class="btn-nuevo-pedido" style="background:#0369a1;" onclick="abrirListaAsignados()" title="Ver, editar o retirar los pedidos que ya enviaste a vendedores">Pedidos enviados</button>
   </div>
 
-  <div id="panelStockBajo" style="display:none; position:fixed; top:64px; right:16px; z-index:57; width:340px; max-width:92vw; max-height:70vh; overflow:auto; background:#1e293b; border:1px solid #334155; border-radius:12px; padding:12px; box-shadow:0 8px 24px rgba(0,0,0,0.5);">
+  <div id="panelStockBajo" style="display:none; position:fixed; top:64px; right:16px; z-index:57; width:380px; max-width:92vw; max-height:78vh; overflow:auto; background:#1e293b; border:1px solid #334155; border-radius:12px; padding:12px; box-shadow:0 8px 24px rgba(0,0,0,0.5);">
     <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-      <strong style="color:#fff; font-size:14px;">Stock bajo</strong>
-      <span><button class="btn-toggle" style="font-size:12px; padding:4px 8px; background:#0369a1; color:#fff;" onclick="abrirCompras()">Lista de compras</button> <button class="btn-toggle" style="font-size:12px; padding:4px 8px;" onclick="descartarTodoStockBajo()">Borrar todas</button> <button class="btn-toggle" style="font-size:12px; padding:4px 8px;" onclick="togglePanelStockBajo()">Cerrar</button></span>
+      <strong style="color:#fff; font-size:14px;">Avisos</strong>
+      <span><button class="btn-toggle" style="font-size:12px; padding:4px 8px; background:#0369a1; color:#fff;" onclick="abrirCompras()">Lista de compras</button> <button class="btn-toggle" style="font-size:12px; padding:4px 8px;" onclick="descartarTodoStockBajo()" title="Borra los avisos de stock bajo">Borrar stock bajo</button> <button class="btn-toggle" style="font-size:12px; padding:4px 8px;" onclick="togglePanelStockBajo()">Cerrar</button></span>
     </div>
+    <div style="font-size:11px; color:#94a3b8; font-weight:700; letter-spacing:0.5px; text-transform:uppercase; margin:2px 0 2px;">Mensajes (recientes arriba)</div>
+    <div id="listaMensajesPC" style="font-size:13px; color:#e2e8f0; max-height:34vh; overflow:auto; margin-bottom:10px;"></div>
+    <div style="font-size:11px; color:#94a3b8; font-weight:700; letter-spacing:0.5px; text-transform:uppercase; margin:2px 0 2px;">Stock bajo</div>
     <div id="listaStockBajo" style="font-size:13px; color:#e2e8f0;"></div>
   </div>
   <div id="banner">Nuevo pedido recibido</div>
@@ -6015,7 +6148,7 @@ $htmlPC = @'
       <div id="reposAlmacenes"></div>
       <div style="display:flex; gap:14px; flex-wrap:wrap; margin:10px 0; font-size:13px; color:#cbd5e1;">
         <label>Ventas de los ultimos <input type="number" id="reposDias" class="np-input" min="1" max="60" value="7" style="width:70px; display:inline-block;" onkeydown="if (event.key === 'Enter') calcularRepos(true)"> dias</label>
-        <label>Cubrir <input type="number" id="reposCob" class="np-input" min="1" max="60" value="7" style="width:70px; display:inline-block;" onkeydown="if (event.key === 'Enter') calcularRepos(true)"> dias de venta</label>
+        <label>Cubrir <input type="number" id="reposCob" class="np-input" min="0" max="60" value="7" style="width:70px; display:inline-block;" onkeydown="if (event.key === 'Enter') calcularRepos(true)"> dias de venta <span style="color:#94a3b8; font-size:12px;">(0 = llenar hasta la cantidad nominal / maxima de AxisPOS)</span></label>
       </div>
       <div style="display:flex; gap:8px; flex-wrap:wrap;">
         <button class="btn" id="reposBtnCalc" style="flex:1; width:auto;" onclick="calcularRepos(true)">Calcular</button>
@@ -6153,14 +6286,14 @@ $htmlPC = @'
         <select id="selVigenciaNP" class="np-select"><option value="30">30 minutos</option><option value="60">1 hora</option><option value="120">2 horas</option><option value="480" selected>8 horas</option></select>
       </div>
       <label style="font-size:13px; display:block; margin-bottom:4px; color:#cbd5e1;">Buscar producto:</label>
-      <input type="text" id="npBuscador" class="np-input" placeholder="Nombre o SKU" oninput="buscarNP()">
+      <input type="text" id="npBuscador" class="np-input" placeholder="Nombre o SKU: flechas y Enter eligen, luego la cantidad. Comandos: +326 5, -50, /enviar, /ayuda" oninput="buscarNP()">
       <div id="npResultados"></div>
       <h3 style="font-size:13px; color:#94a3b8; margin:12px 0 6px; text-transform:uppercase; letter-spacing:0.5px;">Pedido a armar</h3>
       <div id="npCarrito"><div class="np-vacio">Sin productos aun.</div></div>
       <div class="np-total">Total: $<span id="npTotal">0.00</span></div>
       <div id="npNotaWrap"><input type="text" id="npNota" class="np-input" maxlength="200" placeholder="Mensaje para el vendedor (opcional; sin productos se env&iacute;a solo el mensaje)"></div>
-      <button class="btn" id="npBtnEnviar" onclick="enviarPedidoAVendedor()" style="margin-top:6px;">Enviar al movil del vendedor</button>
-      <button class="btn" style="background:#475569; margin-top:6px;" onclick="cerrarNuevoPedido()">Cancelar</button>
+      <button class="btn" id="npBtnEnviar" onclick="enviarPedidoAVendedor()" style="margin-top:6px;" title="Atajo: Alt+Enter (o Ctrl+Enter)">Enviar al movil del vendedor (Alt+Enter)</button>
+      <button class="btn" style="background:#475569; margin-top:6px;" onclick="cerrarNuevoPedido()" title="Esc tambien: el pedido queda como borrador hasta que lo envies">Cerrar (queda de borrador)</button>
       <div id="npError" style="color:#fca5a5; font-size:12px; margin-top:8px;"></div>
     </div>
   </div>
@@ -7739,7 +7872,7 @@ $htmlPC = @'
         reposAlmacenes = d.almacenes || [];
         const g = reposLeerGuardado();
         document.getElementById('reposDias').value = g.dias || 7;
-        document.getElementById('reposCob').value = g.cob || 7;
+        document.getElementById('reposCob').value = (g.cob === 0 || g.cob) ? g.cob : 7;
         const piso = d.pisoGuardado > 0 ? d.pisoGuardado : (d.pisoDefecto || (reposAlmacenes[0] ? reposAlmacenes[0].id : 0));
         const orig = String(d.origenGuardado || '').split(',').map(function (x) { return parseInt(x, 10); }).filter(function (x) { return x > 0; });
         pintarAlmacenesRepos(piso, orig);
@@ -7749,13 +7882,13 @@ $htmlPC = @'
     }
     function tarjetaRepos(x) {
       const colores = { A: '#16a34a', B: '#ca8a04', C: '#64748b' };
-      const razon = { ventas: 'por ventas', minimo: 'por mínimo', ambos: 'ventas y mínimo' }[x.razon] || '';
+      const razon = { ventas: 'por ventas', minimo: 'por mínimo', ambos: 'ventas y mínimo', nominal: 'hasta el nominal' }[x.razon] || '';
       const tend = x.tendencia === 'sube' ? ' <span style="color:#86efac;">&#9650; sube</span>' : (x.tendencia === 'baja' ? ' <span style="color:#fca5a5;">&#9660; baja</span>' : '');
       const clase = (x.clase && colores[x.clase]) ? '<span style="background:' + colores[x.clase] + '; color:#fff; border-radius:4px; padding:0 6px; font-weight:700;">' + x.clase + '</span> ' : '';
       return '<div style="background:#0f172a; border:1px solid #334155; border-radius:10px; padding:10px; margin-bottom:8px; font-size:13px; line-height:1.5;">' +
         '<div style="display:flex; justify-content:space-between; gap:8px;"><b style="color:#fff;">' + escaparHtml(x.nombre) + '</b><span style="color:#86efac; font-weight:800; white-space:nowrap;">Bajar ' + x.bajar + '</span></div>' +
         '<div style="color:#94a3b8;">' + clase + escaparHtml(x.sku || 'sin SKU') + (razon ? ' · ' + razon : '') + '</div>' +
-        '<div>En el piso: <b>' + x.piso + '</b>' + (x.minimo > 0 ? ' (mínimo ' + x.minimo + ')' : '') + ' · vende <b>' + (x.ritmo != null ? x.ritmo : x.porDia) + '</b>/día' + tend +
+        '<div>En el piso: <b>' + x.piso + '</b>' + (x.minimo > 0 ? ' (mínimo ' + x.minimo + ')' : '') + (x.maximo > 0 ? ' · nominal/máx. <b>' + x.maximo + '</b>' : '') + ' · vende <b>' + (x.ritmo != null ? x.ritmo : x.porDia) + '</b>/día' + tend +
           (x.diasPiso != null ? ' · alcanza <b>' + x.diasPiso + '</b> días' : '') + ' · vendió ' + x.vendido + '</div>' +
         '<div style="margin-top:4px;">' + (x.almacenes || []).map(function (a) {
           return '<div style="display:flex; justify-content:space-between; border-top:1px dashed #334155; padding:2px 0;"><span>' + escaparHtml(a.nombre || ('Almacén ' + a.id)) + ': hay <b>' + a.stock + '</b></span>' +
@@ -7783,15 +7916,18 @@ $htmlPC = @'
           }
         });
       });
-      reposTexto = 'Bajar del almacen (ventas de ' + d.dias + ' dias, cubrir ' + d.cobertura + ' dias) - ' + d.generado + '\n' +
+      const nominal = (d.modo === 'nominal');
+      reposTexto = 'Bajar del almacen (' + (nominal ? 'hasta la cantidad nominal/maxima de AxisPOS' : 'ventas de ' + d.dias + ' dias, cubrir ' + d.cobertura + ' dias') + ') - ' + d.generado + '\n' +
         Object.keys(grupos).map(function (k) { return '\n== ' + (grupos[k].nombre || ('Almacen ' + k)) + ' ==\n' + grupos[k].filas.join('\n'); }).join('\n');
-      let html = '<div style="font-size:12px; color:#94a3b8; margin-bottom:8px;">Calculado ' + escaparHtml(d.generado) + ' · ventas de ' + d.dias + ' días · cubrir ' + d.cobertura + ' días</div>' +
+      let html = '<div style="font-size:12px; color:#94a3b8; margin-bottom:8px;">Calculado ' + escaparHtml(d.generado) + (nominal ? ' · llenando hasta la cantidad nominal / máxima de AxisPOS' : ' · ventas de ' + d.dias + ' días · cubrir ' + d.cobertura + ' días') + '</div>' +
+        (d.avisoMax && !nominal ? '<div style="font-size:12px; color:#fbbf24; margin-bottom:8px;">Sin tope por máximo: ' + escaparHtml(d.avisoMax) + '</div>' : '') +
+        (nominal && res.sinNominal ? '<div style="font-size:12px; color:#fbbf24; margin-bottom:8px;">' + res.sinNominal + ' productos con existencia en almacén no tienen cantidad nominal en AxisPOS y no entran en esta lista.</div>' : '') +
         '<div style="background:#0f172a; border:1px solid #334155; border-radius:8px; padding:10px; margin-bottom:10px; font-size:13px; line-height:1.55;">' +
         '<b style="color:#fff;">' + (res.productosABajar || 0) + ' productos · ' + (res.unidadesABajar || 0) + ' unidades por bajar</b><br>' +
         'En el piso se vendieron ' + (res.unidadesVendidas || 0) + ' unidades de ' + (res.productosConVentas || 0) + ' productos; ' + (res.sinMovimiento || 0) + ' con existencia no se movieron.<br>' +
         (res.porAlmacen || []).map(function (a) { return 'De <b>' + escaparHtml(a.nombre || ('Almacén ' + a.id)) + '</b>: ' + a.unidades + ' unidades en ' + a.productos + ' productos'; }).join('<br>') + '</div>';
       html += items.length ? items.map(tarjetaRepos).join('') :
-        '<div class="np-vacio">No hace falta bajar nada: el piso alcanza para ' + d.cobertura + ' días según las ventas de los últimos ' + d.dias + ' días.</div>';
+        '<div class="np-vacio">' + (nominal ? 'No hace falta bajar nada: el piso ya está en su cantidad nominal / máxima.' : 'No hace falta bajar nada: el piso alcanza para ' + d.cobertura + ' días según las ventas de los últimos ' + d.dias + ' días.') + '</div>';
       html += seccionRepos('Lo que más se vende', d.masVendidos, true, function (x) { return 'vendió ' + x.vendido + ' · piso ' + x.piso + ' · almacenes ' + x.origen + (x.diasPiso != null ? ' · alcanza ' + x.diasPiso + ' d' : '') + (x.bajar > 0 ? ' · <b style="color:#86efac;">bajar ' + x.bajar + '</b>' : ''); });
       html += seccionRepos('Lo que menos se vende (pero se vende)', d.menosVendidos, false, function (x) { return 'vendió ' + x.vendido + ' · piso ' + x.piso + ' · almacenes ' + x.origen; });
       html += seccionRepos('Con existencia y sin ventas en el periodo', d.sinMovimiento, false, function (x) { return 'piso ' + x.piso + ' · almacenes ' + x.origen; });
@@ -7802,7 +7938,8 @@ $htmlPC = @'
       const piso = r ? parseInt(r.value, 10) : 0;
       const origen = Array.prototype.slice.call(document.querySelectorAll('.reposOrig:checked')).map(function (c) { return parseInt(c.value, 10); });
       const dias = Math.min(60, Math.max(1, parseInt(document.getElementById('reposDias').value, 10) || 7));
-      const cob = Math.min(60, Math.max(1, parseInt(document.getElementById('reposCob').value, 10) || 7));
+      const cobN = parseInt(document.getElementById('reposCob').value, 10);
+      const cob = isNaN(cobN) ? 7 : Math.min(60, Math.max(0, cobN));
       const out = document.getElementById('reposResultado');
       if (!piso) { out.innerHTML = '<div class="np-vacio" style="color:#fbbf24;">Marca cual almacen es el piso de venta.</div>'; return; }
       if (!origen.length) { out.innerHTML = '<div class="np-vacio" style="color:#fbbf24;">Marca al menos un almacen de donde se baja la mercancia.</div>'; return; }
@@ -7941,7 +8078,7 @@ $htmlPC = @'
     // ---- Atajos de teclado del Panel de la PC ----
     // Sin botones ni ventanas nuevas: las teclas estan en las etiquetas de los botones que ya existian
     // y F1 muestra la lista completa en el banner verde de arriba.
-    const ATAJOS_PC_AYUDA = 'ATAJOS: F2 Nuevo pedido | F3 Buscar producto | F4 Etiquetas | F6 Compras | F7 Devolucion | F8 Metricas | F9 Solo pendientes | F10 Ajustes | Alt+S Stock bajo | Alt+E Excel | Alt+P Permisos | Alt+V PIN vendedores | Alt+R Red | Alt+Q QR vendedor | Flechas Elegir pedido | Ctrl+Enter Cobrar el elegido (o Enviar pedido / Guardar devolucion) | Alt+I Imprimir el elegido | Alt+C Consultar precio y stock | Alt+B Que bajar del almacen | / Filtrar pedidos | Esc Cerrar';
+    const ATAJOS_PC_AYUDA = 'ATAJOS: F2 Nuevo pedido | F3 Buscar producto | F4 Etiquetas | F6 Compras | F7 Devolucion | F8 Metricas | F9 Solo pendientes | F10 Ajustes | Alt+S Stock bajo | Alt+E Excel | Alt+P Permisos | Alt+V PIN vendedores | Alt+R Red | Alt+Q QR vendedor | Flechas Elegir pedido | Ctrl+Enter Cobrar el elegido (o Guardar devolucion) | En Nuevo pedido: escribe, flechas+Enter eligen, cantidad+Enter y sigues con el otro, Alt+Enter envia | Alt+M Mensajes y avisos | Alt+I Imprimir el elegido | Alt+C Consultar precio y stock | Alt+B Que bajar del almacen | / Filtrar pedidos | Esc Cerrar';
     const PC_OVERLAYS = [
       ['fotoOverlayNP', function () { cerrarFotoProductoNP(); }],
       ['qrOverlay', function () { cerrarQRCliente(); }],
@@ -7993,9 +8130,13 @@ $htmlPC = @'
         else hecho = false;
       } else if (k === 'F1') {
         mostrarBanner(ATAJOS_PC_AYUDA, 14000);
+      } else if (e.altKey && !e.ctrlKey && !e.metaKey && k === 'Enter') {
+        // Alt+Enter: envia el pedido que se esta armando (solo con el dialogo de Nuevo pedido abierto)
+        if (npAbierto) { npConfirmarCantidadEscrita(); var bEnv2 = document.getElementById('npBtnEnviar'); if (bEnv2) bEnv2.click(); }
+        else hecho = false;
       } else if (e.ctrlKey && k === 'Enter') {
         var topEnter = pcOverlayArriba();
-        if (npAbierto) { var bEnv = document.getElementById('npBtnEnviar'); if (bEnv) bEnv.click(); }
+        if (npAbierto) { npConfirmarCantidadEscrita(); var bEnv = document.getElementById('npBtnEnviar'); if (bEnv) bEnv.click(); }
         else if (topEnter && topEnter[0] === 'devOverlay') { pcAtajo(devGuardar); }
         else if (!topEnter && cardSel()) { cobrarSeleccionado(); }
         else hecho = false;
@@ -8029,7 +8170,7 @@ $htmlPC = @'
         mostrarBanner(chk.checked ? 'Mostrando solo pendientes y por revisar' : 'Mostrando todos los pedidos', 2500);
       } else if (k === 'F10') {
         if (pcVisible('menuPCOverlay')) cerrarMenuPC(); else if (!pcOverlayArriba()) abrirMenuPC(); else hecho = false;
-      } else if (e.altKey && !e.ctrlKey && !e.metaKey && kl === 's') {
+      } else if (e.altKey && !e.ctrlKey && !e.metaKey && (kl === 's' || kl === 'm')) {
         togglePanelStockBajo();
       } else if (e.altKey && !e.ctrlKey && !e.metaKey && kl === 'e') {
         cerrarMenuPC(); abrirConfig();
@@ -8045,6 +8186,8 @@ $htmlPC = @'
         cerrarMenuPC(); abrirPines();
       } else if (e.altKey && !e.ctrlKey && !e.metaKey && kl === 'r') {
         pcAtajo(abrirRed);
+      } else if (e.altKey && !e.ctrlKey && !e.metaKey && kl === 'n') {
+        postitsPanel();
       } else if (e.altKey && !e.ctrlKey && !e.metaKey && kl === 'q') {
         cerrarMenuPC(); pcAtajo(mostrarQRVendedor);
       } else {
@@ -8057,9 +8200,21 @@ $htmlPC = @'
       var b = document.getElementById('npBuscador');
       if (!b) return;
       b.addEventListener('keydown', function (e) {
-        if (e.key !== 'Enter' || e.ctrlKey) return;
-        var primero = document.querySelector('#npResultados .np-resultado button');
-        if (primero) { e.preventDefault(); primero.click(); b.select(); }
+        if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && !e.ctrlKey && !e.altKey && !cmdEsComando(b.value) && npResultadosActuales.length) {
+          e.preventDefault();
+          npSelIdx = Math.max(0, Math.min(npResultadosActuales.length - 1, npSelIdx + (e.key === 'ArrowDown' ? 1 : -1)));
+          npMarcarSel();
+          return;
+        }
+        if (e.key !== 'Enter' || e.ctrlKey || e.altKey) return;
+        if (cmdEsComando(b.value)) {
+          e.preventDefault();
+          cmdEjecutar(b.value, CMD_PC).then(function () { b.value = ''; document.getElementById('npResultados').innerHTML = ''; npResultadosActuales = []; b.focus(); });
+          return;
+        }
+        // Enter: elige el producto marcado, lo pone en el pedido y deja el cursor en su cantidad.
+        var elegido = npResultadosActuales[npSelIdx] || npResultadosActuales[0];
+        if (elegido) { e.preventDefault(); agregarNPTeclado(elegido); }
       });
     })();
     // Enter en formularios: pasa al campo siguiente o hace la accion principal (igual que tocar el boton).
@@ -8130,15 +8285,61 @@ $htmlPC = @'
     function pintarCampanaStockBajo() {
       const v = visiblesStockBajo();
       const badge = document.getElementById('badgeStockBajo');
-      badge.style.display = v.length ? 'flex' : 'none';
-      badge.textContent = v.length;
+      const totalBadge = v.length + msgNoVistos;
+      badge.style.display = totalBadge ? 'flex' : 'none';
+      badge.textContent = totalBadge;
       document.getElementById('listaStockBajo').innerHTML = v.length
         ? v.map(p => '<div style="display:flex; justify-content:space-between; align-items:center; gap:8px; padding:6px 0; border-bottom:1px solid #334155;"><span>&#9888; ' + (p.nombre || p.sku) + ' <b>(' + p.stock + ')</b></span><button class="btn-toggle" style="font-size:12px; padding:3px 8px;" onclick=\'descartarStockBajo(' + JSON.stringify(p.sku) + ')\'>&#10005;</button></div>').join('')
         : '<div style="color:#94a3b8;">Sin avisos de stock bajo.</div>';
     }
+    // ---- Mensajes en la misma campanita: recientes arriba, anteriores hacia abajo (hasta 300 guardados) ----
+    let msgHistorial = [];
+    let msgNoVistos = 0;
+    try { msgNoVistos = parseInt(localStorage.getItem('msgNoVistos') || '0', 10) || 0; } catch (e) {}
+    let msgPanelTimer = null;
+    function msgGuardarNoVistos(n) {
+      msgNoVistos = Math.max(0, n);
+      try { localStorage.setItem('msgNoVistos', String(msgNoVistos)); } catch (e) {}
+      pintarCampanaStockBajo();
+    }
+    function msgDiaTexto(h) {
+      const d = String(h || '').slice(0, 10);
+      const y = new Date(); y.setDate(y.getDate() - 1);
+      const ayer = y.getFullYear() + '-' + String(y.getMonth() + 1).padStart(2, '0') + '-' + String(y.getDate()).padStart(2, '0');
+      if (d === postitHoy()) return 'Hoy';
+      if (d === ayer) return 'Ayer';
+      return d.slice(8, 10) + '/' + d.slice(5, 7) + '/' + d.slice(0, 4);
+    }
+    function pintarMensajesPC() {
+      const cont = document.getElementById('listaMensajesPC');
+      if (!cont) return;
+      if (!msgHistorial.length) { cont.innerHTML = '<div style="color:#94a3b8;">Sin mensajes todavia.</div>'; return; }
+      let html = '', diaAnt = '';
+      msgHistorial.slice().reverse().forEach(function (m) {
+        const dia = msgDiaTexto(m.hora);
+        if (dia !== diaAnt) { html += '<div style="margin:8px 0 2px; font-size:11px; color:#94a3b8; font-weight:700;">' + dia + '</div>'; diaAnt = dia; }
+        const color = m.enviado ? '#7dd3fc' : (m.de === 'AxisPOS' ? '#fbbf24' : '#86efac');
+        const quien = m.enviado ? ('Caja &rarr; ' + escaparHtml(m.de)) : escaparHtml(m.de);
+        html += '<div style="padding:5px 0; border-bottom:1px solid #334155;"><div style="font-size:11px; color:' + color + ';"><b>' + quien + '</b> &middot; ' + escaparHtml(String(m.hora || '').slice(11, 16)) + '</div><div style="word-break:break-word;">' + escaparHtml(m.texto) + '</div></div>';
+      });
+      cont.innerHTML = html;
+    }
+    async function cargarHistorialMensajes() {
+      try {
+        const r = await fetch('/api/mensajes/historial');
+        const d = await r.json().catch(function () { return null; });
+        if (d && d.ok) { msgHistorial = d.mensajes || []; pintarMensajesPC(); }
+      } catch (e) {}
+    }
     function togglePanelStockBajo() {
       const el = document.getElementById('panelStockBajo');
-      el.style.display = el.style.display === 'none' ? 'block' : 'none';
+      const abrir = el.style.display === 'none';
+      el.style.display = abrir ? 'block' : 'none';
+      if (abrir) {
+        msgGuardarNoVistos(0);
+        cargarHistorialMensajes();
+        if (!msgPanelTimer) msgPanelTimer = setInterval(cargarHistorialMensajes, 3000);
+      } else if (msgPanelTimer) { clearInterval(msgPanelTimer); msgPanelTimer = null; }
     }
     function descartarStockBajo(sku) {
       const p = stockBajoLista.find(x => x.sku === sku);
@@ -8230,12 +8431,15 @@ $htmlPC = @'
     function buscarProductos(lista, textoBuscado) {
       const q = normalizar(textoBuscado).trim();
       if (!q) return lista;
+      const qs = q.replace(/\s+/g, '');
       const sets = consultasEquivalentes(q).map(tokensBusqueda).filter(s => s.length > 0);
       const res = [];
       for (const p of lista) {
         const c = textoBusquedaProducto(p);
         let score = 99;
-        if (c.nom.includes(q) || c.sku.includes(q)) score = 0;
+        if (qs && c.sku && (c.sku === qs || (/^\d+$/.test(qs) && /^\d+$/.test(c.sku) && c.sku.replace(/^0+/, '') === qs.replace(/^0+/, '')))) score = -2;   // SKU exacto: primero
+        else if (qs.length >= 2 && c.sku && c.sku.indexOf(qs) === 0) score = -1;                                                                        // SKU que empieza por lo escrito
+        else if (c.nom.includes(q) || c.sku.includes(q)) score = 0;
         else {
           for (let i = 0; i < sets.length; i++) {
             if (sets[i].every(tk => c.todo.includes(tk))) { score = (i === 0 ? 1 : 2); break; }
@@ -8765,6 +8969,9 @@ $htmlPC = @'
         '<label style="font-size:13px; display:flex; align-items:center; gap:8px; margin-bottom:10px;"><input type="checkbox" id="maUsar"' + (d.usar !== false ? ' checked' : '') + '> Usar los mínimos de AxisPOS</label>' +
         '<label style="font-size:13px; display:block; margin-bottom:4px;">Columna del mínimo en AxisPOS (déjala vacía para que se detecte sola):</label>' +
         '<input id="maCol" class="np-input" value="' + escaparHtml(d.columna || '') + '" placeholder="se detecta sola">' +
+        '<label style="font-size:13px; display:block; margin:8px 0 4px;">Cantidad nominal / máxima (cuánto cabe en el piso o estante), como tabla.columna, ej. store.MaxQtty o goods.MaxStock. Vacía = se detecta sola. La usa "Qué bajar del almacén" con 0 días a cubrir y como tope:</label>' +
+        '<input id="maMax" class="np-input" value="' + escaparHtml(d.maxRef || '') + '" placeholder="se detecta sola">' +
+        '<button style="' + PC_BTN + '" onclick="probarMaxAxis()">Detectar y probar nominal / máximo</button><div id="maMaxMsg" style="font-size:12px; margin:6px 0 8px;"></div>' +
         '<div style="' + PC_CAJA + '">Productos con mínimo en AxisPOS: <b>' + (d.n || 0) + '</b>' + (d.ultima ? '<br>Última lectura: ' + escaparHtml(d.ultima) : '') +
         (d.error ? '<br><span style="color:#fca5a5;">' + escaparHtml(d.error) + '</span>' : '') + '</div>' +
         '<button style="' + PC_BTN + '" onclick="guardarMinAxis(false)">Guardar</button> <button style="' + PC_BTN + '" onclick="guardarMinAxis(true)">Guardar y leer de AxisPOS ahora</button><div id="maMsg" style="font-size:12px; margin-top:8px;"></div>';
@@ -8772,11 +8979,23 @@ $htmlPC = @'
     async function guardarMinAxis(cargar) {
       const msg = pcById('maMsg');
       msg.style.color = '#cbd5e1'; msg.textContent = cargar ? 'Leyendo AxisPOS...' : 'Guardando...';
-      const r = await pcApi('/api/minimos/axis', { usar: pcById('maUsar').checked, columna: pcById('maCol').value.trim(), cargar: !!cargar });
+      const r = await pcApi('/api/minimos/axis', { usar: pcById('maUsar').checked, columna: pcById('maCol').value.trim(), maxRef: pcById('maMax').value.trim(), cargar: !!cargar });
       if (!r.ok) { msg.style.color = '#fca5a5'; msg.textContent = (r.d && r.d.error) || 'No se pudo.'; return; }
       msg.style.color = '#86efac';
       msg.textContent = cargar ? ('Listo: ' + r.d.n + ' productos con mínimo en AxisPOS (columna ' + r.d.columna + ').') : 'Guardado.';
       if (cargar) pcById('maCol').value = r.d.columna || pcById('maCol').value;
+    }
+
+    async function probarMaxAxis() {
+      const msg = pcById('maMaxMsg');
+      msg.style.color = '#cbd5e1'; msg.textContent = 'Buscando en AxisPOS...';
+      const g = await pcApi('/api/minimos/axis', { usar: pcById('maUsar').checked, columna: pcById('maCol').value.trim(), maxRef: pcById('maMax').value.trim() });
+      if (!g.ok) { msg.style.color = '#fca5a5'; msg.textContent = (g.d && g.d.error) || 'No se pudo guardar.'; return; }
+      const r = await pcApi('/api/minimos/axis', { probarMax: true });
+      if (!r.ok) { msg.style.color = '#fca5a5'; msg.textContent = (r.d && r.d.error) || 'No se pudo leer.'; return; }
+      msg.style.color = '#86efac';
+      msg.textContent = 'Columna ' + r.d.maxRef + ': ' + r.d.n + ' productos con cantidad nominal / máxima.';
+      pcById('maMax').value = r.d.maxRef || pcById('maMax').value;
     }
 
     // ---- Stock estatico (baja rotacion) ----
@@ -8828,6 +9047,461 @@ $htmlPC = @'
       m.textContent = r.ok ? 'Rol guardado.' : ((r.d && r.d.error) || 'No se pudo guardar.');
       await cargarPermisos();
     }
+
+    // ---- Modo comandos (teclado) dentro del mismo buscador ----
+    //   +torni 5   agrega 5 de "torni..."   (+torni = 1; +taladro 13 x1 si el nombre termina en numero)
+    //   -50        descuento del 50% a la ultima linea   (-50 todo = a todo el pedido; -0 quita el descuento)
+    //   -torni     quita ese producto   (-torni 2 = resta 2 unidades)
+    //   =8         deja la ultima linea en 8 unidades
+    //   /enviar  /limpiar  /nota texto  /ayuda   (y segun la pantalla: /cliente, /pago, /para)
+    const CMD_AYUDA = 'COMANDOS DEL BUSCADOR (escribe y Enter)\n\n' +
+      '+torni 5        agrega 5 de "torni..." (sin numero = 1)\n' +
+      '+326 5          agrega 5 del SKU 326 (el SKU va primero que el nombre)\n' +
+      '(PC) 326 + Enter  elige el producto y pasa solo a la cantidad; Enter y sigues con el siguiente; Alt+Enter envia\n' +
+      '-326            quita el SKU 326 (hasta -100 es descuento)\n' +
+      '+taladro 13 x1  usa xN si el nombre termina en numero\n' +
+      '-50             descuento 50% a la ultima linea\n' +
+      '-50 todo        descuento 50% a todo el pedido\n' +
+      '-0              quita el descuento\n' +
+      '-torni          quita ese producto del pedido\n' +
+      '-torni 2        resta 2 unidades\n' +
+      '=8              deja la ultima linea en 8 unidades\n' +
+      '/enviar         manda el pedido\n' +
+      '/limpiar        vacia el pedido\n' +
+      '/nota texto     pone la nota\n' +
+      '/cliente nombre nombre del cliente (movil)\n' +
+      '/pago transferencia   metodo de pago (movil)\n' +
+      '/para nombre    vendedor destino (PC; /para todos)';
+    function cmdEsComando(raw) { return /^[+\-=\/]/.test(String(raw || '').trim()); }
+    function cmdNum(n) { return String(Math.round((Number(n) || 0) * 100) / 100).replace('.', ','); }
+    function cmdPartirProducto(tipo, resto) {
+      let t = String(resto || '').trim();
+      let n = 1, nExp = false;
+      let m = /^(.*?)(?:\s*[x*]\s*|\s+)(\d+(?:[.,]\d+)?)$/i.exec(t);
+      if (m && m[1].trim()) { t = m[1].trim(); n = parseFloat(m[2].replace(',', '.')); nExp = true; }
+      else {
+        const m2 = /^(\d+(?:[.,]\d+)?)\s*[x*]\s*(.+)$/i.exec(t);
+        if (m2) { n = parseFloat(m2[1].replace(',', '.')); t = m2[2].trim(); nExp = true; }
+      }
+      if (!(n > 0)) n = 1;
+      return { tipo: tipo, texto: t, n: n, nExp: nExp };
+    }
+    function cmdParsear(raw) {
+      const s = String(raw || '').trim();
+      if (!cmdEsComando(s)) return null;
+      const c = s.charAt(0);
+      if (c === '/') { const p = s.slice(1).trim().split(/\s+/); return { tipo: 'sistema', cmd: (p.shift() || '').toLowerCase(), arg: p.join(' ') }; }
+      if (c === '+') return cmdPartirProducto('add', s.slice(1));
+      if (c === '=') {
+        const m = /^=\s*(\d+(?:[.,]\d+)?)\s*$/.exec(s);
+        return m ? { tipo: 'cantidad', n: parseFloat(m[1].replace(',', '.')) } : { tipo: 'error', msg: 'Para cambiar la cantidad escribe =8' };
+      }
+      const d = /^-\s*(\d+(?:[.,]\d+)?)\s*(%|\*|todo|all)?\s*$/i.exec(s);
+      if (d) {
+        const pctD = parseFloat(d[1].replace(',', '.'));
+        // Hasta 100 es descuento (-50). Un numero mayor (-326) es el SKU de un producto a quitar.
+        if (pctD <= 100 || d[2]) return { tipo: 'descuento', pct: pctD, todo: !!d[2] && d[2] !== '%' };
+      }
+      return cmdPartirProducto('quitar', s.slice(1));
+    }
+    // Primero el SKU (exacto; con numeros se ignoran los ceros a la izquierda; con solo digitos tambien "empieza por"),
+    // y recien despues el nombre. Asi "+326 5" agrega 5 del SKU 326 aunque haya productos con "326" en el nombre.
+    function cmdBuscar(base, texto) {
+      const t = String(texto || '').trim();
+      if (!t) return null;
+      const nt = normalizar(t).replace(/\s+/g, '');
+      const sk = function (p) { return normalizar(p.sku || '').replace(/\s+/g, ''); };
+      let r = base.filter(function (p) { return p.sku && sk(p) === nt; });
+      if (!r.length && /^\d+$/.test(nt)) {
+        const nz = nt.replace(/^0+/, '');
+        r = base.filter(function (p) { return p.sku && /^\d+$/.test(sk(p)) && sk(p).replace(/^0+/, '') === nz; });
+      }
+      if (!r.length && /^\d+$/.test(nt)) r = base.filter(function (p) { return p.sku && sk(p).indexOf(nt) === 0; });
+      if (r.length) return { p: r[0], otros: Math.min(r.length - 1, 99), porSku: true };
+      const q = buscarProductos(base, t);
+      return q.length ? { p: q[0], otros: Math.min(q.length - 1, 99), porSku: false } : null;
+    }
+    // Ejecuta un comando con el "adaptador" de cada pantalla (movil o PC). Devuelve true si era un comando.
+    async function cmdEjecutar(raw, A) {
+      const c = cmdParsear(raw);
+      if (!c) return false;
+      if (c.tipo === 'error') { A.msg(c.msg, false); return true; }
+      if (c.tipo === 'add') {
+        if (!c.texto) { A.msg('Escribe el producto: +torni 5', false); return true; }
+        const r = cmdBuscar(A.base(), c.texto);
+        if (!r) {
+          const fuera = A.todos ? cmdBuscar(A.todos(), c.texto) : null;
+          A.msg(fuera ? ('"' + fuera.p.nombre + '" no tiene stock disponible.') : ('No encontre "' + c.texto + '".'), false);
+          return true;
+        }
+        if (A.agregar(r.p, c.n)) A.msg('+' + cmdNum(c.n) + ' x ' + r.p.nombre + (r.porSku ? '  [SKU ' + r.p.sku + ']' : (r.otros ? '  (hay ' + r.otros + ' parecidos)' : '')), true);
+        return true;
+      }
+      if (c.tipo === 'quitar') {
+        if (!c.texto) { A.msg('Escribe el producto a quitar: -torni', false); return true; }
+        const r = cmdBuscar(A.carrito(), c.texto);
+        if (!r) { A.msg('"' + c.texto + '" no esta en el pedido.', false); return true; }
+        A.quitar(r.p, c.nExp ? c.n : null);
+        A.msg(c.nExp ? ('-' + cmdNum(c.n) + ' x ' + r.p.nombre) : ('Quitado: ' + r.p.nombre), true);
+        return true;
+      }
+      if (c.tipo === 'descuento') { A.descuento(c.pct, c.todo); return true; }
+      if (c.tipo === 'cantidad') { A.cantidad(c.n); return true; }
+      if (c.cmd === 'ayuda' || c.cmd === '?' || c.cmd === 'help') { alert(CMD_AYUDA); return true; }
+      await A.sistema(c.cmd, c.arg);
+      return true;
+    }
+    // Linea de ayuda que se ve mientras se escribe un comando (en lugar de los resultados de busqueda).
+    function cmdVistaPrevia(c, base, carritoActual) {
+      if (c.tipo === 'add') {
+        if (!c.texto) return 'Escribe el producto: <b>+torni 5</b>';
+        const r = cmdBuscar(base, c.texto);
+        return r ? ('&#9166; Enter: agregar <b>' + cmdNum(c.n) + '</b> &times; ' + escaparHtml(r.p.nombre) + (r.porSku ? ' <span>(SKU ' + escaparHtml(r.p.sku) + ')</span>' : (r.otros ? ' <span>(+' + r.otros + ' parecidos)</span>' : ''))) : ('Sin coincidencias para "' + escaparHtml(c.texto) + '"');
+      }
+      if (c.tipo === 'quitar') {
+        if (!c.texto) return 'Escribe el producto a quitar: <b>-torni</b>';
+        const r = cmdBuscar(carritoActual, c.texto);
+        return r ? ('&#9166; Enter: ' + (c.nExp ? 'restar ' + cmdNum(c.n) + ' de ' : 'quitar ') + escaparHtml(r.p.nombre)) : ('"' + escaparHtml(c.texto) + '" no esta en el pedido');
+      }
+      if (c.tipo === 'descuento') return '&#9166; Enter: descuento de <b>' + cmdNum(c.pct) + '%</b> ' + (c.todo ? 'a todo el pedido' : 'a la ultima linea');
+      if (c.tipo === 'cantidad') return '&#9166; Enter: dejar la ultima linea en <b>' + cmdNum(c.n) + '</b>';
+      if (c.tipo === 'sistema') return '&#9166; Enter: /' + escaparHtml(c.cmd) + (c.arg ? ' ' + escaparHtml(c.arg) : '') + ' &nbsp; <span>(/ayuda = lista de comandos)</span>';
+      return escaparHtml(c.msg || '');
+    }
+
+    // ---- Modo comandos en "Nuevo pedido" de la PC ----
+    let cmdUltimoSkuNP = null;
+    function cmdLineaObjetivoNP() {
+      return carritoNP.find(function (i) { return i.sku === cmdUltimoSkuNP; }) || carritoNP[carritoNP.length - 1] || null;
+    }
+    function cmdPcMsg(t, ok) {
+      const e = document.getElementById('npError');
+      if (ok) { if (e) e.textContent = ''; mostrarBanner(t, 2200); } else if (e) e.textContent = t;
+    }
+    const CMD_PC = {
+      msg: cmdPcMsg,
+      base: function () {
+        const hay = catalogoNP.some(function (p) { return p.stock !== null && p.stock !== undefined; });
+        return (ocultarSinStock && hay) ? catalogoNP.filter(function (p) { return !(p.stock === null || p.stock === undefined || p.stock <= 0); }) : catalogoNP;
+      },
+      todos: function () { return catalogoNP; },
+      carrito: function () { return carritoNP; },
+      agregar: function (p, n) {
+        const existente = carritoNP.find(function (i) { return i.sku === p.sku; });
+        const disp = stockDisponibleNP(p.sku);
+        const ya = existente ? existente.cantidad : 0;
+        let cant = n;
+        if (disp !== null && (ya + cant) > disp) {
+          cant = Math.max(0, disp - ya);
+          if (cant <= 0) { avisarTopeStockNP(p.nombre, disp); return false; }
+          cmdPcMsg('Solo hay ' + disp + ' de "' + p.nombre + '": se agregaron ' + cmdNum(cant) + '.', false);
+        }
+        if (existente) existente.cantidad = Math.round((existente.cantidad + cant) * 100) / 100;
+        else carritoNP.push({ sku: p.sku, nombre: p.nombre, precio: p.precio, cantidad: cant });
+        cmdUltimoSkuNP = p.sku;
+        renderCarritoNP();
+        return true;
+      },
+      quitar: function (item, n) {
+        if (n === null) carritoNP = carritoNP.filter(function (i) { return i.sku !== item.sku; });
+        else { item.cantidad = Math.round((item.cantidad - n) * 100) / 100; if (item.cantidad <= 0) carritoNP = carritoNP.filter(function (i) { return i.sku !== item.sku; }); }
+        renderCarritoNP();
+      },
+      descuento: function (pct, todo) {
+        if (!(pct >= 0 && pct <= 100)) { cmdPcMsg('El descuento va de 0 a 100.', false); return; }
+        if (!carritoNP.length) { cmdPcMsg('El pedido esta vacio.', false); return; }
+        const objetivos = todo ? carritoNP.slice() : [cmdLineaObjetivoNP()];
+        objetivos.forEach(function (it) {
+          const cat = catalogoNP.find(function (p) { return p.sku === it.sku; });
+          const base = (cat && cat.precio) || it.precio;
+          it.precio = Math.round(base * (1 - pct / 100) * 100) / 100;
+        });
+        renderCarritoNP();
+        const quien = todo ? 'todo el pedido' : objetivos[0].nombre;
+        cmdPcMsg(pct === 0 ? ('Sin descuento en ' + quien + '.') : ('-' + cmdNum(pct) + '% en ' + quien), true);
+      },
+      cantidad: function (n) {
+        const it = cmdLineaObjetivoNP();
+        if (!it) { cmdPcMsg('El pedido esta vacio.', false); return; }
+        fijarCantidadNP(it.sku, n);
+        cmdPcMsg(it.nombre + ': ' + cmdNum(n), true);
+      },
+      sistema: async function (cmd, arg) {
+        if (cmd === 'enviar' || cmd === 'e') { enviarPedidoAVendedor(); return; }
+        if (cmd === 'limpiar' || cmd === 'l') {
+          if (!carritoNP.length) { cmdPcMsg('El pedido ya esta vacio.', false); return; }
+          if (!confirm('Vaciar el pedido?')) return;
+          carritoNP = []; renderCarritoNP();
+          return;
+        }
+        if (cmd === 'nota') { const n = document.getElementById('npNota'); if (n) { n.value = arg; cmdPcMsg(arg ? 'Nota puesta.' : 'Nota borrada.', true); } return; }
+        if (cmd === 'para') {
+          const sel = document.getElementById('selVendedorDestino');
+          const q = normalizar(arg);
+          if (!sel || !q) { cmdPcMsg('Escribe a quien: /para juan  o  /para todos', false); return; }
+          const op = Array.prototype.slice.call(sel.options).find(function (o) { return normalizar(o.textContent).indexOf(q) >= 0 || (q === 'todos' && o.value === '__TODOS__'); });
+          if (!op) { cmdPcMsg('No encuentro ese vendedor.', false); return; }
+          sel.value = op.value;
+          cmdPcMsg('Para: ' + op.textContent, true);
+          return;
+        }
+        cmdPcMsg('Ese comando no aplica aqui: /' + cmd + '  (/ayuda)', false);
+      }
+    };
+    function cmdPreviewNP(c) {
+      const cont = document.getElementById('npResultados');
+      cont.innerHTML = '<div class="np-vacio" style="text-align:left; color:#fde68a;">' + cmdVistaPrevia(c, CMD_PC.base(), carritoNP) + '</div>';
+    }
+
+    // ================= Notas rapidas (post-it) flotantes =================
+    // Recados del dia sobre la pantalla (ej. "llamar al proveedor de cemento a las 4 PM"). Se arrastran, se marcan
+    // como hechos y, si tienen hora, avisan cuando llega. Se guardan en el servidor (no se pierden al reiniciar).
+    const POSTIT_COLORES = { amarillo: '#fde047', rosa: '#f9a8d4', verde: '#86efac', azul: '#93c5fd', naranja: '#fdba74' };
+    const POSTIT_ORDEN = ['amarillo', 'rosa', 'verde', 'azul', 'naranja'];
+    let postitsDatos = [];
+    let postitsVisibles = true;
+    let postitsDrag = null;
+    let postitsEditando = false;
+    let postitsColorNuevo = 'amarillo';
+    const postitsAlertando = new Set();
+    function postitHoy() { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
+    function postitAhoraHM() { const d = new Date(); return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); }
+    // "llamar al proveedor a las 4 PM" -> 16:00  (sin AM/PM, de 1 a 7 se toma como tarde)
+    function postitHoraDeTexto(t) {
+      const m = /(?:a\s+las?|para\s+las?|@)\s*(\d{1,2})(?::(\d{2}))?\s*(a\.?\s?m\.?|p\.?\s?m\.?)?/i.exec(String(t || ''));
+      if (!m) return '';
+      let h = parseInt(m[1], 10);
+      const mi = m[2] ? parseInt(m[2], 10) : 0;
+      const suf = (m[3] || '').toLowerCase().replace(/[\s.]/g, '');
+      if (suf === 'pm' && h < 12) h += 12;
+      else if (suf === 'am' && h === 12) h = 0;
+      else if (!suf && h >= 1 && h <= 7) h += 12;
+      if (h > 23 || mi > 59) return '';
+      return String(h).padStart(2, '0') + ':' + String(mi).padStart(2, '0');
+    }
+    async function postitApi(cuerpo) {
+      try {
+        const r = await fetch('/api/postits', { method: 'POST', body: JSON.stringify(cuerpo) });
+        const d = await r.json().catch(function () { return null; });
+        return (r.ok && d && d.ok) ? d : null;
+      } catch (e) { return null; }
+    }
+    function postitBeep() {
+      try {
+        const C = window.AudioContext || window.webkitAudioContext;
+        const ctx = new C();
+        [880, 660, 880].forEach(function (f, i) {
+          const o = ctx.createOscillator(), g = ctx.createGain();
+          o.frequency.value = f; o.connect(g); g.connect(ctx.destination);
+          g.gain.setValueAtTime(0.15, ctx.currentTime + i * 0.22);
+          o.start(ctx.currentTime + i * 0.22); o.stop(ctx.currentTime + i * 0.22 + 0.16);
+        });
+      } catch (e) {}
+    }
+    function postitsCSS() {
+      if (document.getElementById('postitsCSS')) return;
+      const s = document.createElement('style');
+      s.id = 'postitsCSS';
+      s.textContent =
+        '.postit{position:fixed;width:190px;min-height:90px;border-radius:4px;box-shadow:2px 4px 12px rgba(0,0,0,.4);color:#1f2937;font-size:13px;z-index:45;pointer-events:auto;}' +
+        '.postit-barra{cursor:grab;display:flex;justify-content:space-between;align-items:center;padding:2px 4px;background:rgba(0,0,0,.1);touch-action:none;user-select:none;border-radius:4px 4px 0 0;}' +
+        '.postit-barra button{background:none;border:none;cursor:pointer;font-size:13px;padding:0 3px;min-height:0 !important;line-height:1.4;color:#111;}' +
+        '.postit-hora{font-size:11px;font-weight:700;}' +
+        '.postit-texto{padding:6px 8px 10px;white-space:pre-wrap;word-break:break-word;cursor:text;}' +
+        '.postit-texto textarea{width:100%;min-height:60px;font-size:13px;background:rgba(255,255,255,.6);border:1px solid rgba(0,0,0,.3);border-radius:3px;color:#111;}' +
+        '.postit.hecho .postit-texto{text-decoration:line-through;opacity:.55;}' +
+        '.postit.alerta{animation:postitPulso .8s infinite alternate;}' +
+        '@keyframes postitPulso{from{box-shadow:0 0 0 0 rgba(239,68,68,.95);}to{box-shadow:0 0 0 12px rgba(239,68,68,0);}}' +
+        '#postitCapa{position:fixed;inset:0;pointer-events:none;z-index:45;}' +
+        '#postitBtn{position:fixed;right:18px;bottom:18px;width:54px;height:54px;border-radius:50%;border:none;background:#fde047;color:#111;font-size:26px;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,.5);z-index:46;min-height:0 !important;}' +
+        '#postitBadge{position:absolute;top:-4px;right:-4px;background:#dc2626;color:#fff;border-radius:999px;font-size:11px;font-weight:700;min-width:18px;height:18px;line-height:18px;text-align:center;}' +
+        '#postitPanel{position:fixed;right:18px;bottom:82px;width:310px;background:#1e293b;border:1px solid #475569;border-radius:12px;padding:10px;z-index:46;display:none;box-shadow:0 8px 24px rgba(0,0,0,.5);color:#e2e8f0;font-size:12px;}' +
+        '#postitPanel input{width:100%;margin:0 0 6px;}' +
+        '.postit-dot{display:inline-block;width:20px;height:20px;border-radius:50%;border:2px solid transparent;cursor:pointer;margin-right:4px;vertical-align:middle;}' +
+        '.postit-dot.sel{border-color:#fff;}' +
+        '@media (max-width:760px){#postitPanel{right:8px;left:8px;width:auto;}}';
+      document.head.appendChild(s);
+    }
+    function postitsEnsureUI() {
+      postitsCSS();
+      if (document.getElementById('postitBtn')) return;
+      const capa = document.createElement('div'); capa.id = 'postitCapa'; document.body.appendChild(capa);
+      const btn = document.createElement('button');
+      btn.id = 'postitBtn'; btn.type = 'button'; btn.title = 'Notas rapidas (Alt+N)';
+      btn.innerHTML = '&#128221;<span id="postitBadge" style="display:none;"></span>';
+      btn.onclick = function () { postitsPanel(); };
+      document.body.appendChild(btn);
+      const panel = document.createElement('div'); panel.id = 'postitPanel';
+      panel.innerHTML =
+        '<b style="color:#fff; font-size:13px;">Notas rápidas</b>' +
+        '<div style="margin:6px 0;"><input id="postitTexto" class="np-input" maxlength="300" placeholder="Recado… (ej: llamar al proveedor a las 4 PM)"></div>' +
+        '<div id="postitColores" style="margin-bottom:6px;"></div>' +
+        '<div style="color:#94a3b8; margin-bottom:6px;">Enter agrega. Si escribes "a las 4 PM" se pone la hora y te avisa.</div>' +
+        '<div style="display:flex; gap:6px; flex-wrap:wrap;"><button type="button" id="postitVer" style="' + PC_BTN + '"></button><button type="button" id="postitLimpiar" style="' + PC_BTN + 'background:#475569;">Quitar las hechas</button><button type="button" id="postitCerrar" style="' + PC_BTN + 'background:#475569;">Cerrar</button></div>';
+      document.body.appendChild(panel);
+      document.getElementById('postitColores').innerHTML = POSTIT_ORDEN.map(function (c) { return '<span class="postit-dot' + (c === postitsColorNuevo ? ' sel' : '') + '" data-color="' + c + '" style="background:' + POSTIT_COLORES[c] + ';"></span>'; }).join('');
+      document.getElementById('postitColores').addEventListener('click', function (e) {
+        const c = e.target && e.target.getAttribute && e.target.getAttribute('data-color');
+        if (!c) return;
+        postitsColorNuevo = c;
+        Array.prototype.forEach.call(document.querySelectorAll('.postit-dot'), function (d) { d.classList.toggle('sel', d.getAttribute('data-color') === c); });
+        document.getElementById('postitTexto').focus();
+      });
+      document.getElementById('postitTexto').addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); postitsAgregar(); }
+        else if (e.key === 'Escape') { e.stopPropagation(); postitsPanel(false); }
+      });
+      document.getElementById('postitVer').onclick = function () { postitsVisibles = !postitsVisibles; try { localStorage.setItem('postitsVisibles', postitsVisibles ? '1' : '0'); } catch (e) {} postitsRender(); };
+      document.getElementById('postitLimpiar').onclick = async function () { await postitApi({ op: 'limpiar' }); postitsCargar(true); };
+      document.getElementById('postitCerrar').onclick = function () { postitsPanel(false); };
+      capa.addEventListener('click', postitsClick);
+      capa.addEventListener('pointerdown', postitsPointerDown);
+    }
+    function postitsPanel(forzar) {
+      const p = document.getElementById('postitPanel');
+      const abrir = (forzar === undefined) ? (p.style.display !== 'block') : forzar;
+      p.style.display = abrir ? 'block' : 'none';
+      if (abrir) { postitsVisibles = true; try { localStorage.setItem('postitsVisibles', '1'); } catch (e) {} postitsRender(); setTimeout(function () { document.getElementById('postitTexto').focus(); }, 30); }
+    }
+    async function postitsAgregar() {
+      const inp = document.getElementById('postitTexto');
+      const texto = inp.value.trim();
+      if (!texto) return;
+      const hora = postitHoraDeTexto(texto);
+      const cuerpo = { op: 'add', texto: texto, color: postitsColorNuevo, hora: hora };
+      if (hora && hora <= postitAhoraHM()) cuerpo.avisadoDia = postitHoy();   // la hora ya paso hoy: no avisar de inmediato
+      const d = await postitApi(cuerpo);
+      if (!d) { mostrarBanner('No se pudo guardar la nota.', 3000); return; }
+      inp.value = '';
+      postitsDatos.push(d.nota);
+      postitsRender();
+      if (hora) mostrarBanner('Nota guardada. Te aviso a las ' + hora + '.', 3000);
+    }
+    function postitsPosicion(n, i) {
+      const x = (n.x === null || n.x === undefined) ? Math.max(8, window.innerWidth - 220) : n.x;
+      const y = (n.y === null || n.y === undefined) ? 90 + (i % 5) * 112 : n.y;
+      return { x: Math.min(Math.max(0, x), Math.max(0, window.innerWidth - 60)), y: Math.min(Math.max(0, y), Math.max(0, window.innerHeight - 40)) };
+    }
+    function postitsRender() {
+      postitsEnsureUI();
+      const capa = document.getElementById('postitCapa');
+      const pendientes = postitsDatos.filter(function (n) { return !n.hecho; }).length;
+      const badge = document.getElementById('postitBadge');
+      badge.style.display = pendientes ? 'block' : 'none';
+      badge.textContent = pendientes;
+      document.getElementById('postitVer').textContent = postitsVisibles ? 'Ocultar notas' : 'Mostrar notas';
+      if (postitsDrag || postitsEditando) return;
+      if (!postitsVisibles) { capa.innerHTML = ''; return; }
+      capa.innerHTML = postitsDatos.map(function (n, i) {
+        const p = postitsPosicion(n, i);
+        return '<div class="postit' + (n.hecho ? ' hecho' : '') + (postitsAlertando.has(n.id) ? ' alerta' : '') + '" data-id="' + n.id + '" style="left:' + p.x + 'px; top:' + p.y + 'px; background:' + (POSTIT_COLORES[n.color] || POSTIT_COLORES.amarillo) + ';">' +
+          '<div class="postit-barra" data-drag="1"><span class="postit-hora">' + (n.hora ? '&#9200; ' + escaparHtml(n.hora) : '') + '</span>' +
+          '<span><button type="button" data-acc="hora" title="Hora del aviso">&#9200;</button><button type="button" data-acc="color" title="Cambiar color">&#127912;</button><button type="button" data-acc="hecho" title="Hecho">&#10003;</button><button type="button" data-acc="borrar" title="Borrar">&#10005;</button></span></div>' +
+          '<div class="postit-texto" data-acc="editar">' + escaparHtml(n.texto) + '</div></div>';
+      }).join('');
+    }
+    function postitsPorId(el) {
+      const card = el && el.closest ? el.closest('.postit') : null;
+      return card ? postitsDatos.find(function (n) { return n.id === parseInt(card.getAttribute('data-id'), 10); }) : null;
+    }
+    async function postitsClick(e) {
+      const acc = e.target && e.target.getAttribute && e.target.getAttribute('data-acc');
+      const n = postitsPorId(e.target);
+      if (!n || !acc) return;
+      postitsAlertando.delete(n.id);
+      if (acc === 'hecho') { n.hecho = !n.hecho; postitsRender(); await postitApi({ op: 'update', id: n.id, hecho: n.hecho }); }
+      else if (acc === 'borrar') { postitsDatos = postitsDatos.filter(function (x) { return x.id !== n.id; }); postitsRender(); await postitApi({ op: 'del', id: n.id }); }
+      else if (acc === 'color') { n.color = POSTIT_ORDEN[(POSTIT_ORDEN.indexOf(n.color) + 1) % POSTIT_ORDEN.length]; postitsRender(); await postitApi({ op: 'update', id: n.id, color: n.color }); }
+      else if (acc === 'hora') {
+        const h = prompt('Hora del aviso (ej. 16:30). Vacío = sin aviso:', n.hora || '');
+        if (h === null) return;
+        const hh = h.trim();
+        if (hh && !/^\d{1,2}:\d{2}$/.test(hh)) { mostrarBanner('Escribe la hora así: 16:30', 3000); return; }
+        n.hora = hh; n.avisadoDia = '';
+        postitsRender();
+        await postitApi({ op: 'update', id: n.id, hora: hh });
+      }
+      else if (acc === 'editar') postitsEditar(e.target, n);
+    }
+    function postitsEditar(el, n) {
+      postitsEditando = true;
+      const ta = document.createElement('textarea');
+      ta.value = n.texto; ta.maxLength = 300;
+      el.innerHTML = ''; el.appendChild(ta); ta.focus();
+      let fin = false;
+      const guardar = async function (cancelar) {
+        if (fin) return; fin = true;
+        postitsEditando = false;
+        const nuevo = ta.value.trim();
+        if (!cancelar && nuevo && nuevo !== n.texto) { n.texto = nuevo; await postitApi({ op: 'update', id: n.id, texto: nuevo }); }
+        postitsRender();
+      };
+      ta.addEventListener('blur', function () { guardar(false); });
+      ta.addEventListener('keydown', function (ev) {
+        ev.stopPropagation();
+        if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); guardar(false); }
+        else if (ev.key === 'Escape') { ev.preventDefault(); guardar(true); }
+      });
+    }
+    function postitsPointerDown(e) {
+      const barra = e.target && e.target.closest ? e.target.closest('.postit-barra') : null;
+      if (!barra || (e.target.tagName === 'BUTTON')) return;
+      const card = barra.closest('.postit');
+      const n = postitsPorId(card);
+      if (!n) return;
+      const r = card.getBoundingClientRect();
+      postitsDrag = { n: n, card: card, dx: e.clientX - r.left, dy: e.clientY - r.top };
+      try { barra.setPointerCapture(e.pointerId); } catch (er) {}
+      barra.style.cursor = 'grabbing';
+      const mover = function (ev) {
+        if (!postitsDrag) return;
+        const x = Math.min(Math.max(0, ev.clientX - postitsDrag.dx), window.innerWidth - 60);
+        const y = Math.min(Math.max(0, ev.clientY - postitsDrag.dy), window.innerHeight - 40);
+        postitsDrag.card.style.left = x + 'px'; postitsDrag.card.style.top = y + 'px';
+        postitsDrag.x = x; postitsDrag.y = y;
+      };
+      const soltar = async function () {
+        barra.removeEventListener('pointermove', mover);
+        barra.removeEventListener('pointerup', soltar);
+        barra.removeEventListener('pointercancel', soltar);
+        const d = postitsDrag; postitsDrag = null;
+        barra.style.cursor = 'grab';
+        if (d && d.x !== undefined) { d.n.x = Math.round(d.x); d.n.y = Math.round(d.y); await postitApi({ op: 'update', id: d.n.id, x: d.n.x, y: d.n.y }); }
+      };
+      barra.addEventListener('pointermove', mover);
+      barra.addEventListener('pointerup', soltar);
+      barra.addEventListener('pointercancel', soltar);
+    }
+    async function postitsCargar(forzar) {
+      if (postitsDrag || postitsEditando) return;
+      try {
+        const r = await fetch('/api/postits');
+        const d = await r.json();
+        if (!d || !d.ok) return;
+        const nuevo = d.notas || [];
+        if (forzar || JSON.stringify(nuevo) !== JSON.stringify(postitsDatos)) { postitsDatos = nuevo; postitsRender(); }
+      } catch (e) {}
+    }
+    function postitsRevisarAvisos() {
+      const hoy = postitHoy(), ahora = postitAhoraHM();
+      postitsDatos.forEach(function (n) {
+        if (n.hecho || !n.hora || n.avisadoDia === hoy || ahora < n.hora) return;
+        n.avisadoDia = hoy;
+        postitsAlertando.add(n.id);
+        postitBeep();
+        mostrarBanner('\u23F0 ' + n.texto, 9000);
+        postitsRender();
+        postitApi({ op: 'update', id: n.id, avisadoDia: hoy });
+      });
+    }
+    function iniciarPostits() {
+      try { const v = localStorage.getItem('postitsVisibles'); postitsVisibles = (v === null) ? (window.innerWidth >= 760) : (v === '1'); } catch (e) {}
+      postitsEnsureUI();
+      postitsCargar(true);
+      setInterval(function () { postitsCargar(false); }, 15000);
+      setInterval(postitsRevisarAvisos, 20000);
+    }
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', iniciarPostits); else iniciarPostits();
 
     // ---- Sinonimos de busqueda ----
     async function abrirSinonimos() {
@@ -9092,8 +9766,9 @@ $htmlPC = @'
         if (!lista.length) return;
         beep();
         mostrarBanner(lista.map(m => '\u{1F4AC} ' + m.vendedor + ': ' + m.texto).join('   |   '), 30000);
+        if (pcVisible('panelStockBajo')) cargarHistorialMensajes(); else msgGuardarNoVistos(msgNoVistos + lista.length);
         const b = document.getElementById('banner');
-        b.onclick = () => { b.style.display = 'none'; };
+        b.onclick = () => { b.style.display = 'none'; if (!pcVisible('panelStockBajo')) togglePanelStockBajo(); };
       } catch (e) {}
     }
     setInterval(revisarMensajesPC, 5000);
@@ -9217,9 +9892,64 @@ $htmlPC = @'
         aviso.style.display = conectados.length === 0 ? 'block' : 'none';
         const opcionTodos = '<option value="__TODOS__">Todos los vendedores (el primero que lo tome)</option>';
         sel.innerHTML = opcionTodos + todosNombres.map(v => '<option value="' + v + '">' + v + (conectados.includes(v) ? ' \u25CF en linea' : ' (sin conexion)') + '</option>').join('');
-        if (actual === '__TODOS__' || todosNombres.includes(actual)) sel.value = actual;
+        const deseadoNP = npDestinoPendiente || actual;
+        if (deseadoNP === '__TODOS__' || todosNombres.includes(deseadoNP)) sel.value = deseadoNP;
+        else if (actual === '__TODOS__' || todosNombres.includes(actual)) sel.value = actual;
+        npDestinoPendiente = '';
       } catch (e) {}
     }
+
+    // ---- Borrador del pedido para vendedor: lo que armas queda guardado (aunque cierres con Esc, Cerrar o se cierre el Panel) ----
+    // hasta que lo envies. Se vacia con /limpiar. Solo aplica a pedidos NUEVOS (editar o agregar a un pedido no lo usan).
+    const NP_BORRADOR_KEY = 'borradorPedidoNP';
+    let npBorradorActivo = false;
+    let npDestinoPendiente = '';
+    function npLeerBorrador() {
+      try { const d = JSON.parse(localStorage.getItem(NP_BORRADOR_KEY) || 'null'); return (d && Array.isArray(d.items)) ? d : null; } catch (e) { return null; }
+    }
+    function npPintarBotonBorrador() {
+      const b = document.getElementById('btnNuevoPedidoPC');
+      if (!b) return;
+      const d = npLeerBorrador();
+      const n = d ? d.items.length : 0;
+      b.textContent = d ? ('Continuar borrador' + (n ? (': ' + n + ' producto' + (n === 1 ? '' : 's')) : '') + ' (F2)') : 'Nuevo pedido para vendedor (F2)';
+    }
+    function npGuardarBorrador() {
+      if (!npBorradorActivo) return;
+      try {
+        const nota = ((document.getElementById('npNota') || {}).value || '');
+        if (!carritoNP.length && !nota.trim()) { localStorage.removeItem(NP_BORRADOR_KEY); }
+        else {
+          localStorage.setItem(NP_BORRADOR_KEY, JSON.stringify({
+            items: carritoNP, nota: nota,
+            destino: (document.getElementById('selVendedorDestino') || {}).value || '',
+            vig: (document.getElementById('selVigenciaNP') || {}).value || '',
+            hora: Date.now()
+          }));
+        }
+      } catch (e) {}
+      npPintarBotonBorrador();
+    }
+    function npBorrarBorrador() {
+      try { localStorage.removeItem(NP_BORRADOR_KEY); } catch (e) {}
+      npPintarBotonBorrador();
+    }
+    function npRestaurarBorrador() {
+      const d = npLeerBorrador();
+      if (!d) return;
+      carritoNP = d.items.map(function (i) { return { sku: i.sku, nombre: i.nombre, precio: Number(i.precio) || 0, cantidad: Number(i.cantidad) || 0 }; }).filter(function (i) { return i.sku !== undefined && i.cantidad > 0; });
+      document.getElementById('npNota').value = d.nota || '';
+      if (d.vig) { const sv = document.getElementById('selVigenciaNP'); if (sv) sv.value = d.vig; }
+      npDestinoPendiente = d.destino || '';
+      document.getElementById('npTitulo').textContent = 'Nuevo pedido para vendedor (borrador)';
+      renderCarritoNP();
+      mostrarBanner('Borrador recuperado: ' + carritoNP.length + ' producto' + (carritoNP.length === 1 ? '' : 's') + '. Con /limpiar lo vacias.', 3500);
+    }
+    (function () {
+      ['npNota'].forEach(function (id) { const e = document.getElementById(id); if (e) e.addEventListener('input', npGuardarBorrador); });
+      ['selVendedorDestino', 'selVigenciaNP'].forEach(function (id) { const e = document.getElementById(id); if (e) e.addEventListener('change', npGuardarBorrador); });
+      npPintarBotonBorrador();
+    })();
 
     // Este mismo dialogo sirve para dos cosas: armar un pedido nuevo para un
     // vendedor (sin pedidoIdExistente), o agregar productos rapido a un
@@ -9230,6 +9960,7 @@ $htmlPC = @'
     let enviandoNP = false;
     function hashSimpleNP(t) { let h = 5381; for (let i = 0; i < t.length; i++) h = ((h << 5) + h + t.charCodeAt(i)) | 0; return (h >>> 0).toString(36); }
     function abrirNuevoPedido(pedidoIdExistente, opciones) {
+      npBorradorActivo = false;   // no se guarda nada hasta terminar de abrir (si no, el pedido vacio pisaria el borrador)
       asigEditando = (opciones && opciones.editar) ? opciones.editar : null;
       agregarAPedidoId = pedidoIdExistente || null;
       claveBaseNP = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
@@ -9239,7 +9970,7 @@ $htmlPC = @'
       document.getElementById('npBuscador').value = '';
       document.getElementById('npResultados').innerHTML = '';
       document.getElementById('npTitulo').textContent = agregarAPedidoId ? ('Agregar al pedido #' + agregarAPedidoId) : 'Nuevo pedido para vendedor';
-      document.getElementById('npBtnEnviar').textContent = agregarAPedidoId ? 'Agregar al pedido' : 'Enviar al movil del vendedor';
+      document.getElementById('npBtnEnviar').textContent = agregarAPedidoId ? 'Agregar al pedido (Alt+Enter)' : 'Enviar al movil del vendedor (Alt+Enter)';
       document.getElementById('npDestinoWrap').style.display = agregarAPedidoId ? 'none' : 'block';
       document.getElementById('npVigenciaWrap').style.display = agregarAPedidoId ? 'none' : 'block';
       document.getElementById('npNotaWrap').style.display = agregarAPedidoId ? 'none' : 'block';
@@ -9251,16 +9982,21 @@ $htmlPC = @'
         cargarVendedoresNP();
         if (!intervaloVendedoresNP) intervaloVendedoresNP = setInterval(cargarVendedoresNP, 5000);
       }
+      npBorradorActivo = !agregarAPedidoId && !asigEditando;
+      if (npBorradorActivo) npRestaurarBorrador();
       if (asigEditando) {
         document.getElementById('npTitulo').textContent = 'Editar pedido enviado #' + asigEditando.id;
-        document.getElementById('npBtnEnviar').textContent = 'Guardar cambios';
+        document.getElementById('npBtnEnviar').textContent = 'Guardar cambios (Alt+Enter)';
         document.getElementById('npNota').value = asigEditando.nota || '';
         carritoNP = (asigEditando.items || []).map(i => ({ sku: i.sku, nombre: i.nombre, precio: Number(i.precio) || 0, cantidad: Number(i.cantidad) || 0 }));
         renderCarritoNP();
       }
     }
 
-    function cerrarNuevoPedido() {
+    function cerrarNuevoPedido(yaEnviado) {
+      if (yaEnviado === true) { npBorradorActivo = false; npBorrarBorrador(); }
+      else npGuardarBorrador();   // queda como borrador
+      npBorradorActivo = false;
       document.getElementById('nuevoPedidoOverlay').style.display = 'none';
       if (intervaloVendedoresNP) { clearInterval(intervaloVendedoresNP); intervaloVendedoresNP = null; }
       agregarAPedidoId = null;
@@ -9269,10 +10005,66 @@ $htmlPC = @'
       renderCarritoNP();
     }
 
+    // Resultados que se ven ahora y cual esta marcado (flechas + Enter eligen sin usar el mouse).
+    let npResultadosActuales = [];
+    let npSelIdx = 0;
+    function npMarcarSel() {
+      const filas = document.querySelectorAll('#npResultados .np-resultado');
+      filas.forEach(function (f, i) { f.classList.toggle('np-sel', i === npSelIdx); });
+      if (filas[npSelIdx] && filas[npSelIdx].scrollIntoView) filas[npSelIdx].scrollIntoView({ block: 'nearest' });
+    }
+    // Si se deja escrita una cantidad sin dar Enter y se manda el pedido, se toma esa cantidad.
+    function npConfirmarCantidadEscrita() {
+      const ae = document.activeElement;
+      if (ae && ae.getAttribute && ae.getAttribute('data-sku') !== null && ae.closest && ae.closest('#npCarrito')) {
+        const sku = ae.getAttribute('data-sku'), val = ae.value;
+        ae.blur();                    // (al soltar el campo se aplica solo el cambio; no se redibuja con el campo todavia enfocado)
+        fijarCantidadNP(sku, val);
+      }
+    }
+    // Enter en una cantidad: la fija y devuelve el cursor al buscador para el siguiente producto.
+    function cantidadNPEnter(ev, el) {
+      if (ev.key !== 'Enter' || ev.ctrlKey || ev.altKey) return;
+      ev.preventDefault();
+      const sku = el.getAttribute('data-sku'), val = el.value;
+      const b = document.getElementById('npBuscador');
+      if (b) { b.value = ''; document.getElementById('npResultados').innerHTML = ''; npResultadosActuales = []; b.focus(); }   // al soltar el campo se aplica el cambio
+      fijarCantidadNP(sku, val);
+    }
+    // Pone el cursor (con el numero seleccionado) en la cantidad de ese producto.
+    function enfocarCantidadNP(sku) {
+      const inputs = document.querySelectorAll('#npCarrito input[data-sku]');
+      for (let i = 0; i < inputs.length; i++) {
+        if (inputs[i].getAttribute('data-sku') === String(sku)) {
+          inputs[i].focus(); inputs[i].select();
+          if (inputs[i].scrollIntoView) inputs[i].scrollIntoView({ block: 'nearest' });
+          return;
+        }
+      }
+    }
+    // Eleccion con teclado: si es nuevo entra con 1; si ya estaba, se deja su cantidad para corregirla.
+    function agregarNPTeclado(p) {
+      const existente = carritoNP.find(i => i.sku === p.sku);
+      if (!existente) {
+        const disp = stockDisponibleNP(p.sku);
+        if (disp !== null && disp < 1) { avisarTopeStockNP(p.nombre, disp); return; }
+        carritoNP.push({ sku: p.sku, nombre: p.nombre, precio: p.precio, cantidad: 1 });
+      }
+      cmdUltimoSkuNP = p.sku;
+      document.getElementById('npError').textContent = '';
+      document.getElementById('npBuscador').value = '';
+      document.getElementById('npResultados').innerHTML = '';
+      npResultadosActuales = [];
+      renderCarritoNP();
+      enfocarCantidadNP(p.sku);
+    }
+
     function buscarNP() {
+      const cmdP = cmdParsear(document.getElementById('npBuscador').value);
+      if (cmdP) { npResultadosActuales = []; cmdPreviewNP(cmdP); return; }
       const q = normalizar(document.getElementById('npBuscador').value.trim());
       const cont = document.getElementById('npResultados');
-      if (!q) { cont.innerHTML = ''; return; }
+      if (!q) { cont.innerHTML = ''; npResultadosActuales = []; return; }
       // Si en Ajustes esta activado "Ocultar sin stock a vendedores", aqui tambien se ocultan
       // (solo cuando el Excel trae columna de cantidad, igual que en el movil del vendedor).
       const hayControlNP = catalogoNP.some(p => p.stock !== null && p.stock !== undefined);
@@ -9280,6 +10072,8 @@ $htmlPC = @'
         ? catalogoNP.filter(p => !(p.stock === null || p.stock === undefined || p.stock <= 0))
         : catalogoNP;
       const encontrados = buscarProductos(baseNP, document.getElementById('npBuscador').value).slice(0, 25);
+      npResultadosActuales = encontrados;
+      npSelIdx = 0;
       cont.innerHTML = encontrados.map(p => {
         const fotoTag = tieneFoto(p.sku) ? ('<img class="np-miniatura" src="/foto/' + encodeURIComponent(p.sku) + '.jpg" onerror=\'fotoFallo(this,' + JSON.stringify(String(p.sku)) + ')\' onclick=\'verFotoProductoNP(' + JSON.stringify(p.sku) + ',' + JSON.stringify(p.nombre) + ')\'>') : '';
         return '<div class="np-resultado">' +
@@ -9288,6 +10082,7 @@ $htmlPC = @'
           '<button onclick=\'agregarAlCarritoNP(' + JSON.stringify(p) + ')\'>+</button>' +
         '</div>';
       }).join('');
+      npMarcarSel();
     }
 
     function verFotoProductoNP(sku, nombre) {
@@ -9353,19 +10148,34 @@ $htmlPC = @'
       renderCarritoNP();
     }
 
+    // Si al redibujar el pedido se suelta un campo de cantidad enfocado, el navegador dispara su "change" en medio del
+    // redibujo: se evita el choque dibujando una sola vez y repitiendo al final si hizo falta.
+    let renderNPEnCurso = false, renderNPPendiente = false;
     function renderCarritoNP() {
+      if (renderNPEnCurso) { renderNPPendiente = true; return; }
+      renderNPEnCurso = true;
+      try { renderCarritoNPInterno(); } finally { renderNPEnCurso = false; }
+      if (renderNPPendiente) { renderNPPendiente = false; renderCarritoNP(); }
+      npGuardarBorrador();
+    }
+    function renderCarritoNPInterno() {
       const cont = document.getElementById('npCarrito');
       if (carritoNP.length === 0) {
         cont.innerHTML = '<div class="np-vacio">Sin productos aun.</div>';
       } else {
         cont.innerHTML = carritoNP.map(i =>
           '<div class="np-carrito-item">' +
-            '<div>' + i.nombre + '</div>' +
+            '<div>' + i.nombre + (function () {
+              const cp = catalogoNP.find(function (c) { return c.sku === i.sku; });
+              const lista = cp ? cp.precio : i.precio;
+              const pctD = (lista > 0 && i.precio < lista - 0.005) ? Math.round((1 - i.precio / lista) * 1000) / 10 : 0;
+              return '<div style="font-size:11px; color:#94a3b8;">$' + i.precio.toFixed(2) + (pctD ? ' <span style="color:#fbbf24;">(-' + pctD + '%)</span>' : '') + '</div>';
+            })() + '</div>' +
             '<div style="display:flex; align-items:center; gap:8px;">' +
               '<button onclick="cambiarCantidadNP(\'' + i.sku + '\', -1)">-</button>' +
               '<input type="number" min="0" step="any" inputmode="decimal" value="' + i.cantidad + '" title="Escribe la cantidad" ' +
                 'style="width:62px; text-align:center; padding:4px 2px; border-radius:6px; border:1px solid #475569; background:#0f172a; color:#fff; font-size:14px;" ' +
-                'onfocus="this.select()" onkeydown="if(event.key===\'Enter\'){this.blur();}" onchange="fijarCantidadNP(\'' + i.sku + '\', this.value)">' +
+                'data-sku="' + escaparHtml(String(i.sku)) + '" onfocus="this.select()" onkeydown="cantidadNPEnter(event, this)" onchange="fijarCantidadNP(\'' + i.sku + '\', this.value)">' +
               '<button onclick="cambiarCantidadNP(\'' + i.sku + '\', 1)">+</button>' +
             '</div>' +
           '</div>'
@@ -9413,7 +10223,7 @@ $htmlPC = @'
           const dM = await resM.json().catch(() => null);
           if (!resM.ok || !dM || !dM.ok) { err.textContent = (dM && dM.error) || 'No se pudo enviar el mensaje.'; return; }
           mostrarBanner(paraTodos ? 'Mensaje enviado a todos los vendedores' : ('Mensaje enviado a ' + destino));
-          cerrarNuevoPedido();
+          cerrarNuevoPedido(true);
         } catch (e) { err.textContent = 'No se pudo enviar (revisa la conexion).'; }
         return;
       }
@@ -9426,7 +10236,7 @@ $htmlPC = @'
         const msjEnviado = paraTodos ? ('Pedido guardado para todos los vendedores (vale ' + vigMin + ' min)') : ('Pedido guardado para ' + destino + ' (vale ' + vigMin + ' min)');
         if (data && data.id) mostrarBannerDeshacer(msjEnviado, data.id);
         else mostrarBanner(msjEnviado);
-        cerrarNuevoPedido();
+        cerrarNuevoPedido(true);
       } catch (e) { err.textContent = 'No se pudo enviar (revisa la conexion).'; }
     }
   </script>
@@ -9610,6 +10420,8 @@ $htmlVendedor = @'
   .mp-acciones button, .mp-acciones select { flex:1; min-width:90px; padding:8px 6px; border-radius:7px; border:none; font-size:12px; font-weight:600; cursor:pointer; }
   .mp-btn-cobrar { background:#16a34a; color:#fff; }
   .mp-btn-imprimir { background:#475569; color:#fff; }
+  .cmd-hint { background:#0f172a; color:#fde68a; border:1px dashed #a16207; border-radius:8px; padding:10px 12px; font-size:14px; margin:6px 0; }
+  .cmd-hint span { color:#94a3b8; font-size:12px; }
   .mp-ficha-axis { display:inline-block; background:#dcfce7; color:#166534; border:1px solid #86efac; border-radius:999px; padding:2px 10px; font-size:12px; font-weight:700; margin:2px 0 6px; }
   .mp-btn-editar { background:#2563eb; color:#fff; }
   .mp-btn-cancelar { background:#b91c1c; color:#fff; }
@@ -10290,17 +11102,54 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
       const r = await fetch('/api/pines/verificar', { method: 'POST', body: JSON.stringify({ vendedor: nombre, pin: pin }) });
       return await r.json();
     }
+    // ---- Bloqueo por ausencia: el PIN solo se vuelve a pedir si el vendedor estuvo 2 horas (o mas) fuera de la app ----
+    // Mientras trabaja en la app no se pide nunca (aunque pasen horas). Si sale y vuelve antes de 2 horas, entra directo.
+    // Si es la primera vez en este telefono (o no hay registro de uso), tambien se pide.
+    const CLAVE_ACTIVIDAD = 'vendedorUltimaActividad';
+    const AUSENCIA_MAX_MS = 2 * 60 * 60 * 1000;
+    function marcarActividad() { try { localStorage.setItem(CLAVE_ACTIVIDAD, String(Date.now())); } catch (e) {} }
+    function ausenciaExcedida() {
+      let t = 0;
+      try { t = parseInt(localStorage.getItem(CLAVE_ACTIVIDAD) || '0', 10) || 0; } catch (e) {}
+      return !t || (Date.now() - t) >= AUSENCIA_MAX_MS;
+    }
+    function sesionVendedorActiva() {
+      return !autoservicioActivo && !!(nombreInput.value || '').trim() && !loginVisible();
+    }
+    (function () {
+      let ultimoToque = 0;
+      const toque = function () { const t = Date.now(); if (t - ultimoToque > 20000 && sesionVendedorActiva() && document.visibilityState === 'visible') { ultimoToque = t; marcarActividad(); } };
+      ['pointerdown', 'keydown', 'touchstart'].forEach(function (ev) { document.addEventListener(ev, toque, true); });
+      setInterval(function () { if (document.visibilityState === 'visible' && sesionVendedorActiva()) marcarActividad(); }, 30000);
+      document.addEventListener('visibilitychange', function () {
+        if (document.visibilityState === 'hidden') { if (sesionVendedorActiva()) marcarActividad(); return; }
+        // Volvio a la app: si estuvo 2 horas o mas fuera, pide el PIN.
+        if (!autoservicioActivo && (nombreInput.value || '').trim() && !loginVisible() && ausenciaExcedida()) iniciarSesionVendedor();
+      });
+      window.addEventListener('pagehide', function () { if (sesionVendedorActiva()) marcarActividad(); });
+    })();
     async function iniciarSesionVendedor() {
       if (autoservicioActivo) return true;
       const nombre = (nombreInput.value || '').trim();
       if (!nombre) { abrirLogin(); return false; }
       let d;
-      try { d = await consultarPinVendedor(nombre, miPin()); } catch (e) { return true; }
+      try { d = await consultarPinVendedor(nombre, miPin()); }
+      catch (e) {
+        // Sin conexion con la PC: si estuvo 2 horas o mas fuera de la app y tiene PIN guardado en este telefono, lo pide igual.
+        if (ausenciaExcedida() && miPin()) {
+          loginPinLargo = parseInt(localStorage.getItem('vendedorPinLargo') || '6', 10) || 6;
+          abrirLogin(nombre);
+          return false;
+        }
+        return true;
+      }
       if (!d.existe) { abrirLogin(); return false; }
       loginPinLargo = d.largoPin || 6;
-      if (d.valido) return true;
-      abrirLogin(nombre);
-      return false;
+      try { localStorage.setItem('vendedorPinLargo', String(loginPinLargo)); } catch (e) {}
+      if (!d.valido) { abrirLogin(nombre); return false; }
+      if (d.tienePin && ausenciaExcedida()) { abrirLogin(nombre); return false; }   // 2 horas o mas fuera de la app: pide el PIN
+      marcarActividad();
+      return true;
     }
 
     // ---- Pantalla de login: usuario (de una lista de registrados), luego PIN con teclado numerico ----
@@ -10365,6 +11214,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
       pinInput.value = pin || '';
       localStorage.setItem('vendedorPin', pin || '');
       pinVendedorAlEnfocar = pin || '';
+      marcarActividad();
       cerrarLogin();
       pintarVendedorHeader();
       restaurarMetodoPagoPreferido();
@@ -10999,12 +11849,15 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
     function buscarProductos(lista, textoBuscado) {
       const q = normalizar(textoBuscado).trim();
       if (!q) return lista;
+      const qs = q.replace(/\s+/g, '');
       const sets = consultasEquivalentes(q).map(tokensBusqueda).filter(s => s.length > 0);
       const res = [];
       for (const p of lista) {
         const c = textoBusquedaProducto(p);
         let score = 99;
-        if (c.nom.includes(q) || c.sku.includes(q)) score = 0;
+        if (qs && c.sku && (c.sku === qs || (/^\d+$/.test(qs) && /^\d+$/.test(c.sku) && c.sku.replace(/^0+/, '') === qs.replace(/^0+/, '')))) score = -2;   // SKU exacto: primero
+        else if (qs.length >= 2 && c.sku && c.sku.indexOf(qs) === 0) score = -1;                                                                        // SKU que empieza por lo escrito
+        else if (c.nom.includes(q) || c.sku.includes(q)) score = 0;
         else {
           for (let i = 0; i < sets.length; i++) {
             if (sets[i].every(tk => c.todo.includes(tk))) { score = (i === 0 ? 1 : 2); break; }
@@ -11186,6 +12039,218 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
         alert('No se pudo preparar el recibo: ' + ((e && e.message) || 'revisa la conexion con la PC'));
       }
     }
+
+    // ---- Modo comandos (teclado) dentro del mismo buscador ----
+    //   +torni 5   agrega 5 de "torni..."   (+torni = 1; +taladro 13 x1 si el nombre termina en numero)
+    //   -50        descuento del 50% a la ultima linea   (-50 todo = a todo el pedido; -0 quita el descuento)
+    //   -torni     quita ese producto   (-torni 2 = resta 2 unidades)
+    //   =8         deja la ultima linea en 8 unidades
+    //   /enviar  /limpiar  /nota texto  /ayuda   (y segun la pantalla: /cliente, /pago, /para)
+    const CMD_AYUDA = 'COMANDOS DEL BUSCADOR (escribe y Enter)\n\n' +
+      '+torni 5        agrega 5 de "torni..." (sin numero = 1)\n' +
+      '+326 5          agrega 5 del SKU 326 (el SKU va primero que el nombre)\n' +
+      '-326            quita el SKU 326 (hasta -100 es descuento)\n' +
+      '+taladro 13 x1  usa xN si el nombre termina en numero\n' +
+      '-50             descuento 50% a la ultima linea\n' +
+      '-50 todo        descuento 50% a todo el pedido\n' +
+      '-0              quita el descuento\n' +
+      '-torni          quita ese producto del pedido\n' +
+      '-torni 2        resta 2 unidades\n' +
+      '=8              deja la ultima linea en 8 unidades\n' +
+      '/enviar         manda el pedido\n' +
+      '/limpiar        vacia el pedido\n' +
+      '/nota texto     pone la nota\n' +
+      '/cliente nombre nombre del cliente (movil)\n' +
+      '/pago transferencia   metodo de pago (movil)\n' +
+      '/para nombre    vendedor destino (PC; /para todos)';
+    function cmdEsComando(raw) { return /^[+\-=\/]/.test(String(raw || '').trim()); }
+    function cmdNum(n) { return String(Math.round((Number(n) || 0) * 100) / 100).replace('.', ','); }
+    function cmdPartirProducto(tipo, resto) {
+      let t = String(resto || '').trim();
+      let n = 1, nExp = false;
+      let m = /^(.*?)(?:\s*[x*]\s*|\s+)(\d+(?:[.,]\d+)?)$/i.exec(t);
+      if (m && m[1].trim()) { t = m[1].trim(); n = parseFloat(m[2].replace(',', '.')); nExp = true; }
+      else {
+        const m2 = /^(\d+(?:[.,]\d+)?)\s*[x*]\s*(.+)$/i.exec(t);
+        if (m2) { n = parseFloat(m2[1].replace(',', '.')); t = m2[2].trim(); nExp = true; }
+      }
+      if (!(n > 0)) n = 1;
+      return { tipo: tipo, texto: t, n: n, nExp: nExp };
+    }
+    function cmdParsear(raw) {
+      const s = String(raw || '').trim();
+      if (!cmdEsComando(s)) return null;
+      const c = s.charAt(0);
+      if (c === '/') { const p = s.slice(1).trim().split(/\s+/); return { tipo: 'sistema', cmd: (p.shift() || '').toLowerCase(), arg: p.join(' ') }; }
+      if (c === '+') return cmdPartirProducto('add', s.slice(1));
+      if (c === '=') {
+        const m = /^=\s*(\d+(?:[.,]\d+)?)\s*$/.exec(s);
+        return m ? { tipo: 'cantidad', n: parseFloat(m[1].replace(',', '.')) } : { tipo: 'error', msg: 'Para cambiar la cantidad escribe =8' };
+      }
+      const d = /^-\s*(\d+(?:[.,]\d+)?)\s*(%|\*|todo|all)?\s*$/i.exec(s);
+      if (d) {
+        const pctD = parseFloat(d[1].replace(',', '.'));
+        // Hasta 100 es descuento (-50). Un numero mayor (-326) es el SKU de un producto a quitar.
+        if (pctD <= 100 || d[2]) return { tipo: 'descuento', pct: pctD, todo: !!d[2] && d[2] !== '%' };
+      }
+      return cmdPartirProducto('quitar', s.slice(1));
+    }
+    // Primero el SKU (exacto; con numeros se ignoran los ceros a la izquierda; con solo digitos tambien "empieza por"),
+    // y recien despues el nombre. Asi "+326 5" agrega 5 del SKU 326 aunque haya productos con "326" en el nombre.
+    function cmdBuscar(base, texto) {
+      const t = String(texto || '').trim();
+      if (!t) return null;
+      const nt = normalizar(t).replace(/\s+/g, '');
+      const sk = function (p) { return normalizar(p.sku || '').replace(/\s+/g, ''); };
+      let r = base.filter(function (p) { return p.sku && sk(p) === nt; });
+      if (!r.length && /^\d+$/.test(nt)) {
+        const nz = nt.replace(/^0+/, '');
+        r = base.filter(function (p) { return p.sku && /^\d+$/.test(sk(p)) && sk(p).replace(/^0+/, '') === nz; });
+      }
+      if (!r.length && /^\d+$/.test(nt)) r = base.filter(function (p) { return p.sku && sk(p).indexOf(nt) === 0; });
+      if (r.length) return { p: r[0], otros: Math.min(r.length - 1, 99), porSku: true };
+      const q = buscarProductos(base, t);
+      return q.length ? { p: q[0], otros: Math.min(q.length - 1, 99), porSku: false } : null;
+    }
+    // Ejecuta un comando con el "adaptador" de cada pantalla (movil o PC). Devuelve true si era un comando.
+    async function cmdEjecutar(raw, A) {
+      const c = cmdParsear(raw);
+      if (!c) return false;
+      if (c.tipo === 'error') { A.msg(c.msg, false); return true; }
+      if (c.tipo === 'add') {
+        if (!c.texto) { A.msg('Escribe el producto: +torni 5', false); return true; }
+        const r = cmdBuscar(A.base(), c.texto);
+        if (!r) {
+          const fuera = A.todos ? cmdBuscar(A.todos(), c.texto) : null;
+          A.msg(fuera ? ('"' + fuera.p.nombre + '" no tiene stock disponible.') : ('No encontre "' + c.texto + '".'), false);
+          return true;
+        }
+        if (A.agregar(r.p, c.n)) A.msg('+' + cmdNum(c.n) + ' x ' + r.p.nombre + (r.porSku ? '  [SKU ' + r.p.sku + ']' : (r.otros ? '  (hay ' + r.otros + ' parecidos)' : '')), true);
+        return true;
+      }
+      if (c.tipo === 'quitar') {
+        if (!c.texto) { A.msg('Escribe el producto a quitar: -torni', false); return true; }
+        const r = cmdBuscar(A.carrito(), c.texto);
+        if (!r) { A.msg('"' + c.texto + '" no esta en el pedido.', false); return true; }
+        A.quitar(r.p, c.nExp ? c.n : null);
+        A.msg(c.nExp ? ('-' + cmdNum(c.n) + ' x ' + r.p.nombre) : ('Quitado: ' + r.p.nombre), true);
+        return true;
+      }
+      if (c.tipo === 'descuento') { A.descuento(c.pct, c.todo); return true; }
+      if (c.tipo === 'cantidad') { A.cantidad(c.n); return true; }
+      if (c.cmd === 'ayuda' || c.cmd === '?' || c.cmd === 'help') { alert(CMD_AYUDA); return true; }
+      await A.sistema(c.cmd, c.arg);
+      return true;
+    }
+    // Linea de ayuda que se ve mientras se escribe un comando (en lugar de los resultados de busqueda).
+    function cmdVistaPrevia(c, base, carritoActual) {
+      if (c.tipo === 'add') {
+        if (!c.texto) return 'Escribe el producto: <b>+torni 5</b>';
+        const r = cmdBuscar(base, c.texto);
+        return r ? ('&#9166; Enter: agregar <b>' + cmdNum(c.n) + '</b> &times; ' + escaparHtml(r.p.nombre) + (r.porSku ? ' <span>(SKU ' + escaparHtml(r.p.sku) + ')</span>' : (r.otros ? ' <span>(+' + r.otros + ' parecidos)</span>' : ''))) : ('Sin coincidencias para "' + escaparHtml(c.texto) + '"');
+      }
+      if (c.tipo === 'quitar') {
+        if (!c.texto) return 'Escribe el producto a quitar: <b>-torni</b>';
+        const r = cmdBuscar(carritoActual, c.texto);
+        return r ? ('&#9166; Enter: ' + (c.nExp ? 'restar ' + cmdNum(c.n) + ' de ' : 'quitar ') + escaparHtml(r.p.nombre)) : ('"' + escaparHtml(c.texto) + '" no esta en el pedido');
+      }
+      if (c.tipo === 'descuento') return '&#9166; Enter: descuento de <b>' + cmdNum(c.pct) + '%</b> ' + (c.todo ? 'a todo el pedido' : 'a la ultima linea');
+      if (c.tipo === 'cantidad') return '&#9166; Enter: dejar la ultima linea en <b>' + cmdNum(c.n) + '</b>';
+      if (c.tipo === 'sistema') return '&#9166; Enter: /' + escaparHtml(c.cmd) + (c.arg ? ' ' + escaparHtml(c.arg) : '') + ' &nbsp; <span>(/ayuda = lista de comandos)</span>';
+      return escaparHtml(c.msg || '');
+    }
+
+    // ---- Modo comandos en el movil del vendedor ----
+    let cmdUltimoSku = null;
+    function cmdLineaObjetivo() {
+      return carrito.find(function (i) { return i.sku === cmdUltimoSku; }) || carrito[carrito.length - 1] || null;
+    }
+    const CMD_VENDEDOR = {
+      msg: function (t, ok) { mostrarMensaje(t, ok); },
+      base: function () { return ocultandoSinStock() ? catalogo.filter(function (p) { return !productoSinStock(p); }) : catalogo; },
+      todos: function () { return catalogo; },
+      carrito: function () { return carrito; },
+      agregar: function (p, n) {
+        const existente = carrito.find(function (i) { return i.sku === p.sku; });
+        const ya = existente ? existente.cantidad : 0;
+        let cant = n;
+        if (p.stock !== null && p.stock !== undefined && (ya + cant) > p.stock) {
+          cant = Math.max(0, p.stock - ya);
+          if (cant <= 0) { mostrarMensaje('Solo quedan ' + p.stock + ' disponibles de "' + p.nombre + '".', false); return false; }
+          mostrarMensaje('Solo quedan ' + p.stock + ': se agregaron ' + cmdNum(cant) + '.', false);
+        }
+        if (carrito.length === 0) document.getElementById('accionesPostEnvio').style.display = 'none';
+        if (existente) existente.cantidad = Math.round((existente.cantidad + cant) * 100) / 100;
+        else carrito.push({ sku: p.sku, nombre: p.nombre, precio: p.precio, precioLista: p.precio, cantidad: cant, stock: (p.stock === undefined ? null : p.stock) });
+        cmdUltimoSku = p.sku;
+        renderCarrito();
+        registrarReciente(p.sku);
+        return true;
+      },
+      quitar: function (item, n) {
+        if (n === null) carrito = carrito.filter(function (i) { return i.sku !== item.sku; });
+        else { item.cantidad = Math.round((item.cantidad - n) * 100) / 100; if (item.cantidad <= 0) carrito = carrito.filter(function (i) { return i.sku !== item.sku; }); }
+        renderCarrito();
+      },
+      descuento: function (pct, todo) {
+        if (autoservicioActivo || !descuentosDisponibles()) { mostrarMensaje('Tu usuario no puede dar descuentos.', false); return; }
+        if (!(pct >= 0 && pct <= 100)) { mostrarMensaje('El descuento va de 0 a 100.', false); return; }
+        if (!carrito.length) { mostrarMensaje('El pedido esta vacio.', false); return; }
+        const objetivos = todo ? carrito.slice() : [cmdLineaObjetivo()];
+        let aplicado = null;
+        objetivos.forEach(function (it) {
+          const cat = catalogo.find(function (p) { return p.sku === it.sku; });
+          const base = (Number(it.precioLista) > 0) ? Number(it.precioLista) : ((cat && cat.precio) || it.precio);
+          fijarPrecio(it.sku, Math.round(base * (1 - pct / 100) * 100) / 100);
+          if (aplicado === null && base > 0) aplicado = Math.round((1 - it.precio / base) * 1000) / 10;
+        });
+        const quien = todo ? 'todo el pedido' : objetivos[0].nombre;
+        if (pct === 0) mostrarMensaje('Sin descuento en ' + quien + '.', true);
+        else if (aplicado !== null && aplicado < pct - 0.5) mostrarMensaje('Se aplico -' + cmdNum(aplicado) + '% (es tu limite) en ' + quien + '.', true);
+        else mostrarMensaje('-' + cmdNum(pct) + '% en ' + quien, true);
+      },
+      cantidad: function (n) {
+        const it = cmdLineaObjetivo();
+        if (!it) { mostrarMensaje('El pedido esta vacio.', false); return; }
+        fijarCantidad(it.sku, n);
+        mostrarMensaje(it.nombre + ': ' + cmdNum(n), true);
+      },
+      sistema: async function (cmd, arg) {
+        if (cmd === 'enviar' || cmd === 'e') { enviarPedido(); return; }
+        if (cmd === 'limpiar' || cmd === 'l') {
+          if (!carrito.length) { mostrarMensaje('El pedido ya esta vacio.', false); return; }
+          if (!confirm('Vaciar el pedido?')) return;
+          carrito = []; skusBajoCosto.clear(); renderCarrito();
+          return;
+        }
+        if (cmd === 'nota') { const n = document.getElementById('notaPedido'); if (n) { n.value = arg; actualizarBotonEnviar(); mostrarMensaje(arg ? 'Nota puesta.' : 'Nota borrada.', true); } return; }
+        if (cmd === 'cliente') { const n = document.getElementById('clienteNombrePedido'); if (n) { n.value = arg; mostrarMensaje(arg ? 'Cliente: ' + arg : 'Cliente borrado.', true); } return; }
+        if (cmd === 'pago') {
+          const sel = document.getElementById('metodoPago');
+          const q = normalizar(arg);
+          const op = Array.prototype.slice.call(sel.options).find(function (o) { return q && (normalizar(o.value).indexOf(q) === 0 || normalizar(o.textContent).indexOf(q) === 0); });
+          if (!op) { mostrarMensaje('Metodo no valido. Prueba: /pago efectivo, /pago transferencia', false); return; }
+          sel.value = op.value; guardarMetodoPagoPreferido(); renderCarrito();
+          mostrarMensaje('Pago: ' + op.value, true);
+          return;
+        }
+        mostrarMensaje('Comando desconocido: /' + cmd + '  (/ayuda)', false);
+      }
+    };
+    (function () {
+      const b = document.getElementById('buscador');
+      if (!b) return;
+      b.addEventListener('keydown', function (e) {
+        if (e.key !== 'Enter' || !cmdEsComando(b.value)) return;
+        e.preventDefault(); e.stopImmediatePropagation();
+        const txt = b.value;
+        cmdEjecutar(txt, CMD_VENDEDOR).then(function () {
+          b.value = ''; document.getElementById('resultados').innerHTML = ''; try { renderRecientes(); } catch (er) {}
+          b.focus();
+        });
+      }, true);
+      b.placeholder = 'Nombre o SKU  (o comando: +torni 5, +326 5, -50, /enviar)';
+    })();
 
     // ---- Alerta de venta por debajo del costo y limite de descuento ----
     const skusBajoCosto = new Set();
@@ -11390,6 +12455,12 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
     }
 
     function buscar() {
+      const cmdP = cmdParsear(document.getElementById('buscador').value);
+      if (cmdP) {
+        document.getElementById('recientes').innerHTML = '';
+        ponerHtmlSiCambio(document.getElementById('resultados'), '<div class="cmd-hint">' + cmdVistaPrevia(cmdP, CMD_VENDEDOR.base(), carrito) + '</div>');
+        return;
+      }
       const q = normalizar(document.getElementById('buscador').value.trim());
       const cont = document.getElementById('resultados');
       // "Modo cliente" (el vendedor le pasa el telefono al cliente desde Ajustes):
@@ -16108,6 +17179,18 @@ function Calcular-Reposicion([int]$piso, $origenes, [int]$dias, [int]$cobertura)
         } catch { $usaTendencia = $false }
     }
 
+    # 2b) Cantidad nominal / maxima de AxisPOS: con 0 dias a cubrir se llena hasta ese numero;
+    #     con dias a cubrir se usa como tope para no pasarse de lo que cabe en el piso o el estante.
+    $modoNominal = ($cobertura -le 0)
+    $maxMapa = @{}
+    $avisoMax = ""
+    try { $maxMapa = Leer-MaximosAxis $piso }
+    catch {
+        $avisoMax = "$($_.Exception.Message)"
+        if ($modoNominal) { throw $_ }
+    }
+    $sinNominal = 0
+
     # 3) Minimos explicitos (propios o de AxisPOS) del catalogo
     $catPorSku = @{}
     foreach ($pc in $global:catalogo) { if ($pc.sku) { $catPorSku[[string]$pc.sku] = $pc } }
@@ -16140,14 +17223,24 @@ function Calcular-Reposicion([int]$piso, $origenes, [int]$dias, [int]$cobertura)
         if ($vend -gt 0) { [void]$conVentas.Add($fichaP) }
         elseif (($pisoStock + $org) -ge 1) { [void]$sinMov.Add($fichaP) }
         if ($org -lt 1) { continue }
-        $demanda = [math]::Ceiling($ritmo * $cobertura)
-        $objetivo = [math]::Max($demanda, $minimo)
+        $maxP = 0.0
+        if ($maxMapa.ContainsKey([string]$p.sku)) { $maxP = [double]$maxMapa[[string]$p.sku] }
+        if ($modoNominal) {
+            if ($maxP -le 0) { $sinNominal++; continue }
+            $demanda = $maxP
+            $objetivo = $maxP
+        } else {
+            $demanda = [math]::Ceiling($ritmo * $cobertura)
+            $objetivo = [math]::Max($demanda, $minimo)
+            if ($maxP -gt 0) { $objetivo = [math]::Min($objetivo, $maxP) }
+        }
         $falta = $objetivo - $pisoStock
         if ($falta -le 0) { continue }
         $porVentas = ($demanda -gt $pisoStock)
         $porMin = (($minimo -gt 0) -and ($pisoStock -lt $minimo))
         $razon = "ventas"
-        if ($porVentas -and $porMin) { $razon = "ambos" } elseif ($porMin) { $razon = "minimo" }
+        if ($modoNominal) { $razon = "nominal" }
+        elseif ($porVentas -and $porMin) { $razon = "ambos" } elseif ($porMin) { $razon = "minimo" }
         $sug = [math]::Min([math]::Ceiling($falta), [math]::Floor($org))
         if ($sug -lt 1) { continue }
         # Reparto entre los almacenes de origen, en el orden elegido
@@ -16174,6 +17267,7 @@ function Calcular-Reposicion([int]$piso, $origenes, [int]$dias, [int]$cobertura)
             tendencia = $tend
             diasPiso = $fichaP.diasPiso
             minimo = $minimo
+            maximo = $maxP
             razon = $razon
             clase = ""
             bajar = [double]$sug
@@ -16214,6 +17308,7 @@ function Calcular-Reposicion([int]$piso, $origenes, [int]$dias, [int]$cobertura)
         productosConVentas = $conVentas.Count
         unidadesVendidas = [math]::Round($totalV, 2)
         sinMovimiento = $sinMov.Count
+        sinNominal = $sinNominal
         pisoNombre = (& $nombreDe $piso)
         porAlmacen = $porAlmLista
     }
@@ -16221,7 +17316,7 @@ function Calcular-Reposicion([int]$piso, $origenes, [int]$dias, [int]$cobertura)
     $menosVendidos = @($ordV | Where-Object { ([double]$_.piso + [double]$_.origen) -ge 1 } | Sort-Object -Property @{ Expression = { [double]$_.vendido } } | Select-Object -First 10)
     $sinMovLista = @($sinMov | Sort-Object -Property @{ Expression = { [double]$_.piso + [double]$_.origen } } -Descending | Select-Object -First 40)
     $orden = @($items | Sort-Object @{ Expression = { if ($null -eq $_.diasPiso) { 99999 } else { [double]$_.diasPiso } } }, @{ Expression = { [double]$_.vendido }; Descending = $true } | Select-Object -First 200)
-    return @{ items = $orden; resumen = $resumen; masVendidos = $masVendidos; menosVendidos = $menosVendidos; sinMovimiento = $sinMovLista }
+    return @{ items = $orden; resumen = $resumen; masVendidos = $masVendidos; menosVendidos = $menosVendidos; sinMovimiento = $sinMovLista; modo = $(if ($modoNominal) { "nominal" } else { "ventas" }); avisoMax = $avisoMax }
 }
 
 # ------------------------------------------------------------------
@@ -16744,7 +17839,7 @@ while ($listener.IsListening) {
                 if ($diasQ -gt 60) { $diasQ = 60 }
                 $cobQ = 7
                 if ([int]::TryParse([string]$request.QueryString["cob"], [ref]$tmpQ)) { $cobQ = $tmpQ }
-                if ($cobQ -lt 1) { $cobQ = 1 }
+                if ($cobQ -lt 0) { $cobQ = 0 }
                 if ($cobQ -gt 60) { $cobQ = 60 }
                 if ($pisoQ -le 0) { throw "No se sabe cual es el almacen del piso de venta." }
                 if ($origQ.Count -eq 0) { throw "Falta elegir de que almacen se baja la mercancia (en la PC: Alt+B)." }
@@ -16756,7 +17851,7 @@ while ($listener.IsListening) {
                     Enviar-Json $context $enCache.resp 200 8
                 } else {
                     $calcR = Calcular-Reposicion $pisoQ @($origQ) $diasQ $cobQ
-                    $respR = @{ ok = $true; piso = $pisoQ; origen = @($origQ); dias = $diasQ; cobertura = $cobQ; generado = $ahoraR.ToString("yyyy-MM-dd HH:mm:ss"); items = @($calcR.items); resumen = $calcR.resumen; masVendidos = @($calcR.masVendidos); menosVendidos = @($calcR.menosVendidos); sinMovimiento = @($calcR.sinMovimiento) }
+                    $respR = @{ ok = $true; piso = $pisoQ; origen = @($origQ); dias = $diasQ; cobertura = $cobQ; generado = $ahoraR.ToString("yyyy-MM-dd HH:mm:ss"); items = @($calcR.items); resumen = $calcR.resumen; modo = [string]$calcR.modo; avisoMax = [string]$calcR.avisoMax; masVendidos = @($calcR.masVendidos); menosVendidos = @($calcR.menosVendidos); sinMovimiento = @($calcR.sinMovimiento) }
                     if ($global:reposCache.Count -gt 20) { $global:reposCache = @{} }
                     $global:reposCache[$claveR] = @{ hora = $ahoraR; resp = $respR }
                     Enviar-Json $context $respR 200 8
@@ -17160,6 +18255,7 @@ while ($listener.IsListening) {
                 $global:nextIdAsignado++
                 [void]$global:pedidosAsignados.Add([pscustomobject]$asignado)
                 Guardar-Asignados
+                if (-not [string]$asignado.cliente) { Auditar-DescuentosAsignado ([pscustomobject]$asignado) }
                 $respAsigJson = (@{ ok = $true; id = $asignado.id; repetido = $true } | ConvertTo-Json -Compress)
                 Clave-EnvioGuardar $claveEnvioAsig $respAsigJson
                 Enviar-Respuesta -Context $context -Body (@{ ok = $true; id = $asignado.id } | ConvertTo-Json) -ContentType "application/json; charset=utf-8"
@@ -17458,7 +18554,7 @@ while ($listener.IsListening) {
             if (-not (Es-PeticionPC $request)) {
                 Enviar-Json $context @{ ok = $false; error = "Solo desde la PC." } 403
             } else {
-                Enviar-Json $context @{ ok = $true; usar = [bool]$global:minAxis.usar; columna = [string]$global:minAxis.columna; ultima = [string]$global:minAxis.ultima; error = [string]$global:minAxis.error; n = [int]$global:minAxis.datos.Count; axisActivo = [bool]$global:configAxis.activo } 200 4
+                Enviar-Json $context @{ ok = $true; usar = [bool]$global:minAxis.usar; columna = [string]$global:minAxis.columna; maxRef = [string]$global:minAxis.maxRef; ultima = [string]$global:minAxis.ultima; error = [string]$global:minAxis.error; n = [int]$global:minAxis.datos.Count; axisActivo = [bool]$global:configAxis.activo } 200 4
             }
 
         } elseif ($method -eq "POST" -and $path -match "^/api/minimos/axis(/cargar)?$") {
@@ -17475,11 +18571,29 @@ while ($listener.IsListening) {
                         if ($colMa -ne [string]$global:minAxis.columna) { $global:minAxis.datos = @{}; $global:minAxis.ultima = "" }
                         $global:minAxis.columna = $colMa
                         $global:minAxis.usar = [bool]$dataMa.usar
+                        $refMa = [string]$global:minAxis.maxRef
+                        try { if (@($dataMa.PSObject.Properties.Name) -contains 'maxRef') { $refMa = ([string]$dataMa.maxRef).Trim() } } catch {}
+                        if ($refMa -and ($refMa -notmatch '^(goods|store)\.[A-Za-z][A-Za-z0-9_]{0,40}$')) { $errMa = "La columna nominal/maxima va como tabla.columna (por ejemplo store.MaxQtty o goods.MaxStock)." }
+                        else {
+                            if ($refMa -ne [string]$global:minAxis.maxRef) { $global:maxAxisCache = @{ clave = ""; hora = [datetime]::MinValue; datos = @{} } }
+                            $global:minAxis.maxRef = $refMa
+                        }
                         Guardar-MinAxis
                     }
                 }
                 if ($errMa) {
                     Enviar-Json $context @{ ok = $false; error = $errMa } 400
+                } elseif ($dataMa -and [bool]$dataMa.probarMax) {
+                    try {
+                        $pisoMa = 0
+                        try { $pisoMa = [int]$global:configApp.reposPiso } catch {}
+                        if ($pisoMa -le 0) { foreach ($aMa in @($global:configAxis.almacenes)) { $nMa2 = 0; if ([int]::TryParse([string]$aMa, [ref]$nMa2)) { $pisoMa = $nMa2; break } } }
+                        $global:maxAxisCache = @{ clave = ""; hora = [datetime]::MinValue; datos = @{} }
+                        $mmMa = Leer-MaximosAxis $pisoMa
+                        Enviar-Json $context @{ ok = $true; n = [int]$mmMa.Count; maxRef = [string]$global:minAxis.maxRef } 200
+                    } catch {
+                        Enviar-Json $context @{ ok = $false; error = "$($_.Exception.Message)" } 400
+                    }
                 } elseif ($soloCargar -or ($dataMa -and [bool]$dataMa.cargar)) {
                     try {
                         $nMa = Actualizar-MinimosAxis
@@ -17493,6 +18607,82 @@ while ($listener.IsListening) {
                 } else {
                     Enviar-Json $context @{ ok = $true } 200
                 }
+            }
+
+        } elseif ($method -eq "GET" -and $path -eq "/api/postits") {
+            Enviar-Json $context @{ ok = $true; notas = @($global:postits.notas) } 200 4
+
+        } elseif ($method -eq "POST" -and $path -eq "/api/postits") {
+            $dataPi = Leer-CuerpoJson $request
+            $opPi = ""
+            if ($dataPi) { $opPi = [string]$dataPi.op }
+            $coloresPi = @('amarillo', 'rosa', 'verde', 'azul', 'naranja')
+            $propsPi = @()
+            if ($dataPi) { $propsPi = @($dataPi.PSObject.Properties.Name) }
+            if (-not $dataPi) {
+                Enviar-Json $context @{ ok = $false; error = "Faltan datos." } 400
+            } elseif ($opPi -eq "add") {
+                $txtPi = Limpiar-TextoPostit $dataPi.texto
+                if (-not $txtPi) {
+                    Enviar-Json $context @{ ok = $false; error = "Escribe el recado." } 400
+                } else {
+                    $colPi = [string]$dataPi.color
+                    if ($coloresPi -notcontains $colPi) { $colPi = "amarillo" }
+                    $horaPi = ""
+                    if (([string]$dataPi.hora) -match '^(\d{1,2}):(\d{2})$') {
+                        $hh = [int]$Matches[1]; $mm = [int]$Matches[2]
+                        if ($hh -le 23 -and $mm -le 59) { $horaPi = ('{0:00}:{1:00}' -f $hh, $mm) }
+                    }
+                    $avisPi = ""
+                    if (([string]$dataPi.avisadoDia) -match '^\d{4}-\d{2}-\d{2}$') { $avisPi = [string]$dataPi.avisadoDia }
+                    if ($global:postits.notas.Count -ge 80) { $global:postits.notas.RemoveAt(0) }
+                    $notaPi = [pscustomobject]@{ id = [int]$global:postits.siguienteId; texto = $txtPi; color = $colPi; hora = $horaPi; hecho = $false; avisadoDia = $avisPi; x = $null; y = $null; creado = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss") }
+                    $global:postits.siguienteId = [int]$global:postits.siguienteId + 1
+                    [void]$global:postits.notas.Add($notaPi)
+                    Guardar-Postits
+                    Enviar-Json $context @{ ok = $true; nota = $notaPi } 200 4
+                }
+            } elseif ($opPi -eq "update") {
+                $notaPi = $global:postits.notas | Where-Object { [int]$_.id -eq [int]$dataPi.id } | Select-Object -First 1
+                if (-not $notaPi) {
+                    Enviar-Json $context @{ ok = $false; error = "Esa nota ya no existe." } 404
+                } else {
+                    if ($propsPi -contains 'texto') { $tx = Limpiar-TextoPostit $dataPi.texto; if ($tx) { $notaPi.texto = $tx } }
+                    if (($propsPi -contains 'color') -and ($coloresPi -contains [string]$dataPi.color)) { $notaPi.color = [string]$dataPi.color }
+                    if ($propsPi -contains 'hora') {
+                        $hp = ([string]$dataPi.hora).Trim()
+                        if ($hp -eq "") { $notaPi.hora = ""; $notaPi.avisadoDia = "" }
+                        elseif ($hp -match '^(\d{1,2}):(\d{2})$') {
+                            $hh = [int]$Matches[1]; $mm = [int]$Matches[2]
+                            if ($hh -le 23 -and $mm -le 59) { $notaPi.hora = ('{0:00}:{1:00}' -f $hh, $mm); $notaPi.avisadoDia = "" }
+                        }
+                    }
+                    if ($propsPi -contains 'hecho') { $notaPi.hecho = [bool]$dataPi.hecho }
+                    if (($propsPi -contains 'avisadoDia') -and (([string]$dataPi.avisadoDia) -match '^(\d{4}-\d{2}-\d{2})?$')) { $notaPi.avisadoDia = [string]$dataPi.avisadoDia }
+                    foreach ($ejePi in @('x', 'y')) {
+                        if ($propsPi -contains $ejePi) {
+                            $vPi = 0.0
+                            if ([double]::TryParse(([string]$dataPi.$ejePi), [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$vPi)) {
+                                if ($vPi -lt -500) { $vPi = -500 }
+                                if ($vPi -gt 6000) { $vPi = 6000 }
+                                $notaPi.$ejePi = [math]::Round($vPi)
+                            }
+                        }
+                    }
+                    Guardar-Postits
+                    Enviar-Json $context @{ ok = $true; nota = $notaPi } 200 4
+                }
+            } elseif ($opPi -eq "del") {
+                $notaPi = $global:postits.notas | Where-Object { [int]$_.id -eq [int]$dataPi.id } | Select-Object -First 1
+                if ($notaPi) { [void]$global:postits.notas.Remove($notaPi); Guardar-Postits }
+                Enviar-Json $context @{ ok = $true } 200
+            } elseif ($opPi -eq "limpiar") {
+                $hechas = @($global:postits.notas | Where-Object { $_.hecho })
+                foreach ($hP in $hechas) { [void]$global:postits.notas.Remove($hP) }
+                Guardar-Postits
+                Enviar-Json $context @{ ok = $true; quitadas = $hechas.Count } 200
+            } else {
+                Enviar-Json $context @{ ok = $false; error = "Operacion no valida." } 400
             }
 
         } elseif ($method -eq "GET" -and $path -eq "/api/respaldo") {
@@ -18357,6 +19547,15 @@ while ($listener.IsListening) {
                 Enviar-Json $context @{ ok = $true; mensajes = @($pendMsg); devoluciones = @($devPC) } 200 4
             }
 
+        } elseif ($method -eq "GET" -and $path -eq "/api/mensajes/historial") {
+            # Solo la PC: todos los mensajes guardados (recibidos de vendedores/AxisPOS y enviados por la caja), del mas viejo al mas nuevo.
+            if (-not [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)) {
+                Enviar-Json $context @{ ok = $false; error = "Solo desde la PC." } 403
+            } else {
+                $histMsg = @($global:mensajesPc | ForEach-Object { [pscustomobject]@{ id = $_.id; de = [string]$_.vendedor; texto = [string]$_.texto; hora = [string]$_.hora; enviado = ([string]$_.sentido -eq "enviado") } })
+                Enviar-Json $context @{ ok = $true; mensajes = @($histMsg) } 200 4
+            }
+
         } elseif ($method -eq "POST" -and $path -eq "/api/mensajes/enviar") {
             # Solo la PC: mensaje corto para un vendedor (o para todos). Le llega como aviso en el movil.
             $dMsgE = Leer-CuerpoJson $request
@@ -18369,9 +19568,12 @@ while ($listener.IsListening) {
                 Enviar-Json $context @{ ok = $false; error = "Escribe el mensaje." } 400
             } elseif ($paraTodosMsg) {
                 Avisar-A-Todos ("Mensaje de la caja: " + $txtMsgE) "mensaje"
+                Registrar-MensajeSaliente "Todos los vendedores" $txtMsgE
                 Enviar-Json $context @{ ok = $true }
             } elseif ($destMsg -and $global:pinesVendedores.ContainsKey($destMsg.ToLowerInvariant())) {
-                Agregar-AlertaVendedor ([string]$global:pinesVendedores[$destMsg.ToLowerInvariant()].nombre) ("Mensaje de la caja: " + $txtMsgE) $null "mensaje"
+                $nomDestMsg = [string]$global:pinesVendedores[$destMsg.ToLowerInvariant()].nombre
+                Agregar-AlertaVendedor $nomDestMsg ("Mensaje de la caja: " + $txtMsgE) $null "mensaje"
+                Registrar-MensajeSaliente $nomDestMsg $txtMsgE
                 Enviar-Json $context @{ ok = $true }
             } else {
                 Enviar-Json $context @{ ok = $false; error = "Ese vendedor no existe." } 404
