@@ -5689,6 +5689,43 @@ function Registrar-MensajeSaliente([string]$para, [string]$texto) {
     } catch {}
 }
 
+# ------------------------------------------------------------------
+# Colores de la interfaz (Panel de la PC y app del vendedor): los elige el encargado en Ajustes de la PC.
+# Solo se guardan los colores que se cambiaron; lo demas queda con los colores de siempre.
+# ------------------------------------------------------------------
+$coloresCfgPath = Join-Path $scriptDir "colores_config.json"
+$global:coloresCfg = @{ pc = @{}; vendedor = @{} }
+
+function Limpiar-ColoresPanel($obj) {
+    $h = @{}
+    if ($obj) {
+        foreach ($p in @($obj.PSObject.Properties)) {
+            $n = [string]$p.Name
+            $v = [string]$p.Value
+            if (($n -match '^[a-z0-9]{2,20}$') -and ($v -match '^#[0-9a-fA-F]{6}$')) { $h[$n] = $v.ToLowerInvariant() }
+        }
+    }
+    return $h
+}
+
+function Cargar-ColoresCfg {
+    try {
+        if (Test-Path -LiteralPath $coloresCfgPath) {
+            $rawC = Get-Content -LiteralPath $coloresCfgPath -Raw -Encoding UTF8
+            if ($rawC -and $rawC.Trim().Length -gt 0) {
+                $dC = $rawC | ConvertFrom-Json
+                $global:coloresCfg = @{ pc = (Limpiar-ColoresPanel $dC.pc); vendedor = (Limpiar-ColoresPanel $dC.vendedor) }
+            }
+        }
+    } catch { Write-Host "Aviso: no se pudo leer colores_config.json." }
+}
+
+function Guardar-ColoresCfg {
+    Escribir-ArchivoConReintento -ruta $coloresCfgPath -contenido (ConvertTo-Json -InputObject $global:coloresCfg -Depth 4) | Out-Null
+}
+
+Cargar-ColoresCfg
+
 # Deja el texto en una sola linea y de hasta 200 caracteres.
 function Limpiar-TextoMensaje($t) {
     $s = ([string]$t).Trim()
@@ -5835,33 +5872,33 @@ $htmlPC = @'
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <style>
   * { box-sizing: border-box; margin:0; padding:0; font-family: 'Segoe UI', system-ui, Tahoma, Arial, sans-serif; }
-  body { background:#0f172a; color:#e2e8f0; padding:18px; }
-  header { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; margin-bottom:14px; padding-bottom:14px; border-bottom:1px solid #1e293b; }
-  h1 { font-size:21px; color:#fff; font-weight:600; }
-  .share { background:#1e293b; padding:10px 14px; border-radius:8px; font-size:13px; color:#93c5fd; }
-  .share b { color:#fff; }
-  .catalogoInfo { font-size:12px; color:#94a3b8; margin-bottom:16px; display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
-  .catalogoInfo button { background:#334155; color:#cbd5e1; border:none; padding:6px 10px; border-radius:6px; font-size:12px; cursor:pointer; }
-  .catalogoInfo .error { color:#fca5a5; }
+  body { background:var(--tt-0f172a,#0f172a); color:var(--tt-e2e8f0,#e2e8f0); padding:18px; }
+  header { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; margin-bottom:14px; padding-bottom:14px; border-bottom:1px solid var(--tt-1e293b,#1e293b); }
+  h1 { font-size:21px; color:var(--tt-ffffff,#fff); font-weight:600; }
+  .share { background:var(--tt-1e293b,#1e293b); padding:10px 14px; border-radius:8px; font-size:13px; color:var(--tt-93c5fd,#93c5fd); }
+  .share b { color:var(--tt-ffffff,#fff); }
+  .catalogoInfo { font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin-bottom:16px; display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .catalogoInfo button { background:var(--tt-334155,#334155); color:var(--tt-cbd5e1,#cbd5e1); border:none; padding:6px 10px; border-radius:6px; font-size:12px; cursor:pointer; }
+  .catalogoInfo .error { color:var(--tt-fca5a5,#fca5a5); }
   .toolbar { display:flex; gap:10px; align-items:center; margin-bottom:18px; flex-wrap:wrap; }
   .toolbar label { font-size:14px; display:flex; align-items:center; gap:6px; }
-  #banner { display:none; background:#16a34a; color:#fff; padding:12px 16px; border-radius:8px; margin-bottom:16px; font-weight:bold; text-align:center; box-shadow:0 4px 12px rgba(22,163,74,0.35); }
+  #banner { display:none; background:var(--tt-16a34a,#16a34a); color:var(--tt-ffffff,#fff); padding:12px 16px; border-radius:8px; margin-bottom:16px; font-weight:bold; text-align:center; box-shadow:0 4px 12px rgba(22,163,74,0.35); }
   #grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(270px,1fr)); gap:16px; }
-  .card { border-radius:12px; padding:16px; color:#0f172a; box-shadow:0 3px 10px rgba(0,0,0,0.25); }
-  .card.pedSel { outline:4px solid #facc15; outline-offset:3px; }
-  .pendiente { background:#fde047; }
-  .cobrado { background:#86efac; }
-  .cancelado { background:#cbd5e1; opacity:0.75; }
-  .porrevisar { background:#93c5fd; outline:3px solid #2563eb; }
+  .card { border-radius:12px; padding:16px; color:var(--tt-0f172a,#0f172a); box-shadow:0 3px 10px rgba(0,0,0,0.25); }
+  .card.pedSel { outline:4px solid var(--tt-facc15,#facc15); outline-offset:3px; }
+  .pendiente { background:var(--tt-fde047,#fde047); }
+  .cobrado { background:var(--tt-86efac,#86efac); }
+  .cancelado { background:var(--tt-cbd5e1,#cbd5e1); opacity:0.75; }
+  .porrevisar { background:var(--tt-93c5fd,#93c5fd); outline:3px solid var(--tt-2563eb,#2563eb); }
   .revision { background:rgba(255,255,255,0.65); border-radius:8px; padding:8px 10px; margin:6px 0; font-size:13px; }
   .revision b { display:block; font-size:14px; margin-bottom:3px; }
   .revision-cuadre { display:flex; flex-wrap:wrap; gap:6px; margin:6px 0; }
-  .revision-cuadre input { flex:1 1 100%; min-width:0; padding:8px; border-radius:7px; border:1px solid #cbd5e1; font-size:14px; }
+  .revision-cuadre input { flex:1 1 100%; min-width:0; padding:8px; border-radius:7px; border:1px solid var(--tt-cbd5e1,#cbd5e1); font-size:14px; }
   .revision-cuadre button { flex:1 1 auto; width:auto; white-space:nowrap; }
-  .discrepancia-aviso { color:#991b1b; background:#fee2e2; border:1px solid #fca5a5; border-radius:8px; padding:8px; font-size:12px; margin:6px 0; }
-  .btn-ok { background:#15803d; }
-  .btn-ok:hover { background:#166534; }
-  #contadorRevisar { display:none; background:#2563eb; color:#fff; padding:5px 12px; border-radius:12px; font-size:12px; font-weight:bold; }
+  .discrepancia-aviso { color:var(--tt-991b1b,#991b1b); background:var(--tt-fee2e2,#fee2e2); border:1px solid var(--tt-fca5a5,#fca5a5); border-radius:8px; padding:8px; font-size:12px; margin:6px 0; }
+  .btn-ok { background:var(--tt-15803d,#15803d); }
+  .btn-ok:hover { background:var(--tt-166534,#166534); }
+  #contadorRevisar { display:none; background:var(--tt-2563eb,#2563eb); color:var(--tt-ffffff,#fff); padding:5px 12px; border-radius:12px; font-size:12px; font-weight:bold; }
   .card h3 { font-size:16px; margin-bottom:4px; }
   .card .hora { font-size:11px; opacity:0.7; margin-bottom:10px; }
   .card ul { list-style:none; font-size:13px; margin-bottom:8px; }
@@ -5869,36 +5906,38 @@ $htmlPC = @'
   .card ul li .ped-miniatura { width:36px; height:36px; border-radius:6px; object-fit:cover; flex-shrink:0; cursor:zoom-in; background:rgba(0,0,0,0.08); }
   .card .total { font-weight:bold; font-size:16px; margin:4px 0; }
   .card .estado { display:inline-block; font-size:11px; font-weight:bold; padding:3px 9px; border-radius:12px; background:rgba(0,0,0,0.15); margin-bottom:8px; letter-spacing:0.5px; }
-  .btn { background:#1d4ed8; color:#fff; border:none; padding:9px 12px; border-radius:8px; font-weight:bold; cursor:pointer; width:100%; font-size:14px; margin-top:4px; }
-  .btn:hover { background:#1e40af; }
-  .btn-imprimir { background:#475569; }
-  .btn-imprimir:hover { background:#334155; }
-  .btn-cancelar { background:#b91c1c; }
-  .btn-cancelar:hover { background:#991b1b; }
-  .btn-cerrar-dia { background:#7c2d12; color:#fff; border:none; padding:8px 14px; border-radius:8px; font-size:13px; font-weight:bold; cursor:pointer; }
-  .btn-cerrar-dia:hover { background:#5c2109; }
-  .btn-toggle { background:#334155; color:#cbd5e1; border:none; padding:8px 14px; border-radius:8px; font-size:13px; font-weight:bold; cursor:pointer; }
-  .btn-toggle:hover { background:#475569; }
-  .btn-toggle.activo { background:#16a34a; color:#fff; }
-  .btn-toggle.activo:hover { background:#15803d; }
+  .btn { background:var(--tt-1d4ed8,#1d4ed8); color:var(--tt-ffffff,#fff); border:none; padding:9px 12px; border-radius:8px; font-weight:bold; cursor:pointer; width:100%; font-size:14px; margin-top:4px; }
+  .btn:hover { background:var(--tt-1e40af,#1e40af); }
+  .btn-imprimir { background:var(--tt-475569,#475569); }
+  .btn-imprimir:hover { background:var(--tt-334155,#334155); }
+  .btn-cancelar { background:var(--tt-b91c1c,#b91c1c); }
+  .btn-cancelar:hover { background:var(--tt-991b1b,#991b1b); }
+  .btn-cerrar-dia { background:var(--tt-7c2d12,#7c2d12); color:var(--tt-ffffff,#fff); border:none; padding:8px 14px; border-radius:8px; font-size:13px; font-weight:bold; cursor:pointer; }
+  .btn-cerrar-dia:hover { background:var(--tt-5c2109,#5c2109); }
+  .btn-toggle { background:var(--tt-334155,#334155); color:var(--tt-cbd5e1,#cbd5e1); border:none; padding:8px 14px; border-radius:8px; font-size:13px; font-weight:bold; cursor:pointer; }
+  .btn-toggle:hover { background:var(--tt-475569,#475569); }
+  .btn-toggle.activo { background:var(--tt-16a34a,#16a34a); color:var(--tt-ffffff,#fff); }
+  .btn-toggle.activo:hover { background:var(--tt-15803d,#15803d); }
   #btnMenuPC { position:relative; }
-  #btnMenuPC.alerta::after { content:''; position:absolute; top:2px; right:2px; width:10px; height:10px; border-radius:50%; background:#ef4444; }
-  .vacio { text-align:center; color:#64748b; padding:40px; }
-  .btn-nuevo-pedido { background:#7c3aed; color:#fff; border:none; padding:8px 14px; border-radius:8px; font-size:13px; font-weight:bold; cursor:pointer; }
+  #btnMenuPC.alerta::after { content:''; position:absolute; top:2px; right:2px; width:10px; height:10px; border-radius:50%; background:var(--tt-ef4444,#ef4444); }
+  .vacio { text-align:center; color:var(--tt-64748b,#64748b); padding:40px; }
+  .btn-nuevo-pedido { background:#7c3aed; color:var(--tt-ffffff,#fff); border:none; padding:8px 14px; border-radius:8px; font-size:13px; font-weight:bold; cursor:pointer; }
   .btn-nuevo-pedido:hover { background:#6d28d9; }
-  .np-select { width:100%; padding:9px; border-radius:6px; border:1px solid #334155; background:#0f172a; color:#e2e8f0; font-size:14px; margin-bottom:10px; }
-  .np-input { width:100%; padding:9px; border-radius:6px; border:1px solid #334155; background:#0f172a; color:#e2e8f0; font-size:14px; margin-bottom:8px; }
-  .np-resultado { display:flex; justify-content:space-between; align-items:center; padding:8px 0; border-bottom:1px solid #334155; font-size:13px; }
-  .np-resultado.np-sel { background:#0b3a5c; box-shadow:inset 3px 0 0 #38bdf8; }
-  .np-resultado .np-miniatura { width:38px; height:38px; border-radius:6px; object-fit:cover; margin-right:8px; flex-shrink:0; cursor:zoom-in; background:#0f172a; }
+  .np-select { width:100%; padding:9px; border-radius:6px; border:1px solid var(--tt-334155,#334155); background:var(--tt-0f172a,#0f172a); color:var(--tt-e2e8f0,#e2e8f0); font-size:14px; margin-bottom:10px; }
+  .np-input { width:100%; padding:9px; border-radius:6px; border:1px solid var(--tt-334155,#334155); background:var(--tt-0f172a,#0f172a); color:var(--tt-e2e8f0,#e2e8f0); font-size:14px; margin-bottom:8px; }
+  .np-resultado { display:flex; justify-content:space-between; align-items:center; padding:8px 0; border-bottom:1px solid var(--tt-334155,#334155); font-size:13px; }
+  .col-fila { display:flex; justify-content:space-between; align-items:center; gap:8px; padding:6px 0; border-bottom:1px solid var(--tt-334155,#334155); font-size:13px; }
+  .col-fila input[type=color] { width:46px; height:28px; padding:0; border:1px solid var(--tt-475569,#475569); border-radius:6px; background:var(--tt-0f172a,#0f172a); cursor:pointer; }
+  .np-resultado.np-sel { background:var(--tt-0b3a5c,#0b3a5c); box-shadow:inset 3px 0 0 var(--tt-38bdf8,#38bdf8); }
+  .np-resultado .np-miniatura { width:38px; height:38px; border-radius:6px; object-fit:cover; margin-right:8px; flex-shrink:0; cursor:zoom-in; background:var(--tt-0f172a,#0f172a); }
   .np-resultado .np-info { flex:1; min-width:0; }
   .np-resultado .np-info b { display:block; }
-  .np-resultado .np-info span { color:#94a3b8; font-size:12px; }
-  .np-resultado button { background:#334155; color:#fff; border:none; width:32px; height:32px; border-radius:7px; font-size:17px; font-weight:bold; cursor:pointer; flex-shrink:0; }
-  .np-carrito-item { display:flex; justify-content:space-between; align-items:center; padding:7px 0; border-bottom:1px dashed #334155; font-size:13px; }
-  .np-carrito-item button { background:#334155; color:#fff; border:none; width:26px; height:26px; border-radius:6px; font-weight:bold; cursor:pointer; }
+  .np-resultado .np-info span { color:var(--tt-94a3b8,#94a3b8); font-size:12px; }
+  .np-resultado button { background:var(--tt-334155,#334155); color:var(--tt-ffffff,#fff); border:none; width:32px; height:32px; border-radius:7px; font-size:17px; font-weight:bold; cursor:pointer; flex-shrink:0; }
+  .np-carrito-item { display:flex; justify-content:space-between; align-items:center; padding:7px 0; border-bottom:1px dashed var(--tt-334155,#334155); font-size:13px; }
+  .np-carrito-item button { background:var(--tt-334155,#334155); color:var(--tt-ffffff,#fff); border:none; width:26px; height:26px; border-radius:6px; font-weight:bold; cursor:pointer; }
   .np-total { text-align:right; font-weight:bold; font-size:15px; margin:8px 0; }
-  .np-vacio { color:#64748b; font-size:13px; }
+  .np-vacio { color:var(--tt-64748b,#64748b); font-size:13px; }
 
   #tarjetaImprimir { display:none; }
   @media print {
@@ -5929,12 +5968,106 @@ $htmlPC = @'
     [id$="Overlay"] table { display: block; overflow-x: auto; max-width: 100%; }
   }
 </style>
+<script>
+/* Colores personalizables (Ajustes de la PC -> Colores de la interfaz). Sin cambios guardados, todo queda como siempre. */
+(function () {
+  var ROLES = {
+    pc: [
+      { k: 'fondo',   n: 'Fondo de la pantalla y cajas de texto', base: '0f172a', miembros: [] },
+      { k: 'panel',   n: 'Ventanas, paneles y tarjetas', base: '1e293b', miembros: [] },
+      { k: 'borde',   n: 'Bordes y botones oscuros', base: '334155', miembros: [] },
+      { k: 'gris',    n: 'Botones grises (Cerrar, Cancelar)', base: '475569', miembros: [] },
+      { k: 'texto',   n: 'Texto principal', base: 'e2e8f0', miembros: ['cbd5e1'] },
+      { k: 'titulos', n: 'Titulos y texto sobre botones', base: 'ffffff', miembros: [] },
+      { k: 'apagado', n: 'Texto secundario (gris)', base: '94a3b8', miembros: ['64748b'] },
+      { k: 'acento',  n: 'Botones principales y detalles (azul)', base: '0369a1', miembros: ['2563eb', '1d4ed8', '1e40af', '0b3a5c', '7dd3fc', '93c5fd', '38bdf8', 'e0f2fe'] },
+      { k: 'ok',      n: 'Cobrado / correcto (verde)', base: '16a34a', miembros: ['15803d', '166534', '86efac'] },
+      { k: 'aviso',   n: 'Pendiente / aviso (amarillo)', base: 'fbbf24', miembros: ['fde047', 'facc15', 'ca8a04', '7c2d12', '5c2109'] },
+      { k: 'peligro', n: 'Alertas, problemas y eliminar (rojo)', base: 'b91c1c', miembros: ['991b1b', 'ef4444', 'f87171', 'fca5a5', 'fee2e2', '450a0a'] }
+    ],
+    vendedor: [
+      { k: 'fondo',      n: 'Fondo de la pantalla', vars: ['--bg'], base: 'f1f5f9', miembros: [], def: '#f1f5f9' },
+      { k: 'tarjeta',    n: 'Tarjetas y ventanas', vars: ['--tarjeta', '--panel-campana-bg'], miembros: [], def: '#ffffff' },
+      { k: 'texto',      n: 'Texto principal', vars: ['--texto'], miembros: [], def: '#0f172a' },
+      { k: 'secundario', n: 'Texto secundario', vars: ['--secundario-texto'], miembros: [], def: '#475569' },
+      { k: 'borde',      n: 'Bordes', vars: ['--borde', '--mp-card-borde'], base: 'e2e8f0', miembros: [], def: '#cbd5e1' },
+      { k: 'inputbg',    n: 'Cajas de texto', vars: ['--input-bg'], miembros: [], def: '#ffffff' },
+      { k: 'botonsuave', n: 'Botones y etiquetas suaves', vars: ['--boton-suave', '--chip-bg'], miembros: [], def: '#e2e8f0' },
+      { k: 'cabecera',   n: 'Encabezado y barras oscuras', base: '1e293b', miembros: [] },
+      { k: 'botonoscuro', n: 'Botones oscuros (Ajustes, Cerrar)', base: '334155', miembros: [] },
+      { k: 'gris',       n: 'Botones grises', base: '475569', miembros: [] },
+      { k: 'titulos',    n: 'Texto sobre botones y barras', base: 'ffffff', miembros: [] },
+      { k: 'acento',     n: 'Botones principales (azul)', base: '2563eb', miembros: ['0369a1', '1d4ed8', '3b82f6', '0c4a6e', '7dd3fc', 'f0f9ff'] },
+      { k: 'ok',         n: 'Cobrado / correcto (verde)', base: '16a34a', miembros: ['15803d', '166534', '22c55e', '14532d', 'dcfce7', '86efac'] },
+      { k: 'aviso',      n: 'Pendiente / aviso (amarillo)', base: 'f59e0b', miembros: ['b45309', '92400e', '713f12', 'a16207', 'fde68a', 'fef3c7', 'fffbeb', 'fde047'] },
+      { k: 'peligro',    n: 'Alertas y eliminar (rojo)', base: 'b91c1c', miembros: ['991b1b', 'ef4444', 'f87171', 'fee2e2', 'fca5a5'] }
+    ]
+  };
+  function aRgb(h) { h = String(h).replace('#', ''); if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2]; return [parseInt(h.substr(0, 2), 16), parseInt(h.substr(2, 2), 16), parseInt(h.substr(4, 2), 16)]; }
+  function aHsl(c) {
+    var r = c[0] / 255, g = c[1] / 255, b = c[2] / 255, mx = Math.max(r, g, b), mn = Math.min(r, g, b), l = (mx + mn) / 2, h = 0, s = 0, d = mx - mn;
+    if (d) { s = l > 0.5 ? d / (2 - mx - mn) : d / (mx + mn); if (mx === r) h = (g - b) / d + (g < b ? 6 : 0); else if (mx === g) h = (b - r) / d + 2; else h = (r - g) / d + 4; h *= 60; }
+    return [h, s, l];
+  }
+  function deHsl(h, s, l) {
+    h = ((h % 360) + 360) % 360;
+    var c = (1 - Math.abs(2 * l - 1)) * s, x = c * (1 - Math.abs((h / 60) % 2 - 1)), m = l - c / 2, r = 0, g = 0, b = 0;
+    if (h < 60) { r = c; g = x; } else if (h < 120) { r = x; g = c; } else if (h < 180) { g = c; b = x; } else if (h < 240) { g = x; b = c; } else if (h < 300) { r = x; b = c; } else { r = c; b = x; }
+    return [Math.round((r + m) * 255), Math.round((g + m) * 255), Math.round((b + m) * 255)];
+  }
+  function aHex(c) { return '#' + c.map(function (v) { v = Math.max(0, Math.min(255, v)); return (v < 16 ? '0' : '') + v.toString(16); }).join(''); }
+  function acotar(v) { return Math.max(0, Math.min(1, v)); }
+  // Los tonos de la misma familia (ej. el verde claro del texto) se calculan a partir del color elegido, manteniendo la misma diferencia que tenian.
+  function derivar(nuevo, baseDef, miembroDef) {
+    var N = aHsl(aRgb(nuevo)), B = aHsl(aRgb(baseDef)), M = aHsl(aRgb(miembroDef));
+    var s = B[1] > 0.02 ? acotar(N[1] * (M[1] / B[1])) : acotar(N[1] + M[1] - B[1]);
+    return aHex(deHsl(N[0] + (M[0] - B[0]), s, acotar(N[2] + (M[2] - B[2]))));
+  }
+  var puestas = { pc: [], vendedor: [] };
+  function aplicar(panel, cfg) {
+    var st = document.documentElement.style;
+    puestas[panel].forEach(function (v) { st.removeProperty(v); });
+    var ps = puestas[panel] = [];
+    function poner(n, v) { st.setProperty(n, v); ps.push(n); }
+    (ROLES[panel] || []).forEach(function (r) {
+      var c = cfg && cfg[r.k];
+      if (!/^#[0-9a-f]{6}$/i.test(c || '')) return;
+      if (r.base) {
+        poner('--tt-' + r.base, c);
+        (r.miembros || []).forEach(function (m) { poner('--tt-' + m, derivar(c, r.base, m)); });
+      }
+      (r.vars || []).forEach(function (v) { poner(v, c); });
+    });
+  }
+  var cfg = { pc: {}, vendedor: {} };
+  try { var g = JSON.parse(localStorage.getItem('ttColores') || 'null'); if (g) cfg = { pc: g.pc || {}, vendedor: g.vendedor || {} }; } catch (e) {}
+  function fijar(nuevo) {
+    cfg = JSON.parse(JSON.stringify({ pc: (nuevo && nuevo.pc) || {}, vendedor: (nuevo && nuevo.vendedor) || {} }));   // copia: lo que se edita despues no toca lo guardado
+    try { localStorage.setItem('ttColores', JSON.stringify(cfg)); } catch (e) {}
+  }
+  function iniciar(panel) {
+    aplicar(panel, cfg[panel]);
+    function cargar() {
+      fetch('/api/colores').then(function (r) { return r.json(); }).then(function (d) {
+        if (d && d.ok) { fijar(d); aplicar(panel, cfg[panel]); }
+      }).catch(function () {});
+    }
+    cargar();
+    if (panel === 'vendedor') {
+      setInterval(cargar, 60000);
+      document.addEventListener('visibilitychange', function () { if (!document.hidden) cargar(); });
+    }
+  }
+  window.TT = { roles: ROLES, aplicar: aplicar, iniciar: iniciar, fijar: fijar, derivar: derivar, cfg: function () { return cfg; } };
+})();
+TT.iniciar('pc');
+</script>
 </head>
 <body>
   <header>
     <h1>Panel de Pedidos - Toto Tools</h1>
     <div class="share">Vendedores conectan en: <b id="shareUrl">...</b></div>
-    <button id="btnStockBajo" class="btn-toggle" style="font-size:15px; position:relative;" onclick="togglePanelStockBajo()" title="Avisos: mensajes y stock bajo (Alt+M)">&#128276;<span id="badgeStockBajo" style="display:none; position:absolute; top:-6px; right:-6px; min-width:18px; height:18px; padding:0 4px; border-radius:9px; background:#ef4444; color:#fff; font-size:11px; font-weight:bold; align-items:center; justify-content:center;">0</span></button>
+    <button id="btnStockBajo" class="btn-toggle" style="font-size:15px; position:relative;" onclick="togglePanelStockBajo()" title="Avisos: mensajes y stock bajo (Alt+M)">&#128276;<span id="badgeStockBajo" style="display:none; position:absolute; top:-6px; right:-6px; min-width:18px; height:18px; padding:0 4px; border-radius:9px; background:var(--tt-ef4444,#ef4444); color:var(--tt-ffffff,#fff); font-size:11px; font-weight:bold; align-items:center; justify-content:center;">0</span></button>
     <button id="btnMenuPC" class="btn-toggle" style="font-size:15px;" onclick="abrirMenuPC()" title="Atajo: F10 (F1 muestra todos los atajos)">&#9881; Ajustes (F10)</button>
   </header>
 
@@ -5944,34 +6077,34 @@ $htmlPC = @'
     <label><input type="checkbox" id="soloPendientes" checked> Mostrar solo pendientes y por revisar</label>
     <span id="contadorRevisar"></span>
     <button class="btn-nuevo-pedido" id="btnNuevoPedidoPC" onclick="abrirNuevoPedido()" title="Atajo: F2">Nuevo pedido para vendedor (F2)</button>
-    <button class="btn-nuevo-pedido" style="background:#0369a1;" onclick="abrirListaAsignados()" title="Ver, editar o retirar los pedidos que ya enviaste a vendedores">Pedidos enviados</button>
+    <button class="btn-nuevo-pedido" style="background:var(--tt-0369a1,#0369a1);" onclick="abrirListaAsignados()" title="Ver, editar o retirar los pedidos que ya enviaste a vendedores">Pedidos enviados</button>
   </div>
 
-  <div id="panelStockBajo" style="display:none; position:fixed; top:64px; right:16px; z-index:57; width:380px; max-width:92vw; max-height:78vh; overflow:auto; background:#1e293b; border:1px solid #334155; border-radius:12px; padding:12px; box-shadow:0 8px 24px rgba(0,0,0,0.5);">
+  <div id="panelStockBajo" style="display:none; position:fixed; top:64px; right:16px; z-index:57; width:380px; max-width:92vw; max-height:78vh; overflow:auto; background:var(--tt-1e293b,#1e293b); border:1px solid var(--tt-334155,#334155); border-radius:12px; padding:12px; box-shadow:0 8px 24px rgba(0,0,0,0.5);">
     <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-      <strong style="color:#fff; font-size:14px;">Avisos</strong>
-      <span><button class="btn-toggle" style="font-size:12px; padding:4px 8px; background:#0369a1; color:#fff;" onclick="abrirCompras()">Lista de compras</button> <button class="btn-toggle" style="font-size:12px; padding:4px 8px;" onclick="descartarTodoStockBajo()" title="Borra los avisos de stock bajo">Borrar stock bajo</button> <button class="btn-toggle" style="font-size:12px; padding:4px 8px;" onclick="togglePanelStockBajo()">Cerrar</button></span>
+      <strong style="color:var(--tt-ffffff,#fff); font-size:14px;">Avisos</strong>
+      <span><button class="btn-toggle" style="font-size:12px; padding:4px 8px; background:var(--tt-0369a1,#0369a1); color:var(--tt-ffffff,#fff);" onclick="abrirCompras()">Lista de compras</button> <button class="btn-toggle" style="font-size:12px; padding:4px 8px;" onclick="descartarTodoStockBajo()" title="Borra los avisos de stock bajo">Borrar stock bajo</button> <button class="btn-toggle" style="font-size:12px; padding:4px 8px;" onclick="togglePanelStockBajo()">Cerrar</button></span>
     </div>
-    <div style="font-size:11px; color:#94a3b8; font-weight:700; letter-spacing:0.5px; text-transform:uppercase; margin:2px 0 2px;">Mensajes (recientes arriba)</div>
-    <div id="listaMensajesPC" style="font-size:13px; color:#e2e8f0; max-height:34vh; overflow:auto; margin-bottom:10px;"></div>
-    <div style="font-size:11px; color:#94a3b8; font-weight:700; letter-spacing:0.5px; text-transform:uppercase; margin:2px 0 2px;">Stock bajo</div>
-    <div id="listaStockBajo" style="font-size:13px; color:#e2e8f0;"></div>
+    <div style="font-size:11px; color:var(--tt-94a3b8,#94a3b8); font-weight:700; letter-spacing:0.5px; text-transform:uppercase; margin:2px 0 2px;">Mensajes (recientes arriba)</div>
+    <div id="listaMensajesPC" style="font-size:13px; color:var(--tt-e2e8f0,#e2e8f0); max-height:34vh; overflow:auto; margin-bottom:10px;"></div>
+    <div style="font-size:11px; color:var(--tt-94a3b8,#94a3b8); font-weight:700; letter-spacing:0.5px; text-transform:uppercase; margin:2px 0 2px;">Stock bajo</div>
+    <div id="listaStockBajo" style="font-size:13px; color:var(--tt-e2e8f0,#e2e8f0);"></div>
   </div>
   <div id="banner">Nuevo pedido recibido</div>
   <div style="margin:0 0 10px;"><input type="text" id="filtroPedidos" class="np-input" placeholder="Filtrar pedidos por folio, vendedor o producto (tecla /)" autocomplete="off"></div>
   <div id="grid"></div>
 
   <div id="reciboOverlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.65); align-items:center; justify-content:center; z-index:59;" onclick="if (event.target === this) cerrarRecibo()">
-    <div style="background:#1e293b; padding:20px; border-radius:12px; max-width:780px; width:95%; max-height:92vh; overflow:auto; color:#e2e8f0;">
+    <div style="background:var(--tt-1e293b,#1e293b); padding:20px; border-radius:12px; max-width:780px; width:95%; max-height:92vh; overflow:auto; color:var(--tt-e2e8f0,#e2e8f0);">
       <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
-        <h2 style="font-size:17px; color:#fff;">Personalizar comprobante y QR</h2>
+        <h2 style="font-size:17px; color:var(--tt-ffffff,#fff);">Personalizar comprobante y QR</h2>
         <button class="btn-toggle" onclick="cerrarRecibo()">Cerrar</button>
       </div>
-      <div id="reciboMsg" style="font-size:13px; color:#fbbf24; min-height:18px; margin-bottom:8px;"></div>
+      <div id="reciboMsg" style="font-size:13px; color:var(--tt-fbbf24,#fbbf24); min-height:18px; margin-bottom:8px;"></div>
 
       <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:14px;">
         <div>
-          <h3 style="font-size:14px; margin-bottom:8px; color:#93c5fd;">Datos del negocio</h3>
+          <h3 style="font-size:14px; margin-bottom:8px; color:var(--tt-93c5fd,#93c5fd);">Datos del negocio</h3>
           <label class="rc-et">Nombre del negocio</label><input type="text" id="rcNombre" class="rc-in" maxlength="60">
           <label class="rc-et">NIT</label><input type="text" id="rcNit" class="rc-in" maxlength="40" placeholder="Vacio = no se imprime">
           <label class="rc-et">Direccion</label><input type="text" id="rcDireccion" class="rc-in" maxlength="200">
@@ -5980,7 +6113,7 @@ $htmlPC = @'
           <label class="rc-et">Mensaje del pie (garantia, gracias...)</label><textarea id="rcPie" class="rc-in" rows="3" maxlength="500"></textarea>
         </div>
         <div>
-          <h3 style="font-size:14px; margin-bottom:8px; color:#93c5fd;">Papel y que se muestra</h3>
+          <h3 style="font-size:14px; margin-bottom:8px; color:var(--tt-93c5fd,#93c5fd);">Papel y que se muestra</h3>
           <label class="rc-et">Ancho del papel</label>
           <select id="rcAncho" class="rc-in" onchange="rcPintarImagenes()"><option value="32">58 mm (32 columnas)</option><option value="42">80 mm (42 columnas)</option><option value="48">80 mm (48 columnas)</option></select>
           <label class="rc-ck"><input type="checkbox" id="rcEstilo"> Letras grandes y negrita (si la impresora imprime simbolos raros, desactivalo)</label>
@@ -5990,8 +6123,8 @@ $htmlPC = @'
           <label class="rc-ck"><input type="checkbox" id="rcServ"> Mostrar SERVICIO y DESCUENTO %</label>
           <label class="rc-ck"><input type="checkbox" id="rcUSD"> Mostrar TOTAL USD (usa la tasa de Ajustes)</label>
 
-          <h3 style="font-size:14px; margin:14px 0 8px; color:#93c5fd;">Logo</h3>
-          <div id="rcLogoCaja" style="background:#fff; border-radius:6px; padding:6px; min-height:40px; text-align:center; margin-bottom:8px;"><span style="color:#64748b; font-size:12px;">Sin logo</span></div>
+          <h3 style="font-size:14px; margin:14px 0 8px; color:var(--tt-93c5fd,#93c5fd);">Logo</h3>
+          <div id="rcLogoCaja" style="background:#fff; border-radius:6px; padding:6px; min-height:40px; text-align:center; margin-bottom:8px;"><span style="color:var(--tt-64748b,#64748b); font-size:12px;">Sin logo</span></div>
           <input type="file" id="rcLogoFile" accept="image/*" onchange="rcElegirLogo(this)" style="font-size:12px; margin-bottom:6px; max-width:100%;">
           <label class="rc-ck"><input type="checkbox" id="rcLogoActivo" checked> Imprimir el logo</label>
           <label class="rc-et">Tamano del logo: <span id="rcLogoAnchoTxt"></span> puntos</label>
@@ -6001,8 +6134,8 @@ $htmlPC = @'
         </div>
       </div>
 
-      <h3 style="font-size:14px; margin:16px 0 4px; color:#93c5fd;">QR de pago (transferencia, tarjeta, WhatsApp...)</h3>
-      <p style="font-size:12px; color:#94a3b8; margin-bottom:8px;">Agrega la imagen del QR (recortada, solo el codigo) o escribe el texto/enlace y se genera solo. Cada QR dice cuando se imprime.</p>
+      <h3 style="font-size:14px; margin:16px 0 4px; color:var(--tt-93c5fd,#93c5fd);">QR de pago (transferencia, tarjeta, WhatsApp...)</h3>
+      <p style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin-bottom:8px;">Agrega la imagen del QR (recortada, solo el codigo) o escribe el texto/enlace y se genera solo. Cada QR dice cuando se imprime.</p>
       <div id="rcQrLista"></div>
       <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:8px;">
         <label class="btn-toggle" style="cursor:pointer;">+ QR desde imagen<input type="file" accept="image/*" onchange="rcAgregarQrImagen(this)" style="display:none;"></label>
@@ -6010,29 +6143,29 @@ $htmlPC = @'
       </div>
 
       <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:16px; align-items:center;">
-        <button class="btn-nuevo-pedido" style="background:#15803d;" onclick="rcGuardar()">Guardar</button>
+        <button class="btn-nuevo-pedido" style="background:var(--tt-15803d,#15803d);" onclick="rcGuardar()">Guardar</button>
         <button class="btn-toggle" onclick="rcImprimirPrueba()">Imprimir prueba</button>
         <select id="rcVistaMetodo" class="rc-in" style="width:auto; margin:0;" onchange="rcVista()"><option value="Efectivo">Efectivo</option><option value="Transferencia">Transferencia</option></select>
         <select id="rcVistaEstado" class="rc-in" style="width:auto; margin:0;" onchange="rcVista()"><option value="pendiente">Por cobrar</option><option value="cobrado">Cobrado</option></select>
       </div>
-      <div style="font-size:12px; color:#94a3b8; margin:10px 0 4px;">Vista previa (lo ultimo que guardaste):</div>
+      <div style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin:10px 0 4px;">Vista previa (lo ultimo que guardaste):</div>
       <pre id="rcVistaTxt" style="background:#fff; color:#111; border-radius:6px; padding:10px; font-size:12px; line-height:1.25; overflow:auto; white-space:pre; font-family:'Courier New',monospace; max-height:340px;"></pre>
     </div>
   </div>
   <style>
-    .rc-et { display:block; font-size:12px; color:#94a3b8; margin:8px 0 3px; }
-    .rc-in { width:100%; padding:8px; border-radius:6px; border:1px solid #334155; background:#0f172a; color:#e2e8f0; font-size:13px; box-sizing:border-box; }
+    .rc-et { display:block; font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin:8px 0 3px; }
+    .rc-in { width:100%; padding:8px; border-radius:6px; border:1px solid var(--tt-334155,#334155); background:var(--tt-0f172a,#0f172a); color:var(--tt-e2e8f0,#e2e8f0); font-size:13px; box-sizing:border-box; }
     .rc-ck { display:flex; gap:8px; align-items:flex-start; font-size:13px; margin:6px 0; }
-    .rc-qr { background:#0f172a; border:1px solid #334155; border-radius:8px; padding:10px; margin-bottom:8px; display:flex; gap:12px; flex-wrap:wrap; }
+    .rc-qr { background:var(--tt-0f172a,#0f172a); border:1px solid var(--tt-334155,#334155); border-radius:8px; padding:10px; margin-bottom:8px; display:flex; gap:12px; flex-wrap:wrap; }
     .rc-qr .rc-img { background:#fff; border-radius:6px; padding:4px; width:120px; height:120px; display:flex; align-items:center; justify-content:center; }
     .rc-qr .rc-img img { max-width:100%; max-height:100%; image-rendering:pixelated; }
   </style>
 
   <div id="menuPCOverlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); align-items:center; justify-content:center; z-index:58;" onclick="if (event.target === this) cerrarMenuPC()">
-    <div style="background:#1e293b; padding:22px; border-radius:12px; max-width:420px; width:92%; max-height:88vh; overflow:auto;">
-      <h2 style="font-size:17px; margin-bottom:14px; color:#fff;">Ajustes</h2>
+    <div style="background:var(--tt-1e293b,#1e293b); padding:22px; border-radius:12px; max-width:420px; width:92%; max-height:88vh; overflow:auto;">
+      <h2 style="font-size:17px; margin-bottom:14px; color:var(--tt-ffffff,#fff);">Ajustes</h2>
 
-      <div id="resumenHoyMenu" style="font-size:13px; color:#cbd5e1; background:#0f172a; border-radius:8px; padding:10px 12px; margin-bottom:16px;">Cargando resumen de hoy...</div>
+      <div id="resumenHoyMenu" style="font-size:13px; color:var(--tt-cbd5e1,#cbd5e1); background:var(--tt-0f172a,#0f172a); border-radius:8px; padding:10px 12px; margin-bottom:16px;">Cargando resumen de hoy...</div>
 
       <button class="btn-toggle" style="width:100%; margin-bottom:10px; text-align:left;" onclick="cerrarMenuPC(); abrirConfig();">Cargar / cambiar el Excel del catalogo</button>
 
@@ -6040,11 +6173,13 @@ $htmlPC = @'
 
       <button class="btn-toggle" style="width:100%; margin-bottom:10px; text-align:left;" onclick="cerrarMenuPC(); abrirRepos();">Que bajar del almacen (Alt+B)</button>
 
+      <button class="btn-toggle" style="width:100%; margin-bottom:10px; text-align:left;" onclick="abrirColores()" title="Elige el color de cada cosa del Panel de la PC y de la app del vendedor">Colores de la interfaz...</button>
+
       <button class="btn-toggle" style="width:100%; margin-bottom:10px; text-align:left;" onclick="cerrarMenuPC(); abrirSeries();" title="Busca un numero de serie y mira si sigue en garantia">Series y garantia de lo vendido</button>
 
-      <label style="font-size:14px; display:flex; align-items:center; gap:8px; margin-bottom:14px;" title="Se imprime como TOTAL USD en los recibos. Deja vacio o 0 para no imprimirlo.">Tasa USD: <input type="number" id="tasaDolar" min="0" step="any" placeholder="0" style="width:90px; padding:6px 8px; border-radius:6px; border:1px solid #334155; background:#0f172a; color:#e2e8f0;" onchange="guardarTasaDolar()"></label>
+      <label style="font-size:14px; display:flex; align-items:center; gap:8px; margin-bottom:14px;" title="Se imprime como TOTAL USD en los recibos. Deja vacio o 0 para no imprimirlo.">Tasa USD: <input type="number" id="tasaDolar" min="0" step="any" placeholder="0" style="width:90px; padding:6px 8px; border-radius:6px; border:1px solid var(--tt-334155,#334155); background:var(--tt-0f172a,#0f172a); color:var(--tt-e2e8f0,#e2e8f0);" onchange="guardarTasaDolar()"></label>
 
-      <label style="font-size:14px; display:flex; align-items:center; gap:8px; margin-bottom:14px;" title="Cuando un producto queda con esta cantidad o menos, avisa en el Panel y se marca en el buscador de vendedores y clientes. Deja 0 para desactivar el aviso.">Alerta stock bajo (unid.): <input type="number" id="umbralStockBajo" min="0" step="1" placeholder="3" style="width:70px; padding:6px 8px; border-radius:6px; border:1px solid #334155; background:#0f172a; color:#e2e8f0;" onchange="guardarUmbralStockBajo()"></label>
+      <label style="font-size:14px; display:flex; align-items:center; gap:8px; margin-bottom:14px;" title="Cuando un producto queda con esta cantidad o menos, avisa en el Panel y se marca en el buscador de vendedores y clientes. Deja 0 para desactivar el aviso.">Alerta stock bajo (unid.): <input type="number" id="umbralStockBajo" min="0" step="1" placeholder="3" style="width:70px; padding:6px 8px; border-radius:6px; border:1px solid var(--tt-334155,#334155); background:var(--tt-0f172a,#0f172a); color:var(--tt-e2e8f0,#e2e8f0);" onchange="guardarUmbralStockBajo()"></label>
 
       <button class="btn-toggle" id="btnPermitirDescuentos" style="width:100%; margin-bottom:10px;" onclick="alternarPermitirDescuentos()" title="Cuando esta activado, el vendedor puede editar el precio de cada linea de su pedido (descuento)">Descuentos por producto: ...</button>
 
@@ -6056,18 +6191,18 @@ $htmlPC = @'
 
       <button class="btn-toggle" id="btnUnirPedidos" style="width:100%; margin-bottom:10px;" onclick="alternarUnirPedidos()" title="Cuando esta activado, varios pedidos del mismo vendedor enviados con pocos minutos de diferencia se cierran juntos si SUMAN exactamente la misma venta (mismos productos y cantidades) que se cobra en AxisPOS">Unir pedidos del mismo vendedor: ...</button>
 
-      <label style="font-size:14px; display:flex; align-items:center; gap:8px; margin-bottom:14px; flex-wrap:wrap;" title="Maximo de pedidos que se pueden unir y minutos maximos entre el primero y el ultimo">Unir hasta <input type="number" id="unirPedidosMax" min="2" max="8" step="1" placeholder="4" style="width:56px; padding:6px 8px; border-radius:6px; border:1px solid #334155; background:#0f172a; color:#e2e8f0;" onchange="guardarUnirPedidos()"> pedidos en <input type="number" id="unirPedidosMinutos" min="1" max="30" step="1" placeholder="3" style="width:56px; padding:6px 8px; border-radius:6px; border:1px solid #334155; background:#0f172a; color:#e2e8f0;" onchange="guardarUnirPedidos()"> min</label>
+      <label style="font-size:14px; display:flex; align-items:center; gap:8px; margin-bottom:14px; flex-wrap:wrap;" title="Maximo de pedidos que se pueden unir y minutos maximos entre el primero y el ultimo">Unir hasta <input type="number" id="unirPedidosMax" min="2" max="8" step="1" placeholder="4" style="width:56px; padding:6px 8px; border-radius:6px; border:1px solid var(--tt-334155,#334155); background:var(--tt-0f172a,#0f172a); color:var(--tt-e2e8f0,#e2e8f0);" onchange="guardarUnirPedidos()"> pedidos en <input type="number" id="unirPedidosMinutos" min="1" max="30" step="1" placeholder="3" style="width:56px; padding:6px 8px; border-radius:6px; border:1px solid var(--tt-334155,#334155); background:var(--tt-0f172a,#0f172a); color:var(--tt-e2e8f0,#e2e8f0);" onchange="guardarUnirPedidos()"> min</label>
 
       <button class="btn-toggle" id="btnAutoservicioDestino" style="width:100%; margin-bottom:10px;" onclick="alternarAutoservicioDestino()" title="Adonde caen los pedidos que arman los clientes ellos mismos desde el enlace de autoservicio">Pedidos de clientes (autoservicio): ...</button>
       <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="copiarEnlaceAutoservicio()" title="Enlace para que los clientes vean el catalogo completo y armen su propio pedido desde su telefono">Copiar enlace para clientes</button>
       <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="mostrarQRCliente()" title="Muestra un codigo QR con el enlace del catalogo para que los clientes lo escaneen con la camara del telefono">Ver QR para clientes</button>
       <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="mostrarQRVendedor()" title="Muestra un codigo QR con el enlace de la app de vendedor, para que se enlacen escaneandolo con la camara sin escribir la direccion IP">Ver QR para vendedores</button>
 
-      <div style="margin-bottom:10px; padding:10px; background:#0f172a; border-radius:8px; border:1px solid #334155;">
-        <label style="font-size:12px; color:#94a3b8; display:block; margin-bottom:4px;">Nombre de la red WiFi (SSID)</label>
-        <input type="text" id="inputWifiSSID" placeholder="Ej: TotoTools" style="width:100%; padding:8px; border-radius:6px; border:1px solid #334155; background:#0f172a; color:#e2e8f0; font-size:13px; margin-bottom:8px;">
-        <label style="font-size:12px; color:#94a3b8; display:block; margin-bottom:4px;">Contraseña del WiFi</label>
-        <input type="text" id="inputWifiClave" placeholder="Dejar vacio si la red es abierta" style="width:100%; padding:8px; border-radius:6px; border:1px solid #334155; background:#0f172a; color:#e2e8f0; font-size:13px; margin-bottom:8px;">
+      <div style="margin-bottom:10px; padding:10px; background:var(--tt-0f172a,#0f172a); border-radius:8px; border:1px solid var(--tt-334155,#334155);">
+        <label style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); display:block; margin-bottom:4px;">Nombre de la red WiFi (SSID)</label>
+        <input type="text" id="inputWifiSSID" placeholder="Ej: TotoTools" style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--tt-334155,#334155); background:var(--tt-0f172a,#0f172a); color:var(--tt-e2e8f0,#e2e8f0); font-size:13px; margin-bottom:8px;">
+        <label style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); display:block; margin-bottom:4px;">Contraseña del WiFi</label>
+        <input type="text" id="inputWifiClave" placeholder="Dejar vacio si la red es abierta" style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--tt-334155,#334155); background:var(--tt-0f172a,#0f172a); color:var(--tt-e2e8f0,#e2e8f0); font-size:13px; margin-bottom:8px;">
         <button class="btn-toggle" style="width:100%;" onclick="guardarYMostrarQRWifi()" title="El cliente escanea este QR y su telefono se conecta solo al WiFi, sin ver ni escribir la contraseña">Ver QR para conectarse al WiFi</button>
         <button class="btn-toggle" style="width:100%; margin-top:8px;" onclick="generarTarjetaImprimir()" title="Genera una hoja con los dos QR (WiFi y catalogo) lista para imprimir o mandar por WhatsApp">Generar tarjeta para imprimir (WiFi + Catalogo)</button>
         <button class="btn-toggle" style="width:100%; margin-top:8px;" onclick="imprimirTarjetaTermica()" title="Imprime en la termica el QR del WiFi y el QR del catalogo, uno debajo del otro">Imprimir WiFi + Catalogo en la termica</button>
@@ -6088,7 +6223,7 @@ $htmlPC = @'
       <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="cerrarMenuPC(); abrirEstatico();">Stock estático (baja rotación)</button>
       <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="window.open('/metricas', '_blank')">Ver metricas (F8)</button>
 
-      <button class="btn-nuevo-pedido" style="width:100%; background:#0369a1; margin-bottom:10px;" onclick="cerrarMenuPC(); abrirPines();">PIN de vendedores</button>
+      <button class="btn-nuevo-pedido" style="width:100%; background:var(--tt-0369a1,#0369a1); margin-bottom:10px;" onclick="cerrarMenuPC(); abrirPines();">PIN de vendedores</button>
 
       <button class="btn-toggle" id="btnFotosCatalogo" style="width:100%; margin-bottom:10px;" onclick="importarFotosCatalogo()" title="Lee el ultimo backup-catalogo-*.zip de esta carpeta (Copia de seguridad de la app del catalogo) y actualiza las fotos por SKU">Fotos del catalogo: ...</button>
       <button class="btn-toggle" style="width:100%; margin-bottom:14px;" onclick="document.getElementById('zipFotosPC').click()" title="Elige el .zip de Copia de seguridad del catalogo desde cualquier carpeta de esta PC">Subir .zip de fotos...</button>
@@ -6096,82 +6231,82 @@ $htmlPC = @'
 
       <button class="btn-cerrar-dia" style="width:100%; margin-bottom:10px;" onclick="cerrarMenuPC(); cerrarDia();">Cerrar el dia (archivar cobrados)</button>
 
-      <button class="btn" style="background:#475569;" onclick="cerrarMenuPC()">Cerrar</button>
+      <button class="btn" style="background:var(--tt-475569,#475569);" onclick="cerrarMenuPC()">Cerrar</button>
     </div>
   </div>
 
   <div id="pinesOverlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); align-items:center; justify-content:center; z-index:55;">
-    <div style="background:#1e293b; padding:22px; border-radius:12px; max-width:420px; width:92%; max-height:88vh; overflow:auto;">
-      <h2 style="font-size:17px; margin-bottom:6px; color:#fff;">PIN de vendedores</h2>
-      <p style="font-size:12px; color:#94a3b8; margin-bottom:12px;">Un vendedor solo se puede crear desde aqui: nombre que no este repetido y un PIN de 4 a 6 numeros (obligatorio). Sin estar creado, nadie puede entrar como ese vendedor desde el movil.</p>
-      <label style="font-size:13px; display:block; margin-bottom:4px; color:#cbd5e1;">Nombre del vendedor:</label>
+    <div style="background:var(--tt-1e293b,#1e293b); padding:22px; border-radius:12px; max-width:420px; width:92%; max-height:88vh; overflow:auto;">
+      <h2 style="font-size:17px; margin-bottom:6px; color:var(--tt-ffffff,#fff);">PIN de vendedores</h2>
+      <p style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin-bottom:12px;">Un vendedor solo se puede crear desde aqui: nombre que no este repetido y un PIN de 4 a 6 numeros (obligatorio). Sin estar creado, nadie puede entrar como ese vendedor desde el movil.</p>
+      <label style="font-size:13px; display:block; margin-bottom:4px; color:var(--tt-cbd5e1,#cbd5e1);">Nombre del vendedor:</label>
       <input type="text" id="pinVendedorNombre" class="np-input" placeholder="Ej: Jose">
-      <label style="font-size:13px; display:block; margin-bottom:4px; color:#cbd5e1;">PIN (4 a 6 numeros, obligatorio):</label>
+      <label style="font-size:13px; display:block; margin-bottom:4px; color:var(--tt-cbd5e1,#cbd5e1);">PIN (4 a 6 numeros, obligatorio):</label>
       <input type="text" id="pinVendedorValor" class="np-input" inputmode="numeric" placeholder="Ej: 1234">
       <button class="btn" onclick="guardarPin()">Guardar</button>
-      <div id="pinError" style="color:#fca5a5; font-size:12px; margin-top:8px;"></div>
-      <h3 style="font-size:13px; color:#94a3b8; margin:14px 0 6px; text-transform:uppercase; letter-spacing:0.5px;">Vendedores con PIN puesto</h3>
-      <div id="listaConPin" style="font-size:13px; color:#e2e8f0;">Cargando...</div>
-      <h3 style="font-size:13px; color:#94a3b8; margin:14px 0 6px; text-transform:uppercase; letter-spacing:0.5px;">Modo punto de venta en el m&oacute;vil</h3>
-      <p style="font-size:12px; color:#94a3b8; margin-bottom:8px;">Con esta clave de administrador, un vendedor puede activar en su m&oacute;vil (Ajustes) el modo punto de venta: historial de ventas, devoluciones, descuentos y reporte de efectivo y transferencia. Si la cambias o la quitas, todos los m&oacute;viles pierden el modo.</p>
+      <div id="pinError" style="color:var(--tt-fca5a5,#fca5a5); font-size:12px; margin-top:8px;"></div>
+      <h3 style="font-size:13px; color:var(--tt-94a3b8,#94a3b8); margin:14px 0 6px; text-transform:uppercase; letter-spacing:0.5px;">Vendedores con PIN puesto</h3>
+      <div id="listaConPin" style="font-size:13px; color:var(--tt-e2e8f0,#e2e8f0);">Cargando...</div>
+      <h3 style="font-size:13px; color:var(--tt-94a3b8,#94a3b8); margin:14px 0 6px; text-transform:uppercase; letter-spacing:0.5px;">Modo punto de venta en el m&oacute;vil</h3>
+      <p style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin-bottom:8px;">Con esta clave de administrador, un vendedor puede activar en su m&oacute;vil (Ajustes) el modo punto de venta: historial de ventas, devoluciones, descuentos y reporte de efectivo y transferencia. Si la cambias o la quitas, todos los m&oacute;viles pierden el modo.</p>
       <input type="text" id="posClaveAdmin" class="np-input" placeholder="Clave de administrador (4 a 20 caracteres)" autocomplete="off">
       <button class="btn" onclick="guardarClavePOS()">Guardar clave</button>
-      <div id="posClaveEstado" style="font-size:12px; color:#94a3b8; margin-top:6px;"></div>
-      <button class="btn" style="background:#475569; margin-top:12px;" onclick="cerrarPines()">Cerrar</button>
+      <div id="posClaveEstado" style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin-top:6px;"></div>
+      <button class="btn" style="background:var(--tt-475569,#475569); margin-top:12px;" onclick="cerrarPines()">Cerrar</button>
     </div>
   </div>
 
   <div id="comprasOverlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); align-items:center; justify-content:center; z-index:59;">
-    <div style="background:#1e293b; padding:22px; border-radius:12px; max-width:560px; width:94%; max-height:90vh; overflow:auto;">
-      <h2 style="font-size:17px; margin-bottom:4px; color:#fff;">Lista de compras (reabastecer)</h2>
-      <p style="font-size:12px; color:#94a3b8; margin-bottom:10px;">Productos que llegaron a su mínimo de seguridad. Ajusta cuánto comprar y desmarca lo que no quieras pedir.</p>
-      <div id="comprasLista" style="max-height:38vh; overflow:auto; border:1px solid #334155; border-radius:8px; padding:4px 8px;"></div>
-      <div id="comprasResumen" style="font-size:12px; color:#94a3b8; margin:8px 0;"></div>
+    <div style="background:var(--tt-1e293b,#1e293b); padding:22px; border-radius:12px; max-width:560px; width:94%; max-height:90vh; overflow:auto;">
+      <h2 style="font-size:17px; margin-bottom:4px; color:var(--tt-ffffff,#fff);">Lista de compras (reabastecer)</h2>
+      <p style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin-bottom:10px;">Productos que llegaron a su mínimo de seguridad. Ajusta cuánto comprar y desmarca lo que no quieras pedir.</p>
+      <div id="comprasLista" style="max-height:38vh; overflow:auto; border:1px solid var(--tt-334155,#334155); border-radius:8px; padding:4px 8px;"></div>
+      <div id="comprasResumen" style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin:8px 0;"></div>
       <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:6px;">
         <button class="btn" style="flex:1; width:auto;" onclick="imprimirCompras()">Imprimir ticket</button>
-        <button class="btn" style="flex:1; width:auto; background:#0369a1;" onclick="copiarCompras()">Copiar texto</button>
-        <button class="btn" style="flex:1; width:auto; background:#475569;" onclick="hojaCompras()">Hoja / PDF</button>
+        <button class="btn" style="flex:1; width:auto; background:var(--tt-0369a1,#0369a1);" onclick="copiarCompras()">Copiar texto</button>
+        <button class="btn" style="flex:1; width:auto; background:var(--tt-475569,#475569);" onclick="hojaCompras()">Hoja / PDF</button>
       </div>
-      <div id="comprasMsg" style="font-size:12px; color:#86efac; min-height:16px;"></div>
-      <h3 style="font-size:13px; color:#94a3b8; margin:12px 0 6px; text-transform:uppercase; letter-spacing:0.5px;">Mínimo por producto</h3>
-      <p style="font-size:12px; color:#94a3b8; margin-bottom:6px;">Por defecto se usa el mínimo general de Ajustes. Aquí puedes fijar uno propio (0 = sin alerta para ese producto).</p>
+      <div id="comprasMsg" style="font-size:12px; color:var(--tt-86efac,#86efac); min-height:16px;"></div>
+      <h3 style="font-size:13px; color:var(--tt-94a3b8,#94a3b8); margin:12px 0 6px; text-transform:uppercase; letter-spacing:0.5px;">Mínimo por producto</h3>
+      <p style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin-bottom:6px;">Por defecto se usa el mínimo general de Ajustes. Aquí puedes fijar uno propio (0 = sin alerta para ese producto).</p>
       <input type="text" id="minBuscador" class="np-input" placeholder="Buscar producto (nombre o SKU)" oninput="buscarMinimo()">
       <div id="minResultados"></div>
-      <button class="btn" style="background:#475569; margin-top:12px;" onclick="cerrarCompras()">Cerrar</button>
+      <button class="btn" style="background:var(--tt-475569,#475569); margin-top:12px;" onclick="cerrarCompras()">Cerrar</button>
     </div>
   </div>
 
   <div id="reposOverlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); align-items:flex-start; justify-content:center; z-index:60; padding-top:4vh;" onclick="if (event.target === this) cerrarRepos()">
-    <div style="background:#1e293b; padding:22px; border-radius:12px; max-width:780px; width:96%; max-height:92vh; overflow:auto;">
-      <h2 style="font-size:17px; margin-bottom:4px; color:#fff;">Que bajar del almacen</h2>
-      <p id="reposInfo" style="font-size:12px; color:#94a3b8; margin-bottom:10px;">Mira las ventas recientes del piso y dice cuanto conviene bajar de cada producto. Solo lee AxisPOS; no cambia nada.</p>
+    <div style="background:var(--tt-1e293b,#1e293b); padding:22px; border-radius:12px; max-width:780px; width:96%; max-height:92vh; overflow:auto;">
+      <h2 style="font-size:17px; margin-bottom:4px; color:var(--tt-ffffff,#fff);">Que bajar del almacen</h2>
+      <p id="reposInfo" style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin-bottom:10px;">Mira las ventas recientes del piso y dice cuanto conviene bajar de cada producto. Solo lee AxisPOS; no cambia nada.</p>
       <div id="reposAlmacenes"></div>
-      <div style="display:flex; gap:14px; flex-wrap:wrap; margin:10px 0; font-size:13px; color:#cbd5e1;">
+      <div style="display:flex; gap:14px; flex-wrap:wrap; margin:10px 0; font-size:13px; color:var(--tt-cbd5e1,#cbd5e1);">
         <label>Ventas de los ultimos <input type="number" id="reposDias" class="np-input" min="1" max="60" value="7" style="width:70px; display:inline-block;" onkeydown="if (event.key === 'Enter') calcularRepos(true)"> dias</label>
-        <label>Cubrir <input type="number" id="reposCob" class="np-input" min="0" max="60" value="7" style="width:70px; display:inline-block;" onkeydown="if (event.key === 'Enter') calcularRepos(true)"> dias de venta <span style="color:#94a3b8; font-size:12px;">(0 = llenar hasta la cantidad nominal / maxima de AxisPOS)</span></label>
+        <label>Cubrir <input type="number" id="reposCob" class="np-input" min="0" max="60" value="7" style="width:70px; display:inline-block;" onkeydown="if (event.key === 'Enter') calcularRepos(true)"> dias de venta <span style="color:var(--tt-94a3b8,#94a3b8); font-size:12px;">(0 = llenar hasta la cantidad nominal / maxima de AxisPOS)</span></label>
       </div>
       <div style="display:flex; gap:8px; flex-wrap:wrap;">
         <button class="btn" id="reposBtnCalc" style="flex:1; width:auto;" onclick="calcularRepos(true)">Calcular</button>
-        <button class="btn" style="flex:1; width:auto; background:#0369a1;" onclick="copiarRepos()">Copiar lista</button>
-        <button class="btn" style="flex:1; width:auto; background:#475569;" onclick="cerrarRepos()">Cerrar</button>
+        <button class="btn" style="flex:1; width:auto; background:var(--tt-0369a1,#0369a1);" onclick="copiarRepos()">Copiar lista</button>
+        <button class="btn" style="flex:1; width:auto; background:var(--tt-475569,#475569);" onclick="cerrarRepos()">Cerrar</button>
       </div>
       <div id="reposResultado" style="margin-top:12px;"></div>
     </div>
   </div>
 
   <div id="consultaOverlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); align-items:flex-start; justify-content:center; z-index:60; padding-top:6vh;" onclick="if (event.target === this) cerrarConsulta()">
-    <div style="background:#1e293b; padding:22px; border-radius:12px; max-width:560px; width:94%; max-height:86vh; overflow:auto;">
-      <h2 style="font-size:17px; margin-bottom:4px; color:#fff;">Consultar precio y stock</h2>
-      <p id="consultaInfo" style="font-size:12px; color:#94a3b8; margin-bottom:10px;">Escribe el nombre o el SKU. No arma ningun pedido.</p>
+    <div style="background:var(--tt-1e293b,#1e293b); padding:22px; border-radius:12px; max-width:560px; width:94%; max-height:86vh; overflow:auto;">
+      <h2 style="font-size:17px; margin-bottom:4px; color:var(--tt-ffffff,#fff);">Consultar precio y stock</h2>
+      <p id="consultaInfo" style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin-bottom:10px;">Escribe el nombre o el SKU. No arma ningun pedido.</p>
       <input type="text" id="consultaBuscador" class="np-input" placeholder="Nombre o SKU del producto" autocomplete="off">
       <div id="consultaResultados"></div>
-      <button class="btn" style="background:#475569; margin-top:12px;" onclick="cerrarConsulta()">Cerrar</button>
+      <button class="btn" style="background:var(--tt-475569,#475569); margin-top:12px;" onclick="cerrarConsulta()">Cerrar</button>
     </div>
   </div>
 
   <div id="devOverlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); align-items:center; justify-content:center; z-index:59;">
-    <div style="background:#1e293b; padding:22px; border-radius:12px; max-width:560px; width:94%; max-height:92vh; overflow:auto;">
-      <h2 style="font-size:17px; margin-bottom:10px; color:#fff;">Devolución / cambio / garantía</h2>
+    <div style="background:var(--tt-1e293b,#1e293b); padding:22px; border-radius:12px; max-width:560px; width:94%; max-height:92vh; overflow:auto;">
+      <h2 style="font-size:17px; margin-bottom:10px; color:var(--tt-ffffff,#fff);">Devolución / cambio / garantía</h2>
       <div style="display:flex; gap:8px;">
         <select id="devTipo" class="np-select" style="flex:1;" onchange="devTipoCambio()">
           <option value="devolucion">Devolución</option>
@@ -6184,7 +6319,7 @@ $htmlPC = @'
       <input type="text" id="devCliente" class="np-input" placeholder="Cliente (opcional)">
       <input type="text" id="devBuscar" class="np-input" placeholder="Agregar producto recibido (nombre o SKU)" oninput="devBuscarProd()">
       <div id="devResultados"></div>
-      <h3 style="font-size:13px; color:#94a3b8; margin:10px 0 6px; text-transform:uppercase; letter-spacing:0.5px;">Productos recibidos</h3>
+      <h3 style="font-size:13px; color:var(--tt-94a3b8,#94a3b8); margin:10px 0 6px; text-transform:uppercase; letter-spacing:0.5px;">Productos recibidos</h3>
       <div id="devLista"><div class="np-vacio">Sin productos aún.</div></div>
       <div class="np-total" style="margin:6px 0;">Total: $<span id="devTotal">0.00</span></div>
       <textarea id="devMotivo" class="np-input" rows="2" placeholder="Motivo (ej: no enciende, defecto de fábrica)"></textarea>
@@ -6199,19 +6334,19 @@ $htmlPC = @'
         <input type="number" id="devDif" class="np-input" style="flex:1;" placeholder="Diferencia ± (opcional)">
       </div>
       <input type="text" id="devEntregado" class="np-input" placeholder="Entregado en cambio (texto, opcional)">
-      <label style="font-size:13px; display:flex; align-items:center; gap:8px; margin-bottom:10px; color:#cbd5e1;"><input type="checkbox" id="devStock" checked> Devolver estas unidades al stock</label>
+      <label style="font-size:13px; display:flex; align-items:center; gap:8px; margin-bottom:10px; color:var(--tt-cbd5e1,#cbd5e1);"><input type="checkbox" id="devStock" checked> Devolver estas unidades al stock</label>
       <button class="btn" onclick="devGuardar()">Guardar e imprimir comprobante</button>
       <div id="devMsg" style="font-size:12px; margin-top:8px; min-height:16px;"></div>
-      <h3 style="font-size:13px; color:#94a3b8; margin:12px 0 6px; text-transform:uppercase; letter-spacing:0.5px;">Últimos comprobantes</h3>
+      <h3 style="font-size:13px; color:var(--tt-94a3b8,#94a3b8); margin:12px 0 6px; text-transform:uppercase; letter-spacing:0.5px;">Últimos comprobantes</h3>
       <div id="devHistorial" style="font-size:13px;"></div>
-      <button class="btn" style="background:#475569; margin-top:12px;" onclick="cerrarDevolucion()">Cerrar</button>
+      <button class="btn" style="background:var(--tt-475569,#475569); margin-top:12px;" onclick="cerrarDevolucion()">Cerrar</button>
     </div>
   </div>
 
   <div id="permOverlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); align-items:center; justify-content:center; z-index:59;">
-    <div style="background:#1e293b; padding:22px; border-radius:12px; max-width:480px; width:94%; max-height:92vh; overflow:auto;">
-      <h2 style="font-size:17px; margin-bottom:4px; color:#fff;">Permisos de vendedores</h2>
-      <p style="font-size:12px; color:#94a3b8; margin-bottom:10px;">Decide qué puede hacer y a qué partes puede entrar cada vendedor. Los cambios se guardan al momento y el móvil los aplica en unos segundos (se le avisa).</p>
+    <div style="background:var(--tt-1e293b,#1e293b); padding:22px; border-radius:12px; max-width:480px; width:94%; max-height:92vh; overflow:auto;">
+      <h2 style="font-size:17px; margin-bottom:4px; color:var(--tt-ffffff,#fff);">Permisos de vendedores</h2>
+      <p style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin-bottom:10px;">Decide qué puede hacer y a qué partes puede entrar cada vendedor. Los cambios se guardan al momento y el móvil los aplica en unos segundos (se le avisa).</p>
       <select id="permVendedor" class="np-select" onchange="permSeleccionar(this.value)"></select>
       <div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:10px;">
         <button class="btn-toggle" style="font-size:12px; padding:6px 10px;" onclick="permPreset('completo')">Completo</button>
@@ -6219,92 +6354,111 @@ $htmlPC = @'
         <button class="btn-toggle" style="font-size:12px; padding:6px 10px;" onclick="permPreset('consulta')">Solo consulta</button>
       </div>
       <div id="permLista"></div>
-      <div id="permMsg" style="font-size:12px; color:#86efac; min-height:16px; margin-top:6px;"></div>
-      <button class="btn" style="background:#475569; margin-top:10px;" onclick="cerrarPermisos()">Cerrar</button>
+      <div id="permMsg" style="font-size:12px; color:var(--tt-86efac,#86efac); min-height:16px; margin-top:6px;"></div>
+      <button class="btn" style="background:var(--tt-475569,#475569); margin-top:10px;" onclick="cerrarPermisos()">Cerrar</button>
     </div>
   </div>
 
   <div id="redOverlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); align-items:center; justify-content:center; z-index:59;">
-    <div style="background:#1e293b; padding:22px; border-radius:12px; max-width:460px; width:94%; max-height:92vh; overflow:auto;">
-      <h2 style="font-size:17px; margin-bottom:4px; color:#fff;">Red / IP fija de la PC</h2>
-      <p style="font-size:12px; color:#94a3b8; margin-bottom:10px;">Cada punto de acceso da otro rango de IP. Aquí eliges el último número (ej. 50) y la PC toma siempre ese número en la red donde esté conectada.</p>
-      <div id="redInfo" style="font-size:13px; background:#0f172a; border-radius:8px; padding:10px 12px; margin-bottom:10px; color:#cbd5e1;">Cargando...</div>
-      <label style="font-size:13px; color:#cbd5e1; display:block; margin-bottom:4px;">Último número de la IP (2 a 254):</label>
+    <div style="background:var(--tt-1e293b,#1e293b); padding:22px; border-radius:12px; max-width:460px; width:94%; max-height:92vh; overflow:auto;">
+      <h2 style="font-size:17px; margin-bottom:4px; color:var(--tt-ffffff,#fff);">Red / IP fija de la PC</h2>
+      <p style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin-bottom:10px;">Cada punto de acceso da otro rango de IP. Aquí eliges el último número (ej. 50) y la PC toma siempre ese número en la red donde esté conectada.</p>
+      <div id="redInfo" style="font-size:13px; background:var(--tt-0f172a,#0f172a); border-radius:8px; padding:10px 12px; margin-bottom:10px; color:var(--tt-cbd5e1,#cbd5e1);">Cargando...</div>
+      <label style="font-size:13px; color:var(--tt-cbd5e1,#cbd5e1); display:block; margin-bottom:4px;">Último número de la IP (2 a 254):</label>
       <input type="number" id="redOcteto" class="np-input" min="2" max="254" placeholder="Ej: 50">
-      <label style="font-size:13px; display:flex; align-items:center; gap:8px; margin-bottom:10px; color:#cbd5e1;"><input type="checkbox" id="redAuto"> Aplicarlo solo al abrir el servidor (en la red donde esté)</label>
+      <label style="font-size:13px; display:flex; align-items:center; gap:8px; margin-bottom:10px; color:var(--tt-cbd5e1,#cbd5e1);"><input type="checkbox" id="redAuto"> Aplicarlo solo al abrir el servidor (en la red donde esté)</label>
       <button class="btn" onclick="fijarIpRed()">Fijar IP en esta red</button>
-      <button class="btn" style="background:#475569; margin-top:6px;" onclick="ipAutomaticaRed()">Volver a IP automática (DHCP)</button>
+      <button class="btn" style="background:var(--tt-475569,#475569); margin-top:6px;" onclick="ipAutomaticaRed()">Volver a IP automática (DHCP)</button>
       <div id="redMsg" style="font-size:12px; margin-top:8px; min-height:16px; line-height:1.4;"></div>
-      <button class="btn" style="background:#334155; margin-top:10px;" onclick="pcById('redOverlay').style.display='none'">Cerrar</button>
+      <button class="btn" style="background:var(--tt-334155,#334155); margin-top:10px;" onclick="pcById('redOverlay').style.display='none'">Cerrar</button>
     </div>
   </div>
 
   <div id="respaldoOverlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); align-items:center; justify-content:center; z-index:59;">
-    <div style="background:#1e293b; padding:22px; border-radius:12px; max-width:480px; width:94%; max-height:92vh; overflow:auto;">
-      <h2 style="font-size:17px; margin-bottom:4px; color:#fff;">Copias de seguridad</h2>
-      <p style="font-size:12px; color:#94a3b8; margin-bottom:10px;">Se guarda un .zip con los pedidos, historial, vendedores, permisos, almacenes y configuración. Siempre queda una copia en la carpeta "respaldos" del servidor. Si pones una carpeta extra (una unidad de red, o una carpeta de OneDrive / Google Drive / Dropbox para que suba sola a la nube) también se copia allí. Para restaurar: cierra el servidor y extrae el .zip sobre su carpeta.</p>
-      <div id="respInfo" style="font-size:13px; background:#0f172a; border-radius:8px; padding:10px 12px; margin-bottom:10px; color:#cbd5e1; line-height:1.4;">Cargando...</div>
-      <label style="font-size:13px; display:flex; align-items:center; gap:8px; margin-bottom:10px; color:#cbd5e1;"><input type="checkbox" id="respActivo"> Hacer copias automáticas</label>
-      <label style="font-size:13px; color:#cbd5e1; display:block; margin-bottom:4px;">Cada:</label>
+    <div style="background:var(--tt-1e293b,#1e293b); padding:22px; border-radius:12px; max-width:480px; width:94%; max-height:92vh; overflow:auto;">
+      <h2 style="font-size:17px; margin-bottom:4px; color:var(--tt-ffffff,#fff);">Copias de seguridad</h2>
+      <p style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin-bottom:10px;">Se guarda un .zip con los pedidos, historial, vendedores, permisos, almacenes y configuración. Siempre queda una copia en la carpeta "respaldos" del servidor. Si pones una carpeta extra (una unidad de red, o una carpeta de OneDrive / Google Drive / Dropbox para que suba sola a la nube) también se copia allí. Para restaurar: cierra el servidor y extrae el .zip sobre su carpeta.</p>
+      <div id="respInfo" style="font-size:13px; background:var(--tt-0f172a,#0f172a); border-radius:8px; padding:10px 12px; margin-bottom:10px; color:var(--tt-cbd5e1,#cbd5e1); line-height:1.4;">Cargando...</div>
+      <label style="font-size:13px; display:flex; align-items:center; gap:8px; margin-bottom:10px; color:var(--tt-cbd5e1,#cbd5e1);"><input type="checkbox" id="respActivo"> Hacer copias automáticas</label>
+      <label style="font-size:13px; color:var(--tt-cbd5e1,#cbd5e1); display:block; margin-bottom:4px;">Cada:</label>
       <select id="respHoras" class="np-select"><option value="1">1 hora</option><option value="3">3 horas</option><option value="6">6 horas</option><option value="12">12 horas</option><option value="24">24 horas</option><option value="48">48 horas</option></select>
-      <label style="font-size:13px; color:#cbd5e1; display:block; margin-bottom:4px;">Conservar las últimas (copias):</label>
+      <label style="font-size:13px; color:var(--tt-cbd5e1,#cbd5e1); display:block; margin-bottom:4px;">Conservar las últimas (copias):</label>
       <input type="number" id="respConservar" class="np-input" min="3" max="200">
-      <label style="font-size:13px; color:#cbd5e1; display:block; margin-bottom:4px;">Carpeta extra (opcional):</label>
+      <label style="font-size:13px; color:var(--tt-cbd5e1,#cbd5e1); display:block; margin-bottom:4px;">Carpeta extra (opcional):</label>
       <input type="text" id="respExtra" class="np-input" placeholder="Ej: D:\Respaldos   o   \\PC2\respaldos">
       <button class="btn" onclick="guardarRespaldo()">Guardar ajustes</button>
-      <button class="btn" style="background:#0369a1; margin-top:6px;" id="btnRespAhora" onclick="respaldarAhora()">Respaldar ahora</button>
+      <button class="btn" style="background:var(--tt-0369a1,#0369a1); margin-top:6px;" id="btnRespAhora" onclick="respaldarAhora()">Respaldar ahora</button>
       <div id="respMsg" style="font-size:12px; margin-top:8px; min-height:16px; line-height:1.4;"></div>
-      <div id="respLista" style="font-size:12px; color:#94a3b8; margin-top:6px; line-height:1.5;"></div>
-      <button class="btn" style="background:#334155; margin-top:10px;" onclick="pcById('respaldoOverlay').style.display='none'">Cerrar</button>
+      <div id="respLista" style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin-top:6px; line-height:1.5;"></div>
+      <button class="btn" style="background:var(--tt-334155,#334155); margin-top:10px;" onclick="pcById('respaldoOverlay').style.display='none'">Cerrar</button>
     </div>
   </div>
 
   <div id="sinOverlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); align-items:center; justify-content:center; z-index:59;">
-    <div style="background:#1e293b; padding:22px; border-radius:12px; max-width:520px; width:94%; max-height:92vh; overflow:auto;">
-      <h2 style="font-size:17px; margin-bottom:4px; color:#fff;">Sinónimos de búsqueda</h2>
-      <p style="font-size:12px; color:#94a3b8; margin-bottom:10px;">Para que el cliente encuentre un producto aunque no sepa el nombre. Vale en la búsqueda de los vendedores y en esta PC.</p>
-      <label style="font-size:13px; color:#cbd5e1; display:block; margin-bottom:4px;">Palabras que significan lo mismo (una línea por grupo, separadas por coma):</label>
-      <textarea id="sinGrupos" rows="7" style="width:100%; background:#0f172a; color:#e2e8f0; border:1px solid #334155; border-radius:8px; padding:8px; font-size:13px; margin-bottom:10px;" placeholder="cinta aislante, cinta de aislar, teipe"></textarea>
-      <label style="font-size:13px; color:#cbd5e1; display:block; margin-bottom:4px;">Palabras o códigos extra para un producto (una línea por producto: SKU: palabra1, palabra2):</label>
-      <textarea id="sinProductos" rows="5" style="width:100%; background:#0f172a; color:#e2e8f0; border:1px solid #334155; border-radius:8px; padding:8px; font-size:13px; margin-bottom:10px;" placeholder="10234: teipe negro, aislante 3M"></textarea>
+    <div style="background:var(--tt-1e293b,#1e293b); padding:22px; border-radius:12px; max-width:520px; width:94%; max-height:92vh; overflow:auto;">
+      <h2 style="font-size:17px; margin-bottom:4px; color:var(--tt-ffffff,#fff);">Sinónimos de búsqueda</h2>
+      <p style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin-bottom:10px;">Para que el cliente encuentre un producto aunque no sepa el nombre. Vale en la búsqueda de los vendedores y en esta PC.</p>
+      <label style="font-size:13px; color:var(--tt-cbd5e1,#cbd5e1); display:block; margin-bottom:4px;">Palabras que significan lo mismo (una línea por grupo, separadas por coma):</label>
+      <textarea id="sinGrupos" rows="7" style="width:100%; background:var(--tt-0f172a,#0f172a); color:var(--tt-e2e8f0,#e2e8f0); border:1px solid var(--tt-334155,#334155); border-radius:8px; padding:8px; font-size:13px; margin-bottom:10px;" placeholder="cinta aislante, cinta de aislar, teipe"></textarea>
+      <label style="font-size:13px; color:var(--tt-cbd5e1,#cbd5e1); display:block; margin-bottom:4px;">Palabras o códigos extra para un producto (una línea por producto: SKU: palabra1, palabra2):</label>
+      <textarea id="sinProductos" rows="5" style="width:100%; background:var(--tt-0f172a,#0f172a); color:var(--tt-e2e8f0,#e2e8f0); border:1px solid var(--tt-334155,#334155); border-radius:8px; padding:8px; font-size:13px; margin-bottom:10px;" placeholder="10234: teipe negro, aislante 3M"></textarea>
       <button class="btn" onclick="guardarSinonimos()">Guardar</button>
       <div id="sinMsg" style="font-size:12px; margin-top:8px; min-height:16px; line-height:1.4;"></div>
-      <button class="btn" style="background:#334155; margin-top:10px;" onclick="pcById('sinOverlay').style.display='none'">Cerrar</button>
+      <button class="btn" style="background:var(--tt-334155,#334155); margin-top:10px;" onclick="pcById('sinOverlay').style.display='none'">Cerrar</button>
     </div>
   </div>
 
   <div id="nuevoPedidoOverlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); align-items:center; justify-content:center; z-index:55;">
-    <div style="background:#1e293b; padding:22px; border-radius:12px; max-width:460px; width:92%; max-height:88vh; overflow:auto;">
-      <h2 id="npTitulo" style="font-size:17px; margin-bottom:12px; color:#fff;">Nuevo pedido para vendedor</h2>
+    <div style="background:var(--tt-1e293b,#1e293b); padding:22px; border-radius:12px; max-width:460px; width:92%; max-height:88vh; overflow:auto;">
+      <h2 id="npTitulo" style="font-size:17px; margin-bottom:12px; color:var(--tt-ffffff,#fff);">Nuevo pedido para vendedor</h2>
       <div id="npDestinoWrap">
-        <label style="font-size:13px; display:block; margin-bottom:4px; color:#cbd5e1;">Enviar a:</label>
+        <label style="font-size:13px; display:block; margin-bottom:4px; color:var(--tt-cbd5e1,#cbd5e1);">Enviar a:</label>
         <select id="selVendedorDestino" class="np-select"></select>
-        <div id="npSinVendedores" style="display:none; color:#fca5a5; font-size:12px; margin:-4px 0 8px;">Nadie est&aacute; en l&iacute;nea ahora mismo: el pedido queda guardado y les aparece cuando abran la app, siempre que sea dentro del plazo de abajo.</div>
+        <div id="npSinVendedores" style="display:none; color:var(--tt-fca5a5,#fca5a5); font-size:12px; margin:-4px 0 8px;">Nadie est&aacute; en l&iacute;nea ahora mismo: el pedido queda guardado y les aparece cuando abran la app, siempre que sea dentro del plazo de abajo.</div>
       </div>
       <div id="npVigenciaWrap">
-        <label style="font-size:13px; display:block; margin-bottom:4px; color:#cbd5e1;">El pedido espera a los vendedores durante:</label>
+        <label style="font-size:13px; display:block; margin-bottom:4px; color:var(--tt-cbd5e1,#cbd5e1);">El pedido espera a los vendedores durante:</label>
         <select id="selVigenciaNP" class="np-select"><option value="30">30 minutos</option><option value="60">1 hora</option><option value="120">2 horas</option><option value="480" selected>8 horas</option></select>
       </div>
-      <label style="font-size:13px; display:block; margin-bottom:4px; color:#cbd5e1;">Buscar producto:</label>
+      <label style="font-size:13px; display:block; margin-bottom:4px; color:var(--tt-cbd5e1,#cbd5e1);">Buscar producto:</label>
       <input type="text" id="npBuscador" class="np-input" placeholder="Nombre o SKU: flechas y Enter eligen, luego la cantidad. Comandos: +326 5, -50, /enviar, /ayuda" oninput="buscarNP()">
       <div id="npResultados"></div>
-      <h3 style="font-size:13px; color:#94a3b8; margin:12px 0 6px; text-transform:uppercase; letter-spacing:0.5px;">Pedido a armar</h3>
+      <h3 style="font-size:13px; color:var(--tt-94a3b8,#94a3b8); margin:12px 0 6px; text-transform:uppercase; letter-spacing:0.5px;">Pedido a armar</h3>
       <div id="npCarrito"><div class="np-vacio">Sin productos aun.</div></div>
       <div class="np-total">Total: $<span id="npTotal">0.00</span></div>
       <div id="npNotaWrap"><input type="text" id="npNota" class="np-input" maxlength="200" placeholder="Mensaje para el vendedor (opcional; sin productos se env&iacute;a solo el mensaje)"></div>
       <button class="btn" id="npBtnEnviar" onclick="enviarPedidoAVendedor()" style="margin-top:6px;" title="Atajo: Alt+Enter (o Ctrl+Enter)">Enviar al movil del vendedor (Alt+Enter)</button>
-      <button class="btn" style="background:#475569; margin-top:6px;" onclick="cerrarNuevoPedido()" title="Esc tambien: el pedido queda como borrador hasta que lo envies">Cerrar (queda de borrador)</button>
-      <div id="npError" style="color:#fca5a5; font-size:12px; margin-top:8px;"></div>
+      <button class="btn" style="background:var(--tt-475569,#475569); margin-top:6px;" onclick="cerrarNuevoPedido()" title="Esc tambien: el pedido queda como borrador hasta que lo envies">Cerrar (queda de borrador)</button>
+      <div id="npError" style="color:var(--tt-fca5a5,#fca5a5); font-size:12px; margin-top:8px;"></div>
+    </div>
+  </div>
+
+  <div id="coloresOverlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); align-items:center; justify-content:center; z-index:59;" onclick="if (event.target === this) cerrarColores()">
+    <div style="background:var(--tt-1e293b,#1e293b); padding:20px; border-radius:12px; max-width:540px; width:94%; max-height:90vh; overflow:auto; color:var(--tt-e2e8f0,#e2e8f0);">
+      <h2 style="font-size:17px; margin-bottom:6px; color:var(--tt-ffffff,#fff);">Colores de la interfaz</h2>
+      <div style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin-bottom:10px;">Elige el color de cada cosa. En el Panel de la PC lo ves al instante; el de los vendedores lo toman sus celulares solos en menos de un minuto. El boton &#8634; devuelve ese color al original.</div>
+      <div style="display:flex; gap:8px; margin-bottom:10px;">
+        <button class="btn-toggle" id="colTabPC" onclick="colElegirPanel('pc')">Panel de la PC</button>
+        <button class="btn-toggle" id="colTabVend" onclick="colElegirPanel('vendedor')">App del vendedor</button>
+      </div>
+      <div id="coloresLista"></div>
+      <div id="coloresPrev"></div>
+      <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:12px;">
+        <button class="btn" style="flex:1; width:auto;" onclick="guardarColores()">Guardar</button>
+        <button class="btn" style="flex:1; width:auto; background:var(--tt-475569,#475569);" onclick="restablecerColores()">Restablecer esta pantalla</button>
+        <button class="btn" style="flex:1; width:auto; background:var(--tt-475569,#475569);" onclick="cerrarColores()">Cerrar</button>
+      </div>
+      <div id="coloresMsg" style="font-size:12px; margin-top:8px; min-height:16px; line-height:1.4;"></div>
     </div>
   </div>
 
   <div id="asigListaOverlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); align-items:center; justify-content:center; z-index:54;" onclick="if (event.target === this) cerrarListaAsignados()">
-    <div style="background:#1e293b; padding:20px; border-radius:12px; max-width:560px; width:94%; max-height:88vh; overflow:auto; color:#e2e8f0;">
+    <div style="background:var(--tt-1e293b,#1e293b); padding:20px; border-radius:12px; max-width:560px; width:94%; max-height:88vh; overflow:auto; color:var(--tt-e2e8f0,#e2e8f0);">
       <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
-        <h2 style="font-size:17px; color:#fff;">Pedidos que enviaste a vendedores</h2>
+        <h2 style="font-size:17px; color:var(--tt-ffffff,#fff);">Pedidos que enviaste a vendedores</h2>
         <button class="btn-toggle" onclick="cerrarListaAsignados()">Cerrar</button>
       </div>
-      <div style="font-size:12px; color:#94a3b8; margin-bottom:10px;">Puedes editarlos mientras nadie los haya tomado ni agregado a su pedido. Si ya lo vieron, al editar les vuelve a aparecer como modificado.</div>
+      <div style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin-bottom:10px;">Puedes editarlos mientras nadie los haya tomado ni agregado a su pedido. Si ya lo vieron, al editar les vuelve a aparecer como modificado.</div>
       <div id="asigListaCont"></div>
     </div>
   </div>
@@ -6312,39 +6466,39 @@ $htmlPC = @'
   <div id="fotoOverlayNP" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.85); align-items:center; justify-content:center; z-index:60;" onclick="cerrarFotoProductoNP()">
     <div style="text-align:center;" onclick="event.stopPropagation()">
       <img id="fotoOverlayImgNP" src="" style="max-width:94vw; max-height:80vh; border-radius:10px; background:#fff;">
-      <div id="fotoOverlayNombreNP" style="color:#fff; margin-top:10px; font-size:15px;"></div>
+      <div id="fotoOverlayNombreNP" style="color:var(--tt-ffffff,#fff); margin-top:10px; font-size:15px;"></div>
     </div>
   </div>
 
   <div id="configOverlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); align-items:center; justify-content:center; z-index:50;">
-    <div style="background:#1e293b; padding:24px; border-radius:12px; max-width:480px; width:92%; max-height:85vh; overflow:auto;">
-      <h2 style="font-size:17px; margin-bottom:14px; color:#fff;">Configurar Excel del catalogo</h2>
+    <div style="background:var(--tt-1e293b,#1e293b); padding:24px; border-radius:12px; max-width:480px; width:92%; max-height:85vh; overflow:auto;">
+      <h2 style="font-size:17px; margin-bottom:14px; color:var(--tt-ffffff,#fff);">Configurar Excel del catalogo</h2>
 
       <div id="configPaso1">
         <label style="font-size:13px; display:block; margin-bottom:6px;">Ruta completa del archivo Excel en esta PC:</label>
-        <input type="text" id="inputRuta" placeholder="C:\ToTo Tools\catalogo.xlsx" style="width:100%; padding:9px; border-radius:6px; border:1px solid #334155; background:#0f172a; color:#e2e8f0; font-size:13px; margin-bottom:10px;">
+        <input type="text" id="inputRuta" placeholder="C:\ToTo Tools\catalogo.xlsx" style="width:100%; padding:9px; border-radius:6px; border:1px solid var(--tt-334155,#334155); background:var(--tt-0f172a,#0f172a); color:var(--tt-e2e8f0,#e2e8f0); font-size:13px; margin-bottom:10px;">
         <button class="btn" onclick="guardarRutaYContinuar()">Continuar</button>
-        <div id="configPaso1Error" style="color:#fca5a5; font-size:12px; margin-top:8px;"></div>
+        <div id="configPaso1Error" style="color:var(--tt-fca5a5,#fca5a5); font-size:12px; margin-top:8px;"></div>
       </div>
 
       <div id="configPaso2" style="display:none;">
-        <p style="font-size:12px; color:#94a3b8; margin-bottom:10px;">Elige que columna del Excel corresponde a cada dato (SKU y Cantidad/Stock son opcionales):</p>
+        <p style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin-bottom:10px;">Elige que columna del Excel corresponde a cada dato (SKU y Cantidad/Stock son opcionales):</p>
         <div id="mapeoCampos"></div>
         <button class="btn" onclick="guardarMapeoYCerrar()" style="margin-top:10px;">Guardar</button>
-        <button class="btn" style="background:#475569; margin-top:6px;" onclick="cerrarConfig()">Cancelar</button>
-        <div id="configPaso2Error" style="color:#fca5a5; font-size:12px; margin-top:8px;"></div>
+        <button class="btn" style="background:var(--tt-475569,#475569); margin-top:6px;" onclick="cerrarConfig()">Cancelar</button>
+        <div id="configPaso2Error" style="color:var(--tt-fca5a5,#fca5a5); font-size:12px; margin-top:8px;"></div>
       </div>
     </div>
   </div>
 
   <div id="qrOverlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); align-items:center; justify-content:center; z-index:50;" onclick="cerrarQRCliente()">
-    <div style="background:#1e293b; padding:24px; border-radius:12px; max-width:340px; width:88%; text-align:center;" onclick="event.stopPropagation()">
-      <h2 id="qrTituloModal" style="font-size:16px; margin-bottom:14px; color:#fff;">QR para clientes</h2>
+    <div style="background:var(--tt-1e293b,#1e293b); padding:24px; border-radius:12px; max-width:340px; width:88%; text-align:center;" onclick="event.stopPropagation()">
+      <h2 id="qrTituloModal" style="font-size:16px; margin-bottom:14px; color:var(--tt-ffffff,#fff);">QR para clientes</h2>
       <div id="qrCodeBox" style="background:#fff; padding:12px; border-radius:8px; display:inline-block; min-width:200px; min-height:200px;"></div>
-      <div id="qrEnlaceTexto" style="font-size:11px; color:#94a3b8; margin-top:12px; word-break:break-all;"></div>
+      <div id="qrEnlaceTexto" style="font-size:11px; color:var(--tt-94a3b8,#94a3b8); margin-top:12px; word-break:break-all;"></div>
       <button id="qrBotonCopiar" class="btn" style="margin-top:14px; width:100%;" onclick="copiarEnlaceQRActual()">Copiar enlace</button>
-      <button id="qrBotonTermica" class="btn" style="background:#0369a1; margin-top:8px; width:100%;" onclick="imprimirQRActualTermica()">Imprimir en la termica</button>
-      <button class="btn" style="background:#475569; margin-top:8px; width:100%;" onclick="cerrarQRCliente()">Cerrar</button>
+      <button id="qrBotonTermica" class="btn" style="background:var(--tt-0369a1,#0369a1); margin-top:8px; width:100%;" onclick="imprimirQRActualTermica()">Imprimir en la termica</button>
+      <button class="btn" style="background:var(--tt-475569,#475569); margin-top:8px; width:100%;" onclick="cerrarQRCliente()">Cerrar</button>
     </div>
   </div>
 
@@ -6434,12 +6588,12 @@ $htmlPC = @'
       b.appendChild(document.createTextNode(texto + '  '));
       const btn = document.createElement('button');
       btn.textContent = 'Deshacer';
-      btn.style.cssText = 'background:#fff; color:#0369a1; border:none; border-radius:6px; padding:4px 10px; font-weight:700; cursor:pointer; margin-left:6px;';
+      btn.style.cssText = 'background:#fff; color:var(--tt-0369a1,#0369a1); border:none; border-radius:6px; padding:4px 10px; font-weight:700; cursor:pointer; margin-left:6px;';
       btn.onclick = () => deshacerAsignado(idAsignado);
       b.appendChild(btn);
       const btnEd = document.createElement('button');
       btnEd.textContent = 'Editar';
-      btnEd.style.cssText = 'background:#fff; color:#0369a1; border:none; border-radius:6px; padding:4px 10px; font-weight:700; cursor:pointer; margin-left:6px;';
+      btnEd.style.cssText = 'background:#fff; color:var(--tt-0369a1,#0369a1); border:none; border-radius:6px; padding:4px 10px; font-weight:700; cursor:pointer; margin-left:6px;';
       btnEd.onclick = () => { document.getElementById('banner').style.display = 'none'; abrirEditarAsignado(idAsignado); };
       b.appendChild(btnEd);
       b.style.display = 'block';
@@ -6526,7 +6680,7 @@ $htmlPC = @'
       if (rc && rc.logo) { document.getElementById('rcLogoActivo').checked = rc.logo.activo !== false; sl.value = String(Math.min(rc.logo.w, max)); }
       document.getElementById('rcLogoAnchoTxt').textContent = sl.value;
       const caja = document.getElementById('rcLogoCaja');
-      caja.innerHTML = (rc && rc.logo && rc.logo.png) ? ('<img src="' + rc.logo.png + '" style="max-width:100%; image-rendering:pixelated;">') : '<span style="color:#64748b; font-size:12px;">Sin logo</span>';
+      caja.innerHTML = (rc && rc.logo && rc.logo.png) ? ('<img src="' + rc.logo.png + '" style="max-width:100%; image-rendering:pixelated;">') : '<span style="color:var(--tt-64748b,#64748b); font-size:12px;">Sin logo</span>';
       rcPintarQrs();
     }
     function rcLeerCampos() {
@@ -6662,7 +6816,7 @@ $htmlPC = @'
     function rcQuitarQr(i) { rc.qrs.splice(i, 1); rcPintarQrs(); }
     function rcPintarQrs() {
       const caja = document.getElementById('rcQrLista'); if (!caja) return;
-      if (!rc || !rc.qrs.length) { caja.innerHTML = '<div style="font-size:12px; color:#64748b;">Todavia no hay QR.</div>'; return; }
+      if (!rc || !rc.qrs.length) { caja.innerHTML = '<div style="font-size:12px; color:var(--tt-64748b,#64748b);">Todavia no hay QR.</div>'; return; }
       const max = rcMaxPuntos(), tams = [160, 224, 288, 352, 416, 480, 544].filter(function (t) { return t <= max; });
       caja.innerHTML = rc.qrs.map(function (q, i) {
         const actual = Math.min(Number(q.tam) || q.w || 256, max);
@@ -6937,7 +7091,7 @@ $htmlPC = @'
       ];
 
       const cont = document.getElementById('mapeoCampos');
-      cont.innerHTML = '<div style="font-size:12px; color:#94a3b8; margin-bottom:10px;">Encabezados detectados en la fila ' + (filaEncabezado + filaBaseExcel + 1) + ' del Excel.</div>' + campos.map(c => {
+      cont.innerHTML = '<div style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin-bottom:10px;">Encabezados detectados en la fila ' + (filaEncabezado + filaBaseExcel + 1) + ' del Excel.</div>' + campos.map(c => {
         const opciones = ['<option value="">' + (c.opcional ? '— Ninguna —' : '— elegir —') + '</option>']
           .concat(configMapeoEncabezados.map((h, i) => {
             const ej = ejemploColumna(i);
@@ -6947,7 +7101,7 @@ $htmlPC = @'
           .join('');
         return '<div style="margin-bottom:10px;">' +
           '<label style="font-size:12px; display:block; margin-bottom:4px;">' + c.etiqueta + '</label>' +
-          '<select id="mapeo-' + c.id + '" style="width:100%; padding:8px; border-radius:6px; border:1px solid #334155; background:#0f172a; color:#e2e8f0; font-size:13px;">' + opciones + '</select>' +
+          '<select id="mapeo-' + c.id + '" style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--tt-334155,#334155); background:var(--tt-0f172a,#0f172a); color:var(--tt-e2e8f0,#e2e8f0); font-size:13px;">' + opciones + '</select>' +
         '</div>';
       }).join('');
     }
@@ -7156,12 +7310,12 @@ $htmlPC = @'
           const quien = o.tomadoPor || p.vendedor || 'un vendedor';
           const horaTom = o.horaTomado ? String(o.horaTomado).slice(11) : '';
           const clienteTxt = o.cliente ? (' — Cliente: <b>' + o.cliente + '</b>') : '';
-          return '<div style="font-size:12px; color:#475569;">&#128274; Pedido "para todos" tomado por <b>' + quien + '</b>' + (horaTom ? (' a las ' + horaTom) : '') + clienteTxt + '.</div>';
+          return '<div style="font-size:12px; color:var(--tt-475569,#475569);">&#128274; Pedido "para todos" tomado por <b>' + quien + '</b>' + (horaTom ? (' a las ' + horaTom) : '') + clienteTxt + '.</div>';
         }).join('');
       }
 
-      const notaHtml = (p.clienteNombre ? ('<div style="font-size:13px; color:#0f172a; background:#e0f2fe; border-radius:6px; padding:6px 8px; margin:6px 0;">&#128100; <b>Cliente:</b> ' + escaparHtml(p.clienteNombre) + '</div>') : '') +
-        (p.nota ? ('<div style="font-size:13px; color:#0f172a; background:#e0f2fe; border-radius:6px; padding:6px 8px; margin:6px 0;">&#128172; <b>Nota del vendedor:</b> ' + escaparHtml(p.nota) + '</div>') : '');
+      const notaHtml = (p.clienteNombre ? ('<div style="font-size:13px; color:var(--tt-0f172a,#0f172a); background:var(--tt-e0f2fe,#e0f2fe); border-radius:6px; padding:6px 8px; margin:6px 0;">&#128100; <b>Cliente:</b> ' + escaparHtml(p.clienteNombre) + '</div>') : '') +
+        (p.nota ? ('<div style="font-size:13px; color:var(--tt-0f172a,#0f172a); background:var(--tt-e0f2fe,#e0f2fe); border-radius:6px; padding:6px 8px; margin:6px 0;">&#128172; <b>Nota del vendedor:</b> ' + escaparHtml(p.nota) + '</div>') : '');
 
       const totalProductos = Number(p.totalProductos !== undefined ? p.totalProductos : p.total || 0);
       const totalCobrado = Number(p.totalCobrado !== undefined && p.totalCobrado !== null ? p.totalCobrado : totalProductos);
@@ -7170,9 +7324,9 @@ $htmlPC = @'
       if (factorTr === 2) {
         // Transferencia: el total que se muestra ya es el de transferencia (precio x2); el precio base queda como referencia
         totalHtml = '<div class="total">Total (transferencia): $' + (totalProductos * 2).toFixed(2) + '</div>' +
-          '<div style="font-size:12px; color:#64748b;">Precio base: $' + totalProductos.toFixed(2) + '</div>';
+          '<div style="font-size:12px; color:var(--tt-64748b,#64748b);">Precio base: $' + totalProductos.toFixed(2) + '</div>';
       } else if (Math.abs(totalCobrado - totalProductos) > 0.009) {
-        totalHtml += '<div class="total" style="color:#7c2d12;">A cobrar (' + (p.metodoPago || '') + '): $' + totalCobrado.toFixed(2) + '</div>';
+        totalHtml += '<div class="total" style="color:var(--tt-7c2d12,#7c2d12);">A cobrar (' + (p.metodoPago || '') + '): $' + totalCobrado.toFixed(2) + '</div>';
       }
 
       let extra = '';
@@ -7187,7 +7341,7 @@ $htmlPC = @'
         const minsEsp = Math.max(0, Math.round((Date.now() - new Date(String(p.hora).replace(' ', 'T')).getTime()) / 60000));
         cuadreHtml = '<div class="discrepancia-aviso">&#9203; Lleva ' + minsEsp + ' min sin cobrarse en caja.</div>';
       } else if (p.estado === 'cobrado' && p.cuadreAxis === 'ok') {
-        cuadreHtml = '<div style="font-size:12px; color:#166534;">&#10003; Confirmado en AxisPOS' + (p.ventaAxis ? (' (venta #' + escaparHtml(String(p.ventaAxis)) + ')') : '') + '</div>';
+        cuadreHtml = '<div style="font-size:12px; color:var(--tt-166534,#166534);">&#10003; Confirmado en AxisPOS' + (p.ventaAxis ? (' (venta #' + escaparHtml(String(p.ventaAxis)) + ')') : '') + '</div>';
       } else if (p.estado === 'cobrado' && p.cuadreAxis === 'no_aparece') {
         cuadreHtml = '<div class="discrepancia-aviso">&#9888; Esta venta no aparece en AxisPOS.</div>';
       } else if (p.estado === 'cobrado' && p.cuadreAxis === 'difiere') {
@@ -7199,7 +7353,7 @@ $htmlPC = @'
         accionesPendiente =
           '<button class="btn" onclick="cobrar(' + p.id + ', \'' + (p.metodoPago || 'Efectivo') + '\', ' + totalCobrado + ')">Cobrar en Caja (' + (p.metodoPago || 'Efectivo') + ') — $' + totalCobrado.toFixed(2) + '</button>' +
           
-          (p.metodoPago === 'Combinado' ? '' : '<button class="btn" style="background:#0369a1;" onclick="abrirNuevoPedido(' + p.id + ')">+ Agregar producto</button>') +
+          (p.metodoPago === 'Combinado' ? '' : '<button class="btn" style="background:var(--tt-0369a1,#0369a1);" onclick="abrirNuevoPedido(' + p.id + ')">+ Agregar producto</button>') +
           '<button class="btn btn-cancelar" onclick="cancelarPedido(' + p.id + ')">Cancelar pedido</button>';
       }
 
@@ -7844,15 +7998,15 @@ $htmlPC = @'
     function pintarAlmacenesRepos(piso, orig) {
       const cont = document.getElementById('reposAlmacenes');
       if (reposAlmacenes.length < 2) {
-        cont.innerHTML = '<div class="np-vacio" style="color:#fbbf24;">En AxisPOS solo aparece ' +
+        cont.innerHTML = '<div class="np-vacio" style="color:var(--tt-fbbf24,#fbbf24);">En AxisPOS solo aparece ' +
           (reposAlmacenes.length ? 'un almacen (ID ' + reposAlmacenes[0].id + ')' : 'ningun almacen con productos') +
           '. Para sugerir que bajar hace falta otro almacen de donde bajar.</div>';
         return;
       }
-      let h = '<div style="font-size:13px; color:#cbd5e1; margin-bottom:6px;">Marca cual es el <b>piso de venta</b> y de cuales almacenes se <b>baja</b> la mercancia:</div>' +
-        '<table style="width:100%; border-collapse:collapse; font-size:13px;"><tr style="color:#94a3b8; text-align:left;"><th>Almacen</th><th>Con stock</th><th>Unidades</th><th>Piso</th><th>Bajar de</th></tr>';
+      let h = '<div style="font-size:13px; color:var(--tt-cbd5e1,#cbd5e1); margin-bottom:6px;">Marca cual es el <b>piso de venta</b> y de cuales almacenes se <b>baja</b> la mercancia:</div>' +
+        '<table style="width:100%; border-collapse:collapse; font-size:13px;"><tr style="color:var(--tt-94a3b8,#94a3b8); text-align:left;"><th>Almacen</th><th>Con stock</th><th>Unidades</th><th>Piso</th><th>Bajar de</th></tr>';
       reposAlmacenes.forEach(function (a) {
-        h += '<tr style="border-top:1px solid #334155;"><td style="padding:6px 4px;">ID ' + a.id + (a.nombre ? ' &middot; ' + escaparHtml(a.nombre) : '') + '</td>' +
+        h += '<tr style="border-top:1px solid var(--tt-334155,#334155);"><td style="padding:6px 4px;">ID ' + a.id + (a.nombre ? ' &middot; ' + escaparHtml(a.nombre) : '') + '</td>' +
           '<td>' + a.productos + '</td><td>' + Math.round(a.unidades) + '</td>' +
           '<td><input type="radio" name="reposPiso" value="' + a.id + '"' + (a.id === piso ? ' checked' : '') + ' onchange="reposCambioPiso()"></td>' +
           '<td><input type="checkbox" class="reposOrig" value="' + a.id + '"' + ((orig.indexOf(a.id) >= 0 && a.id !== piso) ? ' checked' : '') + '></td></tr>';
@@ -7877,29 +8031,29 @@ $htmlPC = @'
         const orig = String(d.origenGuardado || '').split(',').map(function (x) { return parseInt(x, 10); }).filter(function (x) { return x > 0; });
         pintarAlmacenesRepos(piso, orig);
       } catch (e) {
-        cont.innerHTML = '<div class="np-vacio" style="color:#f87171;">No se pudo leer AxisPOS: ' + escaparHtml(e.message || e) + '</div>';
+        cont.innerHTML = '<div class="np-vacio" style="color:var(--tt-f87171,#f87171);">No se pudo leer AxisPOS: ' + escaparHtml(e.message || e) + '</div>';
       }
     }
     function tarjetaRepos(x) {
       const colores = { A: '#16a34a', B: '#ca8a04', C: '#64748b' };
       const razon = { ventas: 'por ventas', minimo: 'por mínimo', ambos: 'ventas y mínimo', nominal: 'hasta el nominal' }[x.razon] || '';
-      const tend = x.tendencia === 'sube' ? ' <span style="color:#86efac;">&#9650; sube</span>' : (x.tendencia === 'baja' ? ' <span style="color:#fca5a5;">&#9660; baja</span>' : '');
-      const clase = (x.clase && colores[x.clase]) ? '<span style="background:' + colores[x.clase] + '; color:#fff; border-radius:4px; padding:0 6px; font-weight:700;">' + x.clase + '</span> ' : '';
-      return '<div style="background:#0f172a; border:1px solid #334155; border-radius:10px; padding:10px; margin-bottom:8px; font-size:13px; line-height:1.5;">' +
-        '<div style="display:flex; justify-content:space-between; gap:8px;"><b style="color:#fff;">' + escaparHtml(x.nombre) + '</b><span style="color:#86efac; font-weight:800; white-space:nowrap;">Bajar ' + x.bajar + '</span></div>' +
-        '<div style="color:#94a3b8;">' + clase + escaparHtml(x.sku || 'sin SKU') + (razon ? ' · ' + razon : '') + '</div>' +
+      const tend = x.tendencia === 'sube' ? ' <span style="color:var(--tt-86efac,#86efac);">&#9650; sube</span>' : (x.tendencia === 'baja' ? ' <span style="color:var(--tt-fca5a5,#fca5a5);">&#9660; baja</span>' : '');
+      const clase = (x.clase && colores[x.clase]) ? '<span style="background:' + colores[x.clase] + '; color:var(--tt-ffffff,#fff); border-radius:4px; padding:0 6px; font-weight:700;">' + x.clase + '</span> ' : '';
+      return '<div style="background:var(--tt-0f172a,#0f172a); border:1px solid var(--tt-334155,#334155); border-radius:10px; padding:10px; margin-bottom:8px; font-size:13px; line-height:1.5;">' +
+        '<div style="display:flex; justify-content:space-between; gap:8px;"><b style="color:var(--tt-ffffff,#fff);">' + escaparHtml(x.nombre) + '</b><span style="color:var(--tt-86efac,#86efac); font-weight:800; white-space:nowrap;">Bajar ' + x.bajar + '</span></div>' +
+        '<div style="color:var(--tt-94a3b8,#94a3b8);">' + clase + escaparHtml(x.sku || 'sin SKU') + (razon ? ' · ' + razon : '') + '</div>' +
         '<div>En el piso: <b>' + x.piso + '</b>' + (x.minimo > 0 ? ' (mínimo ' + x.minimo + ')' : '') + (x.maximo > 0 ? ' · nominal/máx. <b>' + x.maximo + '</b>' : '') + ' · vende <b>' + (x.ritmo != null ? x.ritmo : x.porDia) + '</b>/día' + tend +
           (x.diasPiso != null ? ' · alcanza <b>' + x.diasPiso + '</b> días' : '') + ' · vendió ' + x.vendido + '</div>' +
         '<div style="margin-top:4px;">' + (x.almacenes || []).map(function (a) {
-          return '<div style="display:flex; justify-content:space-between; border-top:1px dashed #334155; padding:2px 0;"><span>' + escaparHtml(a.nombre || ('Almacén ' + a.id)) + ': hay <b>' + a.stock + '</b></span>' +
-            '<span style="color:' + (a.bajar > 0 ? '#86efac' : '#64748b') + ';">' + (a.bajar > 0 ? 'bajar ' + a.bajar : 'no hace falta') + '</span></div>';
+          return '<div style="display:flex; justify-content:space-between; border-top:1px dashed var(--tt-334155,#334155); padding:2px 0;"><span>' + escaparHtml(a.nombre || ('Almacén ' + a.id)) + ': hay <b>' + a.stock + '</b></span>' +
+            '<span style="color:' + (a.bajar > 0 ? 'var(--tt-86efac,#86efac)' : 'var(--tt-64748b,#64748b)') + ';">' + (a.bajar > 0 ? 'bajar ' + a.bajar : 'no hace falta') + '</span></div>';
         }).join('') + '</div></div>';
     }
     function seccionRepos(titulo, lista, abierta, detalle) {
       if (!lista || !lista.length) return '';
-      return '<details' + (abierta ? ' open' : '') + ' style="margin-top:12px;"><summary style="cursor:pointer; color:#7dd3fc; font-size:13px; font-weight:700;">' + titulo + ' (' + lista.length + ')</summary>' +
+      return '<details' + (abierta ? ' open' : '') + ' style="margin-top:12px;"><summary style="cursor:pointer; color:var(--tt-7dd3fc,#7dd3fc); font-size:13px; font-weight:700;">' + titulo + ' (' + lista.length + ')</summary>' +
         '<div style="font-size:12px; margin-top:6px;">' + lista.map(function (x) {
-          return '<div style="display:flex; justify-content:space-between; gap:8px; border-top:1px solid #1e293b; padding:4px 0;"><span style="min-width:0;">' + escaparHtml(x.nombre) + '</span><span style="color:#94a3b8; text-align:right;">' + detalle(x) + '</span></div>';
+          return '<div style="display:flex; justify-content:space-between; gap:8px; border-top:1px solid var(--tt-1e293b,#1e293b); padding:4px 0;"><span style="min-width:0;">' + escaparHtml(x.nombre) + '</span><span style="color:var(--tt-94a3b8,#94a3b8); text-align:right;">' + detalle(x) + '</span></div>';
         }).join('') + '</div></details>';
     }
     function pintarResultadoRepos(d) {
@@ -7919,16 +8073,16 @@ $htmlPC = @'
       const nominal = (d.modo === 'nominal');
       reposTexto = 'Bajar del almacen (' + (nominal ? 'hasta la cantidad nominal/maxima de AxisPOS' : 'ventas de ' + d.dias + ' dias, cubrir ' + d.cobertura + ' dias') + ') - ' + d.generado + '\n' +
         Object.keys(grupos).map(function (k) { return '\n== ' + (grupos[k].nombre || ('Almacen ' + k)) + ' ==\n' + grupos[k].filas.join('\n'); }).join('\n');
-      let html = '<div style="font-size:12px; color:#94a3b8; margin-bottom:8px;">Calculado ' + escaparHtml(d.generado) + (nominal ? ' · llenando hasta la cantidad nominal / máxima de AxisPOS' : ' · ventas de ' + d.dias + ' días · cubrir ' + d.cobertura + ' días') + '</div>' +
-        (d.avisoMax && !nominal ? '<div style="font-size:12px; color:#fbbf24; margin-bottom:8px;">Sin tope por máximo: ' + escaparHtml(d.avisoMax) + '</div>' : '') +
-        (nominal && res.sinNominal ? '<div style="font-size:12px; color:#fbbf24; margin-bottom:8px;">' + res.sinNominal + ' productos con existencia en almacén no tienen cantidad nominal en AxisPOS y no entran en esta lista.</div>' : '') +
-        '<div style="background:#0f172a; border:1px solid #334155; border-radius:8px; padding:10px; margin-bottom:10px; font-size:13px; line-height:1.55;">' +
-        '<b style="color:#fff;">' + (res.productosABajar || 0) + ' productos · ' + (res.unidadesABajar || 0) + ' unidades por bajar</b><br>' +
+      let html = '<div style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin-bottom:8px;">Calculado ' + escaparHtml(d.generado) + (nominal ? ' · llenando hasta la cantidad nominal / máxima de AxisPOS' : ' · ventas de ' + d.dias + ' días · cubrir ' + d.cobertura + ' días') + '</div>' +
+        (d.avisoMax && !nominal ? '<div style="font-size:12px; color:var(--tt-fbbf24,#fbbf24); margin-bottom:8px;">Sin tope por máximo: ' + escaparHtml(d.avisoMax) + '</div>' : '') +
+        (nominal && res.sinNominal ? '<div style="font-size:12px; color:var(--tt-fbbf24,#fbbf24); margin-bottom:8px;">' + res.sinNominal + ' productos con existencia en almacén no tienen cantidad nominal en AxisPOS y no entran en esta lista.</div>' : '') +
+        '<div style="background:var(--tt-0f172a,#0f172a); border:1px solid var(--tt-334155,#334155); border-radius:8px; padding:10px; margin-bottom:10px; font-size:13px; line-height:1.55;">' +
+        '<b style="color:var(--tt-ffffff,#fff);">' + (res.productosABajar || 0) + ' productos · ' + (res.unidadesABajar || 0) + ' unidades por bajar</b><br>' +
         'En el piso se vendieron ' + (res.unidadesVendidas || 0) + ' unidades de ' + (res.productosConVentas || 0) + ' productos; ' + (res.sinMovimiento || 0) + ' con existencia no se movieron.<br>' +
         (res.porAlmacen || []).map(function (a) { return 'De <b>' + escaparHtml(a.nombre || ('Almacén ' + a.id)) + '</b>: ' + a.unidades + ' unidades en ' + a.productos + ' productos'; }).join('<br>') + '</div>';
       html += items.length ? items.map(tarjetaRepos).join('') :
         '<div class="np-vacio">' + (nominal ? 'No hace falta bajar nada: el piso ya está en su cantidad nominal / máxima.' : 'No hace falta bajar nada: el piso alcanza para ' + d.cobertura + ' días según las ventas de los últimos ' + d.dias + ' días.') + '</div>';
-      html += seccionRepos('Lo que más se vende', d.masVendidos, true, function (x) { return 'vendió ' + x.vendido + ' · piso ' + x.piso + ' · almacenes ' + x.origen + (x.diasPiso != null ? ' · alcanza ' + x.diasPiso + ' d' : '') + (x.bajar > 0 ? ' · <b style="color:#86efac;">bajar ' + x.bajar + '</b>' : ''); });
+      html += seccionRepos('Lo que más se vende', d.masVendidos, true, function (x) { return 'vendió ' + x.vendido + ' · piso ' + x.piso + ' · almacenes ' + x.origen + (x.diasPiso != null ? ' · alcanza ' + x.diasPiso + ' d' : '') + (x.bajar > 0 ? ' · <b style="color:var(--tt-86efac,#86efac);">bajar ' + x.bajar + '</b>' : ''); });
       html += seccionRepos('Lo que menos se vende (pero se vende)', d.menosVendidos, false, function (x) { return 'vendió ' + x.vendido + ' · piso ' + x.piso + ' · almacenes ' + x.origen; });
       html += seccionRepos('Con existencia y sin ventas en el periodo', d.sinMovimiento, false, function (x) { return 'piso ' + x.piso + ' · almacenes ' + x.origen; });
       out.innerHTML = html;
@@ -7941,8 +8095,8 @@ $htmlPC = @'
       const cobN = parseInt(document.getElementById('reposCob').value, 10);
       const cob = isNaN(cobN) ? 7 : Math.min(60, Math.max(0, cobN));
       const out = document.getElementById('reposResultado');
-      if (!piso) { out.innerHTML = '<div class="np-vacio" style="color:#fbbf24;">Marca cual almacen es el piso de venta.</div>'; return; }
-      if (!origen.length) { out.innerHTML = '<div class="np-vacio" style="color:#fbbf24;">Marca al menos un almacen de donde se baja la mercancia.</div>'; return; }
+      if (!piso) { out.innerHTML = '<div class="np-vacio" style="color:var(--tt-fbbf24,#fbbf24);">Marca cual almacen es el piso de venta.</div>'; return; }
+      if (!origen.length) { out.innerHTML = '<div class="np-vacio" style="color:var(--tt-fbbf24,#fbbf24);">Marca al menos un almacen de donde se baja la mercancia.</div>'; return; }
       try { localStorage.setItem('reposCfgV1', JSON.stringify({ dias: dias, cob: cob })); } catch (e) {}
       const btn = document.getElementById('reposBtnCalc');
       btn.disabled = true;
@@ -7955,7 +8109,7 @@ $htmlPC = @'
         if (!d.ok) throw new Error(d.error || 'Error');
         pintarResultadoRepos(d);
       } catch (e) {
-        out.innerHTML = '<div class="np-vacio" style="color:#f87171;">' + escaparHtml(e.message || e) + '</div>';
+        out.innerHTML = '<div class="np-vacio" style="color:var(--tt-f87171,#f87171);">' + escaparHtml(e.message || e) + '</div>';
       } finally { btn.disabled = false; }
     }
     function reposCopiarAlterno() {
@@ -8011,8 +8165,8 @@ $htmlPC = @'
       }).slice(0, 8);
       cont.innerHTML = hallados.map(function (x) {
         const st = (x[2] === null || x[2] === undefined) ? null : Number(x[2]);
-        const color = st === null ? '#94a3b8' : (st <= 0 ? '#f87171' : '#86efac');
-        return '<div class="np-resultado"><span style="flex:1; min-width:0;">' + escaparHtml(x[1]) + '<br><small style="color:#94a3b8;">' + escaparHtml(x[0] || 'sin SKU') + '</small></span>' +
+        const color = st === null ? 'var(--tt-94a3b8,#94a3b8)' : (st <= 0 ? 'var(--tt-f87171,#f87171)' : 'var(--tt-86efac,#86efac)');
+        return '<div class="np-resultado"><span style="flex:1; min-width:0;">' + escaparHtml(x[1]) + '<br><small style="color:var(--tt-94a3b8,#94a3b8);">' + escaparHtml(x[0] || 'sin SKU') + '</small></span>' +
           '<span style="text-align:right;"><b>$' + Number(x[3] || 0).toFixed(2) + '</b><br><small style="color:' + color + ';">' + (st === null ? 'sin dato' : ('Stock: ' + st)) + '</small></span></div>';
       }).join('') || '<div class="np-vacio">Sin resultados.</div>';
     }
@@ -8081,6 +8235,7 @@ $htmlPC = @'
     const ATAJOS_PC_AYUDA = 'ATAJOS: F2 Nuevo pedido | F3 Buscar producto | F4 Etiquetas | F6 Compras | F7 Devolucion | F8 Metricas | F9 Solo pendientes | F10 Ajustes | Alt+S Stock bajo | Alt+E Excel | Alt+P Permisos | Alt+V PIN vendedores | Alt+R Red | Alt+Q QR vendedor | Flechas Elegir pedido | Ctrl+Enter Cobrar el elegido (o Guardar devolucion) | En Nuevo pedido: escribe, flechas+Enter eligen, cantidad+Enter y sigues con el otro, Alt+Enter envia | Alt+M Mensajes y avisos | Alt+I Imprimir el elegido | Alt+C Consultar precio y stock | Alt+B Que bajar del almacen | / Filtrar pedidos | Esc Cerrar';
     const PC_OVERLAYS = [
       ['fotoOverlayNP', function () { cerrarFotoProductoNP(); }],
+      ['coloresOverlay', function () { cerrarColores(); }],
       ['qrOverlay', function () { cerrarQRCliente(); }],
       ['nuevoPedidoOverlay', function () { cerrarNuevoPedido(); }],
       ['asigListaOverlay', function () { cerrarListaAsignados(); }],
@@ -8289,8 +8444,8 @@ $htmlPC = @'
       badge.style.display = totalBadge ? 'flex' : 'none';
       badge.textContent = totalBadge;
       document.getElementById('listaStockBajo').innerHTML = v.length
-        ? v.map(p => '<div style="display:flex; justify-content:space-between; align-items:center; gap:8px; padding:6px 0; border-bottom:1px solid #334155;"><span>&#9888; ' + (p.nombre || p.sku) + ' <b>(' + p.stock + ')</b></span><button class="btn-toggle" style="font-size:12px; padding:3px 8px;" onclick=\'descartarStockBajo(' + JSON.stringify(p.sku) + ')\'>&#10005;</button></div>').join('')
-        : '<div style="color:#94a3b8;">Sin avisos de stock bajo.</div>';
+        ? v.map(p => '<div style="display:flex; justify-content:space-between; align-items:center; gap:8px; padding:6px 0; border-bottom:1px solid var(--tt-334155,#334155);"><span>&#9888; ' + (p.nombre || p.sku) + ' <b>(' + p.stock + ')</b></span><button class="btn-toggle" style="font-size:12px; padding:3px 8px;" onclick=\'descartarStockBajo(' + JSON.stringify(p.sku) + ')\'>&#10005;</button></div>').join('')
+        : '<div style="color:var(--tt-94a3b8,#94a3b8);">Sin avisos de stock bajo.</div>';
     }
     // ---- Mensajes en la misma campanita: recientes arriba, anteriores hacia abajo (hasta 300 guardados) ----
     let msgHistorial = [];
@@ -8313,14 +8468,14 @@ $htmlPC = @'
     function pintarMensajesPC() {
       const cont = document.getElementById('listaMensajesPC');
       if (!cont) return;
-      if (!msgHistorial.length) { cont.innerHTML = '<div style="color:#94a3b8;">Sin mensajes todavia.</div>'; return; }
+      if (!msgHistorial.length) { cont.innerHTML = '<div style="color:var(--tt-94a3b8,#94a3b8);">Sin mensajes todavia.</div>'; return; }
       let html = '', diaAnt = '';
       msgHistorial.slice().reverse().forEach(function (m) {
         const dia = msgDiaTexto(m.hora);
-        if (dia !== diaAnt) { html += '<div style="margin:8px 0 2px; font-size:11px; color:#94a3b8; font-weight:700;">' + dia + '</div>'; diaAnt = dia; }
-        const color = m.enviado ? '#7dd3fc' : (m.de === 'AxisPOS' ? '#fbbf24' : '#86efac');
+        if (dia !== diaAnt) { html += '<div style="margin:8px 0 2px; font-size:11px; color:var(--tt-94a3b8,#94a3b8); font-weight:700;">' + dia + '</div>'; diaAnt = dia; }
+        const color = m.enviado ? 'var(--tt-7dd3fc,#7dd3fc)' : (m.de === 'AxisPOS' ? 'var(--tt-fbbf24,#fbbf24)' : 'var(--tt-86efac,#86efac)');
         const quien = m.enviado ? ('Caja &rarr; ' + escaparHtml(m.de)) : escaparHtml(m.de);
-        html += '<div style="padding:5px 0; border-bottom:1px solid #334155;"><div style="font-size:11px; color:' + color + ';"><b>' + quien + '</b> &middot; ' + escaparHtml(String(m.hora || '').slice(11, 16)) + '</div><div style="word-break:break-word;">' + escaparHtml(m.texto) + '</div></div>';
+        html += '<div style="padding:5px 0; border-bottom:1px solid var(--tt-334155,#334155);"><div style="font-size:11px; color:' + color + ';"><b>' + quien + '</b> &middot; ' + escaparHtml(String(m.hora || '').slice(11, 16)) + '</div><div style="word-break:break-word;">' + escaparHtml(m.texto) + '</div></div>';
       });
       cont.innerHTML = html;
     }
@@ -8484,7 +8639,7 @@ $htmlPC = @'
     function cerrarCompras() { pcById('comprasOverlay').style.display = 'none'; }
 
     async function cargarCompras() {
-      pcById('comprasLista').innerHTML = '<div style="color:#94a3b8; font-size:13px; padding:8px;">Cargando...</div>';
+      pcById('comprasLista').innerHTML = '<div style="color:var(--tt-94a3b8,#94a3b8); font-size:13px; padding:8px;">Cargando...</div>';
       try {
         const r = await fetch('/api/reabastecer');
         const d = await r.json();
@@ -8496,13 +8651,13 @@ $htmlPC = @'
     function renderCompras() {
       const c = pcById('comprasLista');
       if (comprasItems.length === 0) {
-        c.innerHTML = '<div style="color:#94a3b8; font-size:13px; padding:10px;">Nada por reabastecer: ningún producto está en su mínimo.</div>';
+        c.innerHTML = '<div style="color:var(--tt-94a3b8,#94a3b8); font-size:13px; padding:10px;">Nada por reabastecer: ningún producto está en su mínimo.</div>';
       } else {
         c.innerHTML = comprasItems.map((i, idx) =>
           '<div class="np-resultado"><label style="display:flex; gap:8px; align-items:center; flex:1; min-width:0;">' +
           '<input type="checkbox" ' + (i.incluir ? 'checked' : '') + ' onchange="comprasItems[' + idx + '].incluir = this.checked; resumenCompras()">' +
-          '<span style="min-width:0;">' + escaparHtml(i.nombre) + '<br><small style="color:#94a3b8;">' + escaparHtml(i.sku || 'sin SKU') + ' · hay ' + i.stock + ' · mín. ' + i.minimo + (i.personalizado ? ' (propio)' : (i.origenMin === 'axis' ? ' (AxisPOS)' : '')) + '</small></span></label>' +
-          '<input type="number" min="1" value="' + i.comprar + '" style="width:72px; padding:6px; border-radius:6px; border:1px solid #334155; background:#0f172a; color:#e2e8f0;" onchange="comprasItems[' + idx + '].comprar = Math.max(1, parseFloat(this.value) || 1); resumenCompras()">' +
+          '<span style="min-width:0;">' + escaparHtml(i.nombre) + '<br><small style="color:var(--tt-94a3b8,#94a3b8);">' + escaparHtml(i.sku || 'sin SKU') + ' · hay ' + i.stock + ' · mín. ' + i.minimo + (i.personalizado ? ' (propio)' : (i.origenMin === 'axis' ? ' (AxisPOS)' : '')) + '</small></span></label>' +
+          '<input type="number" min="1" value="' + i.comprar + '" style="width:72px; padding:6px; border-radius:6px; border:1px solid var(--tt-334155,#334155); background:var(--tt-0f172a,#0f172a); color:var(--tt-e2e8f0,#e2e8f0);" onchange="comprasItems[' + idx + '].comprar = Math.max(1, parseFloat(this.value) || 1); resumenCompras()">' +
           '</div>'
         ).join('');
       }
@@ -8527,25 +8682,25 @@ $htmlPC = @'
         try { document.execCommand('copy'); } catch (e2) {}
         ta.remove();
       }
-      pcById('comprasMsg').style.color = '#86efac';
+      pcById('comprasMsg').style.color = 'var(--tt-86efac,#86efac)';
       pcById('comprasMsg').textContent = 'Lista copiada: pégala en WhatsApp o donde quieras.';
     }
     async function imprimirCompras() {
       const s = comprasSeleccionadas();
       const msg = pcById('comprasMsg');
-      if (s.length === 0) { msg.style.color = '#fca5a5'; msg.textContent = 'No hay artículos marcados.'; return; }
+      if (s.length === 0) { msg.style.color = 'var(--tt-fca5a5,#fca5a5)'; msg.textContent = 'No hay artículos marcados.'; return; }
       try {
         const r = await fetch('/api/reabastecer/imprimir', { method: 'POST', body: JSON.stringify({
           items: s.map(i => ({ sku: i.sku, nombre: i.nombre, cantidad: i.comprar, stock: i.stock, minimo: i.minimo }))
         }) });
         const d = await r.json();
-        msg.style.color = d.ok ? '#86efac' : '#fca5a5';
+        msg.style.color = d.ok ? 'var(--tt-86efac,#86efac)' : 'var(--tt-fca5a5,#fca5a5)';
         msg.textContent = d.ok ? 'Lista enviada a la impresora.' : (d.error || 'No se pudo imprimir.');
-      } catch (e) { msg.style.color = '#fca5a5'; msg.textContent = 'No se pudo contactar con el servidor.'; }
+      } catch (e) { msg.style.color = 'var(--tt-fca5a5,#fca5a5)'; msg.textContent = 'No se pudo contactar con el servidor.'; }
     }
     function hojaCompras() {
       const s = comprasSeleccionadas();
-      if (s.length === 0) { pcById('comprasMsg').style.color = '#fca5a5'; pcById('comprasMsg').textContent = 'No hay artículos marcados.'; return; }
+      if (s.length === 0) { pcById('comprasMsg').style.color = 'var(--tt-fca5a5,#fca5a5)'; pcById('comprasMsg').textContent = 'No hay artículos marcados.'; return; }
       const w = window.open('', '_blank');
       if (!w) return;
       w.document.write('<html><head><meta charset="UTF-8"><title>Lista de compras</title><style>body{font-family:Arial,sans-serif;padding:20px}table{border-collapse:collapse;width:100%}td,th{border:1px solid #999;padding:6px 8px;text-align:left;font-size:14px}th{background:#eee}</style></head><body><h2>Lista de compras - ' +
@@ -8561,8 +8716,8 @@ $htmlPC = @'
       if (q.length < 2) { cont.innerHTML = ''; return; }
       const res = catalogoCompras.filter(p => p.sku && (normalizar(p.nombre).includes(q) || normalizar(p.sku).includes(q))).slice(0, 6);
       cont.innerHTML = res.length ? res.map((p, idx) =>
-        '<div class="np-resultado"><span style="flex:1; min-width:0;">' + escaparHtml(p.nombre) + '<br><small style="color:#94a3b8;">' + escaparHtml(p.sku) + ' · hay ' + (p.stock == null ? '—' : p.stock) + '</small></span>' +
-        '<input type="number" min="0" id="minIn' + idx + '" placeholder="mín." style="width:64px; padding:6px; border-radius:6px; border:1px solid #334155; background:#0f172a; color:#e2e8f0; margin:0 6px;">' +
+        '<div class="np-resultado"><span style="flex:1; min-width:0;">' + escaparHtml(p.nombre) + '<br><small style="color:var(--tt-94a3b8,#94a3b8);">' + escaparHtml(p.sku) + ' · hay ' + (p.stock == null ? '—' : p.stock) + '</small></span>' +
+        '<input type="number" min="0" id="minIn' + idx + '" placeholder="mín." style="width:64px; padding:6px; border-radius:6px; border:1px solid var(--tt-334155,#334155); background:var(--tt-0f172a,#0f172a); color:var(--tt-e2e8f0,#e2e8f0); margin:0 6px;">' +
         '<button class="btn-toggle" style="padding:6px 10px; font-size:12px;" onclick="fijarMinimo(' + JSON.stringify(p.sku).replace(/"/g, '&quot;') + ', ' + idx + ')">Fijar</button>' +
         '<button class="btn-toggle" style="padding:6px 10px; font-size:12px; margin-left:4px;" title="Volver al mínimo general" onclick="fijarMinimo(' + JSON.stringify(p.sku).replace(/"/g, '&quot;') + ', -1)">Quitar</button></div>'
       ).join('') : '<div class="np-vacio">Sin resultados.</div>';
@@ -8571,7 +8726,7 @@ $htmlPC = @'
       let minimo = null;
       if (idx >= 0) { const v = pcById('minIn' + idx).value; if (v === '') { return; } minimo = parseFloat(v); }
       await fetch('/api/minimos', { method: 'POST', body: JSON.stringify({ sku, minimo }) });
-      pcById('comprasMsg').style.color = '#86efac';
+      pcById('comprasMsg').style.color = 'var(--tt-86efac,#86efac)';
       pcById('comprasMsg').textContent = idx >= 0 ? 'Mínimo guardado.' : 'Ese producto vuelve a usar el mínimo general.';
       await cargarCompras();
       try { revisarStockBajo(); } catch (e) {}
@@ -8600,7 +8755,7 @@ $htmlPC = @'
     }
     function cerrarDevolucion() { pcById('devOverlay').style.display = 'none'; }
     function devTipoCambio() { pcById('devStock').checked = (pcById('devTipo').value === 'devolucion'); }
-    function devMensaje(t, ok) { const m = pcById('devMsg'); m.style.color = ok ? '#86efac' : '#fca5a5'; m.textContent = t; }
+    function devMensaje(t, ok) { const m = pcById('devMsg'); m.style.color = ok ? 'var(--tt-86efac,#86efac)' : 'var(--tt-fca5a5,#fca5a5)'; m.textContent = t; }
 
     function devBuscarProd() {
       const q = normalizar(pcById('devBuscar').value);
@@ -8608,7 +8763,7 @@ $htmlPC = @'
       if (q.length < 2) { cont.innerHTML = ''; devResultadosLista = []; return; }
       devResultadosLista = catalogoDev.filter(p => normalizar(p.nombre).includes(q) || normalizar(p.sku || '').includes(q)).slice(0, 6);
       cont.innerHTML = devResultadosLista.map((p, idx) =>
-        '<div class="np-resultado"><span style="flex:1; min-width:0;">' + escaparHtml(p.nombre) + '<br><small style="color:#94a3b8;">' + escaparHtml(p.sku || 'sin SKU') + ' · $' + Number(p.precio).toFixed(2) + '</small></span>' +
+        '<div class="np-resultado"><span style="flex:1; min-width:0;">' + escaparHtml(p.nombre) + '<br><small style="color:var(--tt-94a3b8,#94a3b8);">' + escaparHtml(p.sku || 'sin SKU') + ' · $' + Number(p.precio).toFixed(2) + '</small></span>' +
         '<button class="btn-toggle" style="padding:6px 12px;" onclick="devAgregar(' + idx + ')">+</button></div>'
       ).join('') || '<div class="np-vacio">Sin resultados.</div>';
     }
@@ -8641,8 +8796,8 @@ $htmlPC = @'
       const c = pcById('devLista');
       c.innerHTML = devItems.length ? devItems.map((i, idx) =>
         '<div class="np-resultado"><span style="flex:1; min-width:0;">' + escaparHtml(i.nombre) + '</span>' +
-        '<input type="number" min="1" step="any" value="' + i.cantidad + '" title="Cantidad" style="width:58px; padding:6px; border-radius:6px; border:1px solid #334155; background:#0f172a; color:#e2e8f0; margin:0 4px;" onchange="devItems[' + idx + '].cantidad = Math.max(0.01, parseFloat(this.value) || 1); renderDev()">' +
-        '<input type="number" min="0" step="any" value="' + Number(i.precio).toFixed(2) + '" title="Precio" style="width:76px; padding:6px; border-radius:6px; border:1px solid #334155; background:#0f172a; color:#e2e8f0;" onchange="devItems[' + idx + '].precio = Math.max(0, parseFloat(this.value) || 0); renderDev()">' +
+        '<input type="number" min="1" step="any" value="' + i.cantidad + '" title="Cantidad" style="width:58px; padding:6px; border-radius:6px; border:1px solid var(--tt-334155,#334155); background:var(--tt-0f172a,#0f172a); color:var(--tt-e2e8f0,#e2e8f0); margin:0 4px;" onchange="devItems[' + idx + '].cantidad = Math.max(0.01, parseFloat(this.value) || 1); renderDev()">' +
+        '<input type="number" min="0" step="any" value="' + Number(i.precio).toFixed(2) + '" title="Precio" style="width:76px; padding:6px; border-radius:6px; border:1px solid var(--tt-334155,#334155); background:var(--tt-0f172a,#0f172a); color:var(--tt-e2e8f0,#e2e8f0);" onchange="devItems[' + idx + '].precio = Math.max(0, parseFloat(this.value) || 0); renderDev()">' +
         '<button class="btn-toggle" style="padding:6px 10px; margin-left:4px;" onclick="devItems.splice(' + idx + ', 1); renderDev()">&times;</button></div>'
       ).join('') : '<div class="np-vacio">Sin productos aún.</div>';
       pcById('devTotal').textContent = devTotalNum().toFixed(2);
@@ -8681,7 +8836,7 @@ $htmlPC = @'
         const lista = (d.devoluciones || []).slice(0, 8);
         const nombres = { devolucion: 'Devolución', cambio: 'Cambio', garantia: 'Garantía' };
         cont.innerHTML = lista.length ? lista.map(x =>
-          '<div class="np-resultado"><span style="flex:1; min-width:0;">D-' + x.id + ' · ' + (nombres[x.tipo] || x.tipo) + ' · $' + Number(x.total || 0).toFixed(2) + '<br><small style="color:#94a3b8;">' + escaparHtml(x.hora) + (x.cliente ? ' · ' + escaparHtml(x.cliente) : '') + '</small></span>' +
+          '<div class="np-resultado"><span style="flex:1; min-width:0;">D-' + x.id + ' · ' + (nombres[x.tipo] || x.tipo) + ' · $' + Number(x.total || 0).toFixed(2) + '<br><small style="color:var(--tt-94a3b8,#94a3b8);">' + escaparHtml(x.hora) + (x.cliente ? ' · ' + escaparHtml(x.cliente) : '') + '</small></span>' +
           '<button class="btn-toggle" style="padding:6px 10px; font-size:12px;" onclick="devReimprimir(' + x.id + ')">Reimprimir</button></div>'
         ).join('') : '<div class="np-vacio">Todavía no hay comprobantes.</div>';
       } catch (e) { cont.innerHTML = ''; }
@@ -8730,9 +8885,9 @@ $htmlPC = @'
       const v = (permData.vendedores || []).find(x => x.nombre === permActual);
       if (!v) return;
       pcById('permLista').innerHTML = rolesBoxHtml(v) + permData.claves.map(c =>
-        '<label style="display:flex; align-items:flex-start; gap:10px; padding:8px 0; border-bottom:1px solid #334155; font-size:14px; cursor:pointer;">' +
+        '<label style="display:flex; align-items:flex-start; gap:10px; padding:8px 0; border-bottom:1px solid var(--tt-334155,#334155); font-size:14px; cursor:pointer;">' +
         '<input type="checkbox" style="margin-top:3px;" ' + (v.permisos[c.k] ? 'checked' : '') + ' onchange="permCambiar(\'' + c.k + '\', this.checked)">' +
-        '<span><b style="color:#fff;">' + escaparHtml(c.t) + '</b><br><small style="color:#94a3b8;">' + escaparHtml(c.d) + '</small></span></label>'
+        '<span><b style="color:var(--tt-ffffff,#fff);">' + escaparHtml(c.t) + '</b><br><small style="color:var(--tt-94a3b8,#94a3b8);">' + escaparHtml(c.d) + '</small></span></label>'
       ).join('');
     }
     async function permGuardar(permisos) {
@@ -8740,10 +8895,10 @@ $htmlPC = @'
       try {
         const r = await fetch('/api/permisos', { method: 'POST', body: JSON.stringify({ vendedor: permActual, permisos }) });
         const d = await r.json();
-        m.style.color = d.ok ? '#86efac' : '#fca5a5';
+        m.style.color = d.ok ? 'var(--tt-86efac,#86efac)' : 'var(--tt-fca5a5,#fca5a5)';
         m.textContent = d.ok ? ('Guardado para ' + permActual + '.') : (d.error || 'No se pudo guardar.');
         if (d.ok) { const v = permData.vendedores.find(x => x.nombre === permActual); if (v) v.permisos = d.permisos; }
-      } catch (e) { m.style.color = '#fca5a5'; m.textContent = 'No se pudo contactar con el servidor.'; }
+      } catch (e) { m.style.color = 'var(--tt-fca5a5,#fca5a5)'; m.textContent = 'No se pudo contactar con el servidor.'; }
       renderPermisos();
     }
     function permCambiar(k, valor) { const o = {}; o[k] = valor; permGuardar(o); }
@@ -8762,8 +8917,8 @@ $htmlPC = @'
         o.id = id;
         o.style.cssText = 'display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); align-items:center; justify-content:center; z-index:59;';
         o.onclick = function (e) { if (e.target === o) o.style.display = 'none'; };
-        o.innerHTML = '<div style="background:#1e293b; padding:20px; border-radius:12px; max-width:780px; width:96%; max-height:92vh; overflow:auto; color:#e2e8f0;">' +
-          '<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;"><h2 style="font-size:17px; color:#fff;">' + titulo + '</h2>' +
+        o.innerHTML = '<div style="background:var(--tt-1e293b,#1e293b); padding:20px; border-radius:12px; max-width:780px; width:96%; max-height:92vh; overflow:auto; color:var(--tt-e2e8f0,#e2e8f0);">' +
+          '<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;"><h2 style="font-size:17px; color:var(--tt-ffffff,#fff);">' + titulo + '</h2>' +
           '<button class="btn-toggle" onclick="document.getElementById(\'' + id + '\').style.display=\'none\'">Cerrar</button></div><div id="' + id + '_c"></div></div>';
         document.body.appendChild(o);
       }
@@ -8788,18 +8943,18 @@ $htmlPC = @'
       if (d.length === 8 && d.charAt(0) === '5') d = '53' + d;
       return d;
     }
-    const PC_BTN = 'background:#0369a1; color:#fff; border:none; border-radius:6px; padding:5px 10px; font-size:12px; font-weight:600; cursor:pointer; margin:2px 2px 0 0;';
-    const PC_CAJA = 'background:#0f172a; border:1px solid #334155; border-radius:8px; padding:9px 10px; margin-bottom:7px; font-size:13px; line-height:1.45;';
-    const PC_AREA = 'width:100%; background:#0f172a; color:#e2e8f0; border:1px solid #334155; border-radius:8px; padding:8px; font-size:13px; margin-bottom:8px;';
+    const PC_BTN = 'background:var(--tt-0369a1,#0369a1); color:var(--tt-ffffff,#fff); border:none; border-radius:6px; padding:5px 10px; font-size:12px; font-weight:600; cursor:pointer; margin:2px 2px 0 0;';
+    const PC_CAJA = 'background:var(--tt-0f172a,#0f172a); border:1px solid var(--tt-334155,#334155); border-radius:8px; padding:9px 10px; margin-bottom:7px; font-size:13px; line-height:1.45;';
+    const PC_AREA = 'width:100%; background:var(--tt-0f172a,#0f172a); color:var(--tt-e2e8f0,#e2e8f0); border:1px solid var(--tt-334155,#334155); border-radius:8px; padding:8px; font-size:13px; margin-bottom:8px;';
 
     // ---- Series y garantia (se llena desde el movil al armar el pedido) ----
     let serTimer = null;
     function abrirSeries() {
       const c = pcModal('serOverlay', 'Series y garantia');
       c.innerHTML = '<div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:8px;">' +
-        '<input id="serQ" type="text" placeholder="Serie, producto, cliente, vendedor o folio" oninput="clearTimeout(serTimer); serTimer=setTimeout(serBuscar,250)" style="flex:1; min-width:200px; background:#0f172a; color:#e2e8f0; border:1px solid #334155; border-radius:8px; padding:9px; font-size:14px;">' +
-        '<label style="font-size:12px; color:#94a3b8;">Garantia (dias) <input id="serDias" type="number" min="1" max="3650" style="width:64px; background:#0f172a; color:#e2e8f0; border:1px solid #334155; border-radius:6px; padding:5px;" onchange="serGuardarDias(this.value)"></label></div>' +
-        '<div id="serRes" style="font-size:13px; color:#94a3b8;">Cargando...</div>';
+        '<input id="serQ" type="text" placeholder="Serie, producto, cliente, vendedor o folio" oninput="clearTimeout(serTimer); serTimer=setTimeout(serBuscar,250)" style="flex:1; min-width:200px; background:var(--tt-0f172a,#0f172a); color:var(--tt-e2e8f0,#e2e8f0); border:1px solid var(--tt-334155,#334155); border-radius:8px; padding:9px; font-size:14px;">' +
+        '<label style="font-size:12px; color:var(--tt-94a3b8,#94a3b8);">Garantia (dias) <input id="serDias" type="number" min="1" max="3650" style="width:64px; background:var(--tt-0f172a,#0f172a); color:var(--tt-e2e8f0,#e2e8f0); border:1px solid var(--tt-334155,#334155); border-radius:6px; padding:5px;" onchange="serGuardarDias(this.value)"></label></div>' +
+        '<div id="serRes" style="font-size:13px; color:var(--tt-94a3b8,#94a3b8);">Cargando...</div>';
       serBuscar();
       setTimeout(function () { const q = document.getElementById('serQ'); if (q) q.focus(); }, 50);
     }
@@ -8819,12 +8974,12 @@ $htmlPC = @'
       if (!lista.length) { cont.innerHTML = q ? 'Sin resultados.' : 'Aun no hay series registradas. Se anotan en el movil, en cada producto del pedido (opcional).'; return; }
       cont.innerHTML = lista.map(function (x) {
         let est, col;
-        if (x.estado !== 'cobrado') { est = 'Pedido sin cobrar'; col = '#94a3b8'; }
-        else if (x.diasRestantes >= 0) { est = 'En garantia hasta ' + x.vence + ' (' + (x.diasRestantes === 0 ? 'vence hoy' : 'quedan ' + x.diasRestantes + ' d') + ')'; col = '#86efac'; }
-        else { est = 'Garantia vencida el ' + x.vence + ' (hace ' + (-x.diasRestantes) + ' d)'; col = '#f87171'; }
+        if (x.estado !== 'cobrado') { est = 'Pedido sin cobrar'; col = 'var(--tt-94a3b8,#94a3b8)'; }
+        else if (x.diasRestantes >= 0) { est = 'En garantia hasta ' + x.vence + ' (' + (x.diasRestantes === 0 ? 'vence hoy' : 'quedan ' + x.diasRestantes + ' d') + ')'; col = 'var(--tt-86efac,#86efac)'; }
+        else { est = 'Garantia vencida el ' + x.vence + ' (hace ' + (-x.diasRestantes) + ' d)'; col = 'var(--tt-f87171,#f87171)'; }
         const txt = 'Serie ' + x.serie + ' - ' + x.producto + ' - Pedido #' + x.pedidoId + ' (' + x.fecha + ')' + (x.cliente ? ' - ' + x.cliente : '');
-        return '<div style="' + PC_CAJA + '"><b style="color:#fff; font-size:14px;">' + escaparHtml(x.serie) + '</b> &middot; ' + escaparHtml(x.producto) +
-          '<br><span style="color:#94a3b8;">Pedido #' + x.pedidoId + ' &middot; ' + escaparHtml(x.fecha) + (x.cliente ? ' &middot; ' + escaparHtml(x.cliente) : '') + ' &middot; ' + escaparHtml(x.vendedor) + '</span>' +
+        return '<div style="' + PC_CAJA + '"><b style="color:var(--tt-ffffff,#fff); font-size:14px;">' + escaparHtml(x.serie) + '</b> &middot; ' + escaparHtml(x.producto) +
+          '<br><span style="color:var(--tt-94a3b8,#94a3b8);">Pedido #' + x.pedidoId + ' &middot; ' + escaparHtml(x.fecha) + (x.cliente ? ' &middot; ' + escaparHtml(x.cliente) : '') + ' &middot; ' + escaparHtml(x.vendedor) + '</span>' +
           '<br><span style="color:' + col + ';">' + est + '</span> <button style="' + PC_BTN + '" onclick="pcCopiar(' + escaparHtml(JSON.stringify(txt)).replace(/"/g, '&quot;') + ')">Copiar</button></div>';
       }).join('');
     }
@@ -8845,9 +9000,9 @@ $htmlPC = @'
       const r = await pcApi(q);
       const lista = (r.d && r.d.registros) || [];
       pcById('audLista').innerHTML = lista.length ? lista.map(x =>
-        '<div style="padding:7px 9px; margin-bottom:5px; border-radius:8px; font-size:12px; line-height:1.4; background:' + (x.alerta ? '#450a0a' : '#0f172a') + '; border:1px solid ' + (x.alerta ? '#991b1b' : '#334155') + ';">' +
-        '<b style="color:#fff;">' + escaparHtml(x.hora) + '</b> · ' + escaparHtml(x.usuario) + ' <span style="color:#94a3b8;">(' + escaparHtml(x.origen) + ')</span> · ' +
-        '<span style="color:' + (x.alerta ? '#fca5a5' : '#7dd3fc') + ';">' + escaparHtml(String(x.accion).replace(/_/g, ' ')) + '</span><br>' + escaparHtml(x.detalle) + '</div>'
+        '<div style="padding:7px 9px; margin-bottom:5px; border-radius:8px; font-size:12px; line-height:1.4; background:' + (x.alerta ? 'var(--tt-450a0a,#450a0a)' : 'var(--tt-0f172a,#0f172a)') + '; border:1px solid ' + (x.alerta ? 'var(--tt-991b1b,#991b1b)' : 'var(--tt-334155,#334155)') + ';">' +
+        '<b style="color:var(--tt-ffffff,#fff);">' + escaparHtml(x.hora) + '</b> · ' + escaparHtml(x.usuario) + ' <span style="color:var(--tt-94a3b8,#94a3b8);">(' + escaparHtml(x.origen) + ')</span> · ' +
+        '<span style="color:' + (x.alerta ? 'var(--tt-fca5a5,#fca5a5)' : 'var(--tt-7dd3fc,#7dd3fc)') + ';">' + escaparHtml(String(x.accion).replace(/_/g, ' ')) + '</span><br>' + escaparHtml(x.detalle) + '</div>'
       ).join('') : '<div class="np-vacio">No hay registros con ese filtro.</div>';
     }
 
@@ -8857,7 +9012,7 @@ $htmlPC = @'
       const r = await pcApi('/api/costos');
       const d = r.d || {};
       const man = d.manual || {};
-      c.innerHTML = '<p style="font-size:12px; color:#94a3b8; margin-bottom:10px;">El costo se usa para avisar (y bloquear, si el vendedor no tiene permiso) cuando se vende por debajo de lo que cuesta reponer el producto, y para calcular el capital parado. Los vendedores nunca ven el costo.</p>' +
+      c.innerHTML = '<p style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin-bottom:10px;">El costo se usa para avisar (y bloquear, si el vendedor no tiene permiso) cuando se vende por debajo de lo que cuesta reponer el producto, y para calcular el capital parado. Los vendedores nunca ven el costo.</p>' +
         '<div style="' + PC_CAJA + '">Costos leídos de AxisPOS: <b>' + (d.nAxis || 0) + '</b>' + (d.ultimaAxis ? ' (última carga: ' + escaparHtml(d.ultimaAxis) + ')' : '') + '</div>' +
         '<label style="font-size:13px; display:block; margin-bottom:4px;">Columna de costo en la tabla de productos de AxisPOS (opcional, ej. PriceIn):</label>' +
         '<input id="cosCol" class="np-input" value="' + escaparHtml(d.columnaAxis || '') + '" placeholder="PriceIn">' +
@@ -8875,15 +9030,15 @@ $htmlPC = @'
         if (!isNaN(v) && v > 0) manual[l.slice(0, i).trim()] = v;
       });
       let r = await pcApi('/api/costos', { manual: manual, columnaAxis: pcById('cosCol').value.trim() });
-      if (!r.ok) { msg.style.color = '#fca5a5'; msg.textContent = (r.d && r.d.error) || 'No se pudo guardar.'; return; }
+      if (!r.ok) { msg.style.color = 'var(--tt-fca5a5,#fca5a5)'; msg.textContent = (r.d && r.d.error) || 'No se pudo guardar.'; return; }
       if (cargarAxis) {
-        msg.style.color = '#cbd5e1'; msg.textContent = 'Leyendo AxisPOS...';
+        msg.style.color = 'var(--tt-cbd5e1,#cbd5e1)'; msg.textContent = 'Leyendo AxisPOS...';
         r = await pcApi('/api/costos/axis', {});
-        if (!r.ok) { msg.style.color = '#fca5a5'; msg.textContent = (r.d && r.d.error) || 'No se pudo leer AxisPOS.'; return; }
-        msg.style.color = '#86efac'; msg.textContent = 'Listo: ' + r.d.n + ' costos leídos de AxisPOS.';
+        if (!r.ok) { msg.style.color = 'var(--tt-fca5a5,#fca5a5)'; msg.textContent = (r.d && r.d.error) || 'No se pudo leer AxisPOS.'; return; }
+        msg.style.color = 'var(--tt-86efac,#86efac)'; msg.textContent = 'Listo: ' + r.d.n + ' costos leídos de AxisPOS.';
         return;
       }
-      msg.style.color = '#86efac'; msg.textContent = 'Guardado.';
+      msg.style.color = 'var(--tt-86efac,#86efac)'; msg.textContent = 'Guardado.';
     }
 
     // ---- Compras a proveedores ----
@@ -8895,9 +9050,9 @@ $htmlPC = @'
         'Ventas de los últimos <select id="cpDias" class="np-select" style="width:auto; margin:0;"><option value="15">15</option><option value="30" selected>30</option><option value="60">60</option><option value="90">90</option></select> días · ' +
         'alcanzar para <select id="cpCob" class="np-select" style="width:auto; margin:0;"><option value="7">7</option><option value="15" selected>15</option><option value="30">30</option><option value="45">45</option></select> días ' +
         '<button style="' + PC_BTN + '" onclick="calcularCompras()">Calcular</button></div>' +
-        '<div id="cpInfo" style="font-size:12px; color:#94a3b8; margin-bottom:8px;"></div><div id="cpLista"></div>' +
-        '<details style="margin-top:12px;"><summary style="cursor:pointer; font-size:13px; color:#7dd3fc;">Mis proveedores</summary>' +
-        '<p style="font-size:12px; color:#94a3b8; margin:6px 0;">Una línea por proveedor: nombre, teléfono (para WhatsApp).</p>' +
+        '<div id="cpInfo" style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin-bottom:8px;"></div><div id="cpLista"></div>' +
+        '<details style="margin-top:12px;"><summary style="cursor:pointer; font-size:13px; color:var(--tt-7dd3fc,#7dd3fc);">Mis proveedores</summary>' +
+        '<p style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin:6px 0;">Una línea por proveedor: nombre, teléfono (para WhatsApp).</p>' +
         '<textarea id="cpProv" rows="4" style="' + PC_AREA + '" placeholder="Ferrimport, 52345678"></textarea>' +
         '<button style="' + PC_BTN + '" onclick="guardarProveedores()">Guardar proveedores</button></details>';
       await calcularCompras();
@@ -8925,15 +9080,15 @@ $htmlPC = @'
         const filas = grupos[g].map(i => {
           const it = items[i];
           total += (Number(it.costo) || 0) * (Number(comprasQty[i]) || 0);
-          return '<div style="' + PC_CAJA + '"><b style="color:#fff;">' + escaparHtml(it.nombre) + '</b><br>' +
-            '<span style="color:#94a3b8;">Hay ' + it.stock + ' · mín ' + it.minimo + (it.origenMin === 'axis' ? ' (AxisPOS)' : '') + ' · vende ' + it.velDia + '/día' + (it.diasRestantes != null ? ' · alcanza ' + it.diasRestantes + ' días' : '') + '</span><br>' +
-            'Pedir: <input type="number" min="0" value="' + comprasQty[i] + '" style="width:70px; background:#1e293b; color:#fff; border:1px solid #475569; border-radius:6px; padding:3px;" onchange="comprasQty[' + i + ']=parseFloat(this.value)||0; renderComprasProv();"> ' +
+          return '<div style="' + PC_CAJA + '"><b style="color:var(--tt-ffffff,#fff);">' + escaparHtml(it.nombre) + '</b><br>' +
+            '<span style="color:var(--tt-94a3b8,#94a3b8);">Hay ' + it.stock + ' · mín ' + it.minimo + (it.origenMin === 'axis' ? ' (AxisPOS)' : '') + ' · vende ' + it.velDia + '/día' + (it.diasRestantes != null ? ' · alcanza ' + it.diasRestantes + ' días' : '') + '</span><br>' +
+            'Pedir: <input type="number" min="0" value="' + comprasQty[i] + '" style="width:70px; background:var(--tt-1e293b,#1e293b); color:var(--tt-ffffff,#fff); border:1px solid var(--tt-475569,#475569); border-radius:6px; padding:3px;" onchange="comprasQty[' + i + ']=parseFloat(this.value)||0; renderComprasProv();"> ' +
             (it.costo != null ? ' · costo ' + pcMoney(it.costo) : '') +
-            ' &nbsp; Proveedor: <select style="background:#1e293b; color:#fff; border:1px solid #475569; border-radius:6px; padding:3px;" onchange="asignarProveedor(' + i + ', this.value)"><option value="">(sin proveedor)</option>' +
+            ' &nbsp; Proveedor: <select style="background:var(--tt-1e293b,#1e293b); color:var(--tt-ffffff,#fff); border:1px solid var(--tt-475569,#475569); border-radius:6px; padding:3px;" onchange="asignarProveedor(' + i + ', this.value)"><option value="">(sin proveedor)</option>' +
             nombresProv.map(n => '<option value="' + escaparHtml(n) + '"' + (n === it.proveedor ? ' selected' : '') + '>' + escaparHtml(n) + '</option>').join('') + '</select></div>';
         }).join('');
         const nombreG = g || 'Sin proveedor asignado';
-        return '<div style="margin-bottom:14px;"><div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;"><b style="color:#fff; font-size:14px;">' + escaparHtml(nombreG) + ' (' + grupos[g].length + ')' + (total > 0 ? ' · aprox. ' + pcMoney(total) : '') + '</b>' +
+        return '<div style="margin-bottom:14px;"><div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;"><b style="color:var(--tt-ffffff,#fff); font-size:14px;">' + escaparHtml(nombreG) + ' (' + grupos[g].length + ')' + (total > 0 ? ' · aprox. ' + pcMoney(total) : '') + '</b>' +
           '<span><button style="' + PC_BTN + '" onclick="copiarPedidoProv(\'' + escaparHtml(g).replace(/'/g, '') + '\')">Copiar</button><button style="' + PC_BTN + '" onclick="waPedidoProv(\'' + escaparHtml(g).replace(/'/g, '') + '\')">WhatsApp</button></span></div>' + filas + '</div>';
       }).join('');
     }
@@ -8964,8 +9119,8 @@ $htmlPC = @'
       const c = pcModal('modMinAx', 'Stock mínimo de AxisPOS');
       const r = await pcApi('/api/minimos/axis');
       const d = r.d || {};
-      c.innerHTML = '<p style="font-size:12px; color:#94a3b8; margin-bottom:10px;">Toma el stock mínimo que ya tienes configurado en AxisPOS para cada producto. Prioridad: 1) el mínimo que fijes aquí en la app (Lista de compras), 2) el de AxisPOS, 3) el mínimo general. Si un producto tiene 0 en AxisPOS, se usa el general.</p>' +
-        (d.axisActivo === false ? '<div style="' + PC_CAJA + 'color:#fca5a5;">AxisPOS no está activado en la configuración del servidor.</div>' : '') +
+      c.innerHTML = '<p style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin-bottom:10px;">Toma el stock mínimo que ya tienes configurado en AxisPOS para cada producto. Prioridad: 1) el mínimo que fijes aquí en la app (Lista de compras), 2) el de AxisPOS, 3) el mínimo general. Si un producto tiene 0 en AxisPOS, se usa el general.</p>' +
+        (d.axisActivo === false ? '<div style="' + PC_CAJA + 'color:var(--tt-fca5a5,#fca5a5);">AxisPOS no está activado en la configuración del servidor.</div>' : '') +
         '<label style="font-size:13px; display:flex; align-items:center; gap:8px; margin-bottom:10px;"><input type="checkbox" id="maUsar"' + (d.usar !== false ? ' checked' : '') + '> Usar los mínimos de AxisPOS</label>' +
         '<label style="font-size:13px; display:block; margin-bottom:4px;">Columna del mínimo en AxisPOS (déjala vacía para que se detecte sola):</label>' +
         '<input id="maCol" class="np-input" value="' + escaparHtml(d.columna || '') + '" placeholder="se detecta sola">' +
@@ -8973,27 +9128,27 @@ $htmlPC = @'
         '<input id="maMax" class="np-input" value="' + escaparHtml(d.maxRef || '') + '" placeholder="se detecta sola">' +
         '<button style="' + PC_BTN + '" onclick="probarMaxAxis()">Detectar y probar nominal / máximo</button><div id="maMaxMsg" style="font-size:12px; margin:6px 0 8px;"></div>' +
         '<div style="' + PC_CAJA + '">Productos con mínimo en AxisPOS: <b>' + (d.n || 0) + '</b>' + (d.ultima ? '<br>Última lectura: ' + escaparHtml(d.ultima) : '') +
-        (d.error ? '<br><span style="color:#fca5a5;">' + escaparHtml(d.error) + '</span>' : '') + '</div>' +
+        (d.error ? '<br><span style="color:var(--tt-fca5a5,#fca5a5);">' + escaparHtml(d.error) + '</span>' : '') + '</div>' +
         '<button style="' + PC_BTN + '" onclick="guardarMinAxis(false)">Guardar</button> <button style="' + PC_BTN + '" onclick="guardarMinAxis(true)">Guardar y leer de AxisPOS ahora</button><div id="maMsg" style="font-size:12px; margin-top:8px;"></div>';
     }
     async function guardarMinAxis(cargar) {
       const msg = pcById('maMsg');
-      msg.style.color = '#cbd5e1'; msg.textContent = cargar ? 'Leyendo AxisPOS...' : 'Guardando...';
+      msg.style.color = 'var(--tt-cbd5e1,#cbd5e1)'; msg.textContent = cargar ? 'Leyendo AxisPOS...' : 'Guardando...';
       const r = await pcApi('/api/minimos/axis', { usar: pcById('maUsar').checked, columna: pcById('maCol').value.trim(), maxRef: pcById('maMax').value.trim(), cargar: !!cargar });
-      if (!r.ok) { msg.style.color = '#fca5a5'; msg.textContent = (r.d && r.d.error) || 'No se pudo.'; return; }
-      msg.style.color = '#86efac';
+      if (!r.ok) { msg.style.color = 'var(--tt-fca5a5,#fca5a5)'; msg.textContent = (r.d && r.d.error) || 'No se pudo.'; return; }
+      msg.style.color = 'var(--tt-86efac,#86efac)';
       msg.textContent = cargar ? ('Listo: ' + r.d.n + ' productos con mínimo en AxisPOS (columna ' + r.d.columna + ').') : 'Guardado.';
       if (cargar) pcById('maCol').value = r.d.columna || pcById('maCol').value;
     }
 
     async function probarMaxAxis() {
       const msg = pcById('maMaxMsg');
-      msg.style.color = '#cbd5e1'; msg.textContent = 'Buscando en AxisPOS...';
+      msg.style.color = 'var(--tt-cbd5e1,#cbd5e1)'; msg.textContent = 'Buscando en AxisPOS...';
       const g = await pcApi('/api/minimos/axis', { usar: pcById('maUsar').checked, columna: pcById('maCol').value.trim(), maxRef: pcById('maMax').value.trim() });
-      if (!g.ok) { msg.style.color = '#fca5a5'; msg.textContent = (g.d && g.d.error) || 'No se pudo guardar.'; return; }
+      if (!g.ok) { msg.style.color = 'var(--tt-fca5a5,#fca5a5)'; msg.textContent = (g.d && g.d.error) || 'No se pudo guardar.'; return; }
       const r = await pcApi('/api/minimos/axis', { probarMax: true });
-      if (!r.ok) { msg.style.color = '#fca5a5'; msg.textContent = (r.d && r.d.error) || 'No se pudo leer.'; return; }
-      msg.style.color = '#86efac';
+      if (!r.ok) { msg.style.color = 'var(--tt-fca5a5,#fca5a5)'; msg.textContent = (r.d && r.d.error) || 'No se pudo leer.'; return; }
+      msg.style.color = 'var(--tt-86efac,#86efac)';
       msg.textContent = 'Columna ' + r.d.maxRef + ': ' + r.d.n + ' productos con cantidad nominal / máxima.';
       pcById('maMax').value = r.d.maxRef || pcById('maMax').value;
     }
@@ -9013,13 +9168,13 @@ $htmlPC = @'
       if (!r.ok) { pcById('esRes').innerHTML = '<div class="np-vacio">' + escaparHtml((r.d && r.d.error) || 'No se pudo calcular.') + '</div>'; return; }
       estaticoDatos = r.d;
       const d = r.d;
-      pcById('esRes').innerHTML = '<div style="' + PC_CAJA + '">' + d.total + ' productos sin movimiento · capital parado: <b style="color:#fbbf24;">' + pcMoney(d.capitalTotal) + '</b>' +
-        (d.sinCosto ? '<br><span style="color:#94a3b8;">En ' + d.sinCosto + ' no hay costo cargado: se usó el precio de venta para estimar el capital.</span>' : '') +
-        (d.fuente !== 'axispos' ? '<br><span style="color:#fca5a5;">Ventas tomadas solo de la app: lo vendido directo en AxisPOS no se cuenta, revisa antes de rebajar.</span>' : '') + '</div>' +
+      pcById('esRes').innerHTML = '<div style="' + PC_CAJA + '">' + d.total + ' productos sin movimiento · capital parado: <b style="color:var(--tt-fbbf24,#fbbf24);">' + pcMoney(d.capitalTotal) + '</b>' +
+        (d.sinCosto ? '<br><span style="color:var(--tt-94a3b8,#94a3b8);">En ' + d.sinCosto + ' no hay costo cargado: se usó el precio de venta para estimar el capital.</span>' : '') +
+        (d.fuente !== 'axispos' ? '<br><span style="color:var(--tt-fca5a5,#fca5a5);">Ventas tomadas solo de la app: lo vendido directo en AxisPOS no se cuenta, revisa antes de rebajar.</span>' : '') + '</div>' +
         '<button style="' + PC_BTN + '" onclick="copiarEstatico()">Copiar lista de oferta</button>' +
-        (d.items || []).map(it => '<div style="' + PC_CAJA + '"><b style="color:#fff;">' + escaparHtml(it.nombre) + '</b><br>' +
+        (d.items || []).map(it => '<div style="' + PC_CAJA + '"><b style="color:var(--tt-ffffff,#fff);">' + escaparHtml(it.nombre) + '</b><br>' +
           'Hay ' + it.stock + ' · precio ' + pcMoney(it.precio) + (it.costo != null ? ' · costo ' + pcMoney(it.costo) : '') + ' · capital ' + pcMoney(it.capital) + '<br>' +
-          '<span style="color:#86efac;">Oferta sugerida: -' + it.descSugerido + '% → ' + pcMoney(it.precioOferta) + (it.descSugerido === 0 ? ' (sin margen para rebajar)' : '') + '</span></div>').join('');
+          '<span style="color:var(--tt-86efac,#86efac);">Oferta sugerida: -' + it.descSugerido + '% → ' + pcMoney(it.precioOferta) + (it.descSugerido === 0 ? ' (sin margen para rebajar)' : '') + '</span></div>').join('');
     }
     function copiarEstatico() {
       if (!estaticoDatos) return;
@@ -9032,10 +9187,10 @@ $htmlPC = @'
       const rv = (rolesData.vendedores || []).find(x => x.nombre === v.nombre) || { rol: 'personalizado', descuentoMaxPct: 100 };
       const opts = (rolesData.roles || []).map(r => '<option value="' + r.k + '"' + (r.k === rv.rol ? ' selected' : '') + '>' + escaparHtml(r.t) + ' (desc. máx. ' + r.desc + '%)</option>').join('') +
         '<option value="personalizado"' + (rv.rol === 'personalizado' ? ' selected' : '') + '>Personalizado</option>';
-      return '<div style="background:#0f172a; border:1px solid #334155; border-radius:8px; padding:10px; margin-bottom:10px; font-size:13px;"><b style="color:#fff;">Rol de ' + escaparHtml(v.nombre) + '</b><br>' +
+      return '<div style="background:var(--tt-0f172a,#0f172a); border:1px solid var(--tt-334155,#334155); border-radius:8px; padding:10px; margin-bottom:10px; font-size:13px;"><b style="color:var(--tt-ffffff,#fff);">Rol de ' + escaparHtml(v.nombre) + '</b><br>' +
         '<select id="permRol" class="np-select" onchange="rolAplicar(true)">' + opts + '</select>' +
         '<label>Descuento máximo (%): <input type="number" id="permDescMax" class="np-input" min="0" max="100" value="' + rv.descuentoMaxPct + '" onchange="rolAplicar(false)" style="width:90px; display:inline-block; margin:0;"></label>' +
-        '<div style="color:#94a3b8; font-size:12px; margin-top:4px;">Al elegir un rol se aplican sus permisos (luego puedes ajustarlos abajo). El descuento máximo limita cuánto puede bajar un precio.</div></div>';
+        '<div style="color:var(--tt-94a3b8,#94a3b8); font-size:12px; margin-top:4px;">Al elegir un rol se aplican sus permisos (luego puedes ajustarlos abajo). El descuento máximo limita cuánto puede bajar un precio.</div></div>';
     }
     async function rolAplicar(cambioRol) {
       const body = { vendedor: permActual, rol: pcById('permRol').value };
@@ -9043,7 +9198,7 @@ $htmlPC = @'
       if (!cambioRol && !isNaN(desc)) body.descuentoMaxPct = desc;
       const r = await pcApi('/api/roles', body);
       const m = pcById('permMsg');
-      m.style.color = r.ok ? '#86efac' : '#fca5a5';
+      m.style.color = r.ok ? 'var(--tt-86efac,#86efac)' : 'var(--tt-fca5a5,#fca5a5)';
       m.textContent = r.ok ? 'Rol guardado.' : ((r.d && r.d.error) || 'No se pudo guardar.');
       await cargarPermisos();
     }
@@ -9313,9 +9468,9 @@ $htmlPC = @'
         '.postit.alerta{animation:postitPulso .8s infinite alternate;}' +
         '@keyframes postitPulso{from{box-shadow:0 0 0 0 rgba(239,68,68,.95);}to{box-shadow:0 0 0 12px rgba(239,68,68,0);}}' +
         '#postitCapa{position:fixed;inset:0;pointer-events:none;z-index:45;}' +
-        '#postitBtn{position:fixed;right:18px;bottom:18px;width:54px;height:54px;border-radius:50%;border:none;background:#fde047;color:#111;font-size:26px;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,.5);z-index:46;min-height:0 !important;}' +
-        '#postitBadge{position:absolute;top:-4px;right:-4px;background:#dc2626;color:#fff;border-radius:999px;font-size:11px;font-weight:700;min-width:18px;height:18px;line-height:18px;text-align:center;}' +
-        '#postitPanel{position:fixed;right:18px;bottom:82px;width:310px;background:#1e293b;border:1px solid #475569;border-radius:12px;padding:10px;z-index:46;display:none;box-shadow:0 8px 24px rgba(0,0,0,.5);color:#e2e8f0;font-size:12px;}' +
+        '#postitBtn{position:fixed;right:18px;bottom:18px;width:54px;height:54px;border-radius:50%;border:none;background:var(--tt-fde047,#fde047);color:#111;font-size:26px;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,.5);z-index:46;min-height:0 !important;}' +
+        '#postitBadge{position:absolute;top:-4px;right:-4px;background:#dc2626;color:var(--tt-ffffff,#fff);border-radius:999px;font-size:11px;font-weight:700;min-width:18px;height:18px;line-height:18px;text-align:center;}' +
+        '#postitPanel{position:fixed;right:18px;bottom:82px;width:310px;background:var(--tt-1e293b,#1e293b);border:1px solid var(--tt-475569,#475569);border-radius:12px;padding:10px;z-index:46;display:none;box-shadow:0 8px 24px rgba(0,0,0,.5);color:var(--tt-e2e8f0,#e2e8f0);font-size:12px;}' +
         '#postitPanel input{width:100%;margin:0 0 6px;}' +
         '.postit-dot{display:inline-block;width:20px;height:20px;border-radius:50%;border:2px solid transparent;cursor:pointer;margin-right:4px;vertical-align:middle;}' +
         '.postit-dot.sel{border-color:#fff;}' +
@@ -9333,11 +9488,11 @@ $htmlPC = @'
       document.body.appendChild(btn);
       const panel = document.createElement('div'); panel.id = 'postitPanel';
       panel.innerHTML =
-        '<b style="color:#fff; font-size:13px;">Notas rápidas</b>' +
+        '<b style="color:var(--tt-ffffff,#fff); font-size:13px;">Notas rápidas</b>' +
         '<div style="margin:6px 0;"><input id="postitTexto" class="np-input" maxlength="300" placeholder="Recado… (ej: llamar al proveedor a las 4 PM)"></div>' +
         '<div id="postitColores" style="margin-bottom:6px;"></div>' +
-        '<div style="color:#94a3b8; margin-bottom:6px;">Enter agrega. Si escribes "a las 4 PM" se pone la hora y te avisa.</div>' +
-        '<div style="display:flex; gap:6px; flex-wrap:wrap;"><button type="button" id="postitVer" style="' + PC_BTN + '"></button><button type="button" id="postitLimpiar" style="' + PC_BTN + 'background:#475569;">Quitar las hechas</button><button type="button" id="postitCerrar" style="' + PC_BTN + 'background:#475569;">Cerrar</button></div>';
+        '<div style="color:var(--tt-94a3b8,#94a3b8); margin-bottom:6px;">Enter agrega. Si escribes "a las 4 PM" se pone la hora y te avisa.</div>' +
+        '<div style="display:flex; gap:6px; flex-wrap:wrap;"><button type="button" id="postitVer" style="' + PC_BTN + '"></button><button type="button" id="postitLimpiar" style="' + PC_BTN + 'background:var(--tt-475569,#475569);">Quitar las hechas</button><button type="button" id="postitCerrar" style="' + PC_BTN + 'background:var(--tt-475569,#475569);">Cerrar</button></div>';
       document.body.appendChild(panel);
       document.getElementById('postitColores').innerHTML = POSTIT_ORDEN.map(function (c) { return '<span class="postit-dot' + (c === postitsColorNuevo ? ' sel' : '') + '" data-color="' + c + '" style="background:' + POSTIT_COLORES[c] + ';"></span>'; }).join('');
       document.getElementById('postitColores').addEventListener('click', function (e) {
@@ -9518,7 +9673,7 @@ $htmlPC = @'
     }
     async function guardarSinonimos() {
       const msg = pcById('sinMsg');
-      msg.style.color = '#cbd5e1';
+      msg.style.color = 'var(--tt-cbd5e1,#cbd5e1)';
       const grupos = pcById('sinGrupos').value.split('\n').map(l => l.split(',').map(s => s.trim()).filter(Boolean)).filter(g => g.length > 1);
       const productos = {};
       pcById('sinProductos').value.split('\n').forEach(l => {
@@ -9531,11 +9686,11 @@ $htmlPC = @'
       try {
         const res = await fetch('/api/sinonimos', { method: 'POST', body: JSON.stringify({ grupos: grupos, productos: productos }) });
         const d = await res.json().catch(() => null);
-        if (!res.ok || !d || !d.ok) { msg.style.color = '#fca5a5'; msg.textContent = (d && d.error) || 'No se pudo guardar.'; return; }
-        msg.style.color = '#86efac';
+        if (!res.ok || !d || !d.ok) { msg.style.color = 'var(--tt-fca5a5,#fca5a5)'; msg.textContent = (d && d.error) || 'No se pudo guardar.'; return; }
+        msg.style.color = 'var(--tt-86efac,#86efac)';
         msg.textContent = 'Guardado. Los teléfonos lo reciben en pocos minutos.';
         cargarSinonimos();
-      } catch (e) { msg.style.color = '#fca5a5'; msg.textContent = 'No se pudo guardar (revisa la conexión).'; }
+      } catch (e) { msg.style.color = 'var(--tt-fca5a5,#fca5a5)'; msg.textContent = 'No se pudo guardar (revisa la conexión).'; }
     }
 
     // ---- Copias de seguridad ----
@@ -9559,8 +9714,8 @@ $htmlPC = @'
         const ult = c.ultimo ? ('Última copia: ' + c.ultimo + (c.ultimoOk ? ' (bien)' : ' (con problemas)')) : 'Todavía no se ha hecho ninguna copia.';
         pcById('respInfo').innerHTML = escaparHtml(ult) +
           (c.ultimoMensaje ? '<br>' + escaparHtml(c.ultimoMensaje) : '') +
-          (c.pendienteExtra ? '<br><span style="color:#fca5a5;">Falta copiar a la carpeta extra: se reintenta sola cada 10 minutos.</span>' : '') +
-          '<br><span style="color:#94a3b8;">Carpeta local: ' + escaparHtml(d.carpetaLocal || '') + '</span>';
+          (c.pendienteExtra ? '<br><span style="color:var(--tt-fca5a5,#fca5a5);">Falta copiar a la carpeta extra: se reintenta sola cada 10 minutos.</span>' : '') +
+          '<br><span style="color:var(--tt-94a3b8,#94a3b8);">Carpeta local: ' + escaparHtml(d.carpetaLocal || '') + '</span>';
         pcById('respLista').innerHTML = (d.lista || []).length
           ? 'Últimas copias:<br>' + d.lista.map(x => escaparHtml(x.fecha) + ' &nbsp; ' + escaparHtml(x.nombre) + ' (' + x.kb + ' KB)').join('<br>')
           : '';
@@ -9568,7 +9723,7 @@ $htmlPC = @'
     }
     async function guardarRespaldo() {
       const msg = pcById('respMsg');
-      msg.style.color = '#cbd5e1';
+      msg.style.color = 'var(--tt-cbd5e1,#cbd5e1)';
       msg.textContent = 'Guardando...';
       try {
         const res = await fetch('/api/respaldo/config', { method: 'POST', body: JSON.stringify({
@@ -9578,11 +9733,11 @@ $htmlPC = @'
           carpetaExtra: pcById('respExtra').value.trim()
         }) });
         const d = await res.json().catch(() => null);
-        if (!res.ok || !d || !d.ok) { msg.style.color = '#fca5a5'; msg.textContent = (d && d.error) || 'No se pudo guardar.'; return; }
-        msg.style.color = '#86efac';
+        if (!res.ok || !d || !d.ok) { msg.style.color = 'var(--tt-fca5a5,#fca5a5)'; msg.textContent = (d && d.error) || 'No se pudo guardar.'; return; }
+        msg.style.color = 'var(--tt-86efac,#86efac)';
         msg.textContent = 'Ajustes guardados.';
         cargarRespaldo(true);
-      } catch (e) { msg.style.color = '#fca5a5'; msg.textContent = 'No se pudo guardar (revisa la conexión).'; }
+      } catch (e) { msg.style.color = 'var(--tt-fca5a5,#fca5a5)'; msg.textContent = 'No se pudo guardar (revisa la conexión).'; }
     }
     async function respaldarAhora() {
       const msg = pcById('respMsg');
@@ -9590,14 +9745,14 @@ $htmlPC = @'
       b.disabled = true;
       const txt = b.textContent;
       b.textContent = 'Respaldando...';
-      msg.style.color = '#cbd5e1';
+      msg.style.color = 'var(--tt-cbd5e1,#cbd5e1)';
       msg.textContent = '';
       try {
         const res = await fetch('/api/respaldo/ahora', { method: 'POST' });
         const d = await res.json().catch(() => null);
-        if (!res.ok || !d) { msg.style.color = '#fca5a5'; msg.textContent = 'No se pudo hacer la copia.'; }
-        else { msg.style.color = d.ok && d.extraOk ? '#86efac' : '#fbbf24'; msg.textContent = d.mensaje || (d.ok ? 'Copia lista.' : 'No se pudo hacer la copia.'); }
-      } catch (e) { msg.style.color = '#fca5a5'; msg.textContent = 'No se pudo hacer la copia (revisa la conexión).'; }
+        if (!res.ok || !d) { msg.style.color = 'var(--tt-fca5a5,#fca5a5)'; msg.textContent = 'No se pudo hacer la copia.'; }
+        else { msg.style.color = d.ok && d.extraOk ? 'var(--tt-86efac,#86efac)' : 'var(--tt-fbbf24,#fbbf24)'; msg.textContent = d.mensaje || (d.ok ? 'Copia lista.' : 'No se pudo hacer la copia.'); }
+      } catch (e) { msg.style.color = 'var(--tt-fca5a5,#fca5a5)'; msg.textContent = 'No se pudo hacer la copia (revisa la conexión).'; }
       b.disabled = false;
       b.textContent = txt;
       cargarRespaldo(true);
@@ -9620,7 +9775,7 @@ $htmlPC = @'
         pcById('redAuto').checked = !!cfg.auto;
       } catch (e) { pcById('redInfo').textContent = 'No se pudo leer la red.'; }
     }
-    function redMensaje(t, ok) { const m = pcById('redMsg'); m.style.color = ok ? '#86efac' : '#fca5a5'; m.textContent = t; }
+    function redMensaje(t, ok) { const m = pcById('redMsg'); m.style.color = ok ? 'var(--tt-86efac,#86efac)' : 'var(--tt-fca5a5,#fca5a5)'; m.textContent = t; }
     async function fijarIpRed() {
       const octeto = parseInt(pcById('redOcteto').value, 10);
       if (!octeto) { redMensaje('Escribe el último número de la IP.', false); return; }
@@ -9684,8 +9839,8 @@ $htmlPC = @'
         const res = await fetch('/api/pines');
         const data = await res.json();
         const lista = (data && data.vendedoresConPin) || [];
-        cont.innerHTML = lista.length === 0 ? '<span style="color:#64748b;">Ninguno por ahora.</span>' :
-          lista.map(v => '<div style="display:flex; justify-content:space-between; padding:4px 0;"><span>' + v + '</span><button style="background:#334155; color:#fff; border:none; border-radius:6px; padding:4px 10px; font-size:12px;" onclick="quitarPin(\'' + v + '\')">Quitar</button></div>').join('');
+        cont.innerHTML = lista.length === 0 ? '<span style="color:var(--tt-64748b,#64748b);">Ninguno por ahora.</span>' :
+          lista.map(v => '<div style="display:flex; justify-content:space-between; padding:4px 0;"><span>' + v + '</span><button style="background:var(--tt-334155,#334155); color:var(--tt-ffffff,#fff); border:none; border-radius:6px; padding:4px 10px; font-size:12px;" onclick="quitarPin(\'' + v + '\')">Quitar</button></div>').join('');
       } catch (e) { cont.textContent = 'No se pudo cargar.'; }
     }
     async function guardarPin() {
@@ -9787,12 +9942,12 @@ $htmlPC = @'
       if (asigListaTimer) { clearInterval(asigListaTimer); asigListaTimer = null; }
     }
     function estadoAsigPC(a) {
-      if (a.cobradoAxis) return { texto: 'Ya cobrado en caja (venta #' + a.cobradoAxis + ')', editar: false, color: '#fbbf24' };
-      if (a.tomadoPor) return { texto: 'Lo tomo ' + a.tomadoPor, editar: false, color: '#86efac' };
-      if (a.agregado) return { texto: (a.agregadoPor || (a.todos ? 'Un vendedor' : a.vendedor) || 'El vendedor') + ' lo agrego a su pedido', editar: false, color: '#86efac' };
-      if (a.vencido) return { texto: 'Vencio sin que nadie lo tomara', editar: true, color: '#fca5a5' };
-      if (a.visto) return { texto: (a.vendedor || 'El vendedor') + ' ya lo vio', editar: true, color: '#7dd3fc' };
-      return { texto: a.todos ? 'Esperando: nadie lo ha tomado todavia' : ('Esperando a ' + a.vendedor), editar: true, color: '#cbd5e1' };
+      if (a.cobradoAxis) return { texto: 'Ya cobrado en caja (venta #' + a.cobradoAxis + ')', editar: false, color: 'var(--tt-fbbf24,#fbbf24)' };
+      if (a.tomadoPor) return { texto: 'Lo tomo ' + a.tomadoPor, editar: false, color: 'var(--tt-86efac,#86efac)' };
+      if (a.agregado) return { texto: (a.agregadoPor || (a.todos ? 'Un vendedor' : a.vendedor) || 'El vendedor') + ' lo agrego a su pedido', editar: false, color: 'var(--tt-86efac,#86efac)' };
+      if (a.vencido) return { texto: 'Vencio sin que nadie lo tomara', editar: true, color: 'var(--tt-fca5a5,#fca5a5)' };
+      if (a.visto) return { texto: (a.vendedor || 'El vendedor') + ' ya lo vio', editar: true, color: 'var(--tt-7dd3fc,#7dd3fc)' };
+      return { texto: a.todos ? 'Esperando: nadie lo ha tomado todavia' : ('Esperando a ' + a.vendedor), editar: true, color: 'var(--tt-cbd5e1,#cbd5e1)' };
     }
     async function cargarListaAsignados() {
       try {
@@ -9814,13 +9969,13 @@ $htmlPC = @'
         const lineas = (a.items || []).map(i =>
           '<div style="display:flex; justify-content:space-between; gap:8px; font-size:13px;"><span>' + (Number(i.cantidad) || 0) + ' x ' + escaparHtml(i.nombre) + '</span><span>$' + ((Number(i.precio) || 0) * (Number(i.cantidad) || 0)).toFixed(2) + '</span></div>'
         ).join('');
-        const btns = (est.editar ? '<button class="btn-nuevo-pedido" style="background:#0369a1; padding:6px 12px;" onclick="abrirEditarAsignado(' + a.id + ')">Editar</button> ' : '') +
-          (a.tomadoPor ? '' : '<button class="btn-nuevo-pedido" style="background:#b91c1c; padding:6px 12px;" onclick="retirarAsignadoLista(' + a.id + ')">Retirar</button>');
-        return '<div style="background:#0f172a; border:1px solid #334155; border-radius:10px; padding:10px; margin-bottom:10px;">' +
-          '<div style="display:flex; justify-content:space-between; font-size:13px; color:#fff; margin-bottom:4px;"><b>#' + a.id + ' &rarr; ' + escaparHtml(dest) + '</b><span style="color:#94a3b8;">' + escaparHtml(String(a.hora || '').slice(11, 16)) + (a.rev > 1 ? ' (editado)' : '') + '</span></div>' +
+        const btns = (est.editar ? '<button class="btn-nuevo-pedido" style="background:var(--tt-0369a1,#0369a1); padding:6px 12px;" onclick="abrirEditarAsignado(' + a.id + ')">Editar</button> ' : '') +
+          (a.tomadoPor ? '' : '<button class="btn-nuevo-pedido" style="background:var(--tt-b91c1c,#b91c1c); padding:6px 12px;" onclick="retirarAsignadoLista(' + a.id + ')">Retirar</button>');
+        return '<div style="background:var(--tt-0f172a,#0f172a); border:1px solid var(--tt-334155,#334155); border-radius:10px; padding:10px; margin-bottom:10px;">' +
+          '<div style="display:flex; justify-content:space-between; font-size:13px; color:var(--tt-ffffff,#fff); margin-bottom:4px;"><b>#' + a.id + ' &rarr; ' + escaparHtml(dest) + '</b><span style="color:var(--tt-94a3b8,#94a3b8);">' + escaparHtml(String(a.hora || '').slice(11, 16)) + (a.rev > 1 ? ' (editado)' : '') + '</span></div>' +
           '<div style="font-size:12px; color:' + est.color + '; margin-bottom:6px;">' + escaparHtml(est.texto) + '</div>' +
           lineas +
-          (a.nota ? '<div style="font-size:12px; color:#7dd3fc; margin-top:4px;">Nota: ' + escaparHtml(a.nota) + '</div>' : '') +
+          (a.nota ? '<div style="font-size:12px; color:var(--tt-7dd3fc,#7dd3fc); margin-top:4px;">Nota: ' + escaparHtml(a.nota) + '</div>' : '') +
           '<div style="display:flex; justify-content:space-between; align-items:center; margin-top:8px;"><b>Total: $' + total.toFixed(2) + '</b><span>' + btns + '</span></div>' +
         '</div>';
       }).join('');
@@ -9897,6 +10052,84 @@ $htmlPC = @'
         else if (actual === '__TODOS__' || todosNombres.includes(actual)) sel.value = actual;
         npDestinoPendiente = '';
       } catch (e) {}
+    }
+
+    // ---- Colores de la interfaz (Ajustes): cada cosa con su color, para el Panel de la PC y para la app del vendedor ----
+    let colPanel = 'pc';
+    let colBorrador = { pc: {}, vendedor: {} };
+    function colDefault(r) { return r.def || ('#' + r.base); }
+    function colActual(k) { const r = TT.roles[colPanel].find(function (x) { return x.k === k; }); return colBorrador[colPanel][k] || colDefault(r); }
+    function abrirColores() {
+      cerrarMenuPC();
+      colBorrador = JSON.parse(JSON.stringify({ pc: TT.cfg().pc || {}, vendedor: TT.cfg().vendedor || {} }));
+      colPanel = 'pc';
+      pcById('coloresMsg').textContent = '';
+      pintarColores();
+      pcById('coloresOverlay').style.display = 'flex';
+    }
+    function cerrarColores() {
+      pcById('coloresOverlay').style.display = 'none';
+      TT.aplicar('pc', TT.cfg().pc);   // lo que no se guardo vuelve a como estaba
+    }
+    function colElegirPanel(p) { colPanel = p; pintarColores(); }
+    function pintarColores() {
+      const roles = TT.roles[colPanel];
+      pcById('colTabPC').style.outline = colPanel === 'pc' ? '2px solid #38bdf8' : 'none';
+      pcById('colTabVend').style.outline = colPanel === 'vendedor' ? '2px solid #38bdf8' : 'none';
+      pcById('coloresLista').innerHTML = roles.map(function (r) {
+        const cambiado = !!colBorrador[colPanel][r.k];
+        return '<div class="col-fila"><span>' + escaparHtml(r.n) + (cambiado ? '' : (r.vars ? ' <small style="color:#94a3b8;">(automatico)</small>' : '')) + '</span>' +
+          '<span style="display:flex; align-items:center; gap:6px;"><input type="color" data-k="' + r.k + '" value="' + colActual(r.k) + '">' +
+          '<button class="btn-toggle" data-reset="' + r.k + '" title="Volver al color original" style="padding:2px 9px;">&#8634;</button></span></div>';
+      }).join('');
+      pintarPrevColores();
+    }
+    // Vista previa de la app del vendedor (la de la PC se ve en vivo)
+    function pintarPrevColores() {
+      const cont = pcById('coloresPrev');
+      if (colPanel !== 'vendedor') { cont.innerHTML = ''; return; }
+      const c = colActual;
+      cont.innerHTML = '<div style="margin-top:10px; border-radius:10px; overflow:hidden; border:1px solid ' + c('borde') + '; background:' + c('fondo') + ';">' +
+        '<div style="background:' + c('cabecera') + '; color:' + c('titulos') + '; padding:8px 10px; display:flex; justify-content:space-between; font-size:13px;"><b>Vista previa</b><span style="background:' + c('botonoscuro') + '; padding:2px 8px; border-radius:6px;">Ajustes</span></div>' +
+        '<div style="padding:10px;"><div style="background:' + c('tarjeta') + '; border:1px solid ' + c('borde') + '; border-radius:8px; padding:8px; color:' + c('texto') + '; font-size:13px;">Martillo 16oz <span style="color:' + c('secundario') + ';">$12.50</span>' +
+        '<div style="margin-top:6px;"><span style="background:' + c('inputbg') + '; border:1px solid ' + c('borde') + '; border-radius:6px; padding:3px 8px; display:inline-block; color:' + c('texto') + ';">Buscar...</span> <span style="background:' + c('botonsuave') + '; border-radius:10px; padding:3px 8px; font-size:12px; color:' + c('texto') + ';">etiqueta</span></div></div>' +
+        '<div style="display:flex; gap:6px; margin-top:8px; flex-wrap:wrap; font-size:12px; color:' + c('titulos') + ';">' +
+        '<span style="background:' + c('acento') + '; padding:5px 10px; border-radius:7px;">Enviar</span><span style="background:' + c('ok') + '; padding:5px 10px; border-radius:7px;">Cobrado</span>' +
+        '<span style="background:' + c('aviso') + '; padding:5px 10px; border-radius:7px;">Pendiente</span><span style="background:' + c('peligro') + '; padding:5px 10px; border-radius:7px;">Eliminar</span>' +
+        '<span style="background:' + c('gris') + '; padding:5px 10px; border-radius:7px;">Cancelar</span></div></div></div>';
+    }
+    (function () {
+      const lista = document.getElementById('coloresLista');
+      if (!lista) return;
+      lista.addEventListener('input', function (e) {
+        const k = e.target && e.target.getAttribute && e.target.getAttribute('data-k');
+        if (!k) return;
+        colBorrador[colPanel][k] = e.target.value;
+        if (colPanel === 'pc') TT.aplicar('pc', colBorrador.pc); else pintarPrevColores();
+      });
+      lista.addEventListener('click', function (e) {
+        const k = e.target && e.target.getAttribute && e.target.getAttribute('data-reset');
+        if (!k) return;
+        delete colBorrador[colPanel][k];
+        if (colPanel === 'pc') TT.aplicar('pc', colBorrador.pc);
+        pintarColores();
+      });
+    })();
+    function restablecerColores() {
+      colBorrador[colPanel] = {};
+      if (colPanel === 'pc') TT.aplicar('pc', {});
+      pintarColores();
+      const m = pcById('coloresMsg'); m.style.color = '#cbd5e1'; m.textContent = 'Colores originales puestos. Pulsa Guardar para dejarlos asi.';
+    }
+    async function guardarColores() {
+      const m = pcById('coloresMsg');
+      try {
+        const res = await fetch('/api/colores', { method: 'POST', body: JSON.stringify(colBorrador) });
+        const d = await res.json().catch(function () { return null; });
+        if (!res.ok || !d || !d.ok) { m.style.color = '#fca5a5'; m.textContent = (d && d.error) || 'No se pudo guardar.'; return; }
+        TT.fijar(colBorrador);
+        m.style.color = '#86efac'; m.textContent = 'Guardado. Los celulares toman los colores nuevos en menos de un minuto.';
+      } catch (e) { m.style.color = '#fca5a5'; m.textContent = 'No se pudo guardar (revisa la conexion).'; }
     }
 
     // ---- Borrador del pedido para vendedor: lo que armas queda guardado (aunque cierres con Esc, Cerrar o se cierre el Panel) ----
@@ -10183,12 +10416,12 @@ $htmlPC = @'
               const cp = catalogoNP.find(function (c) { return c.sku === i.sku; });
               const lista = cp ? cp.precio : i.precio;
               const pctD = (lista > 0 && i.precio < lista - 0.005) ? Math.round((1 - i.precio / lista) * 1000) / 10 : 0;
-              return '<div style="font-size:11px; color:#94a3b8;">$' + i.precio.toFixed(2) + (pctD ? ' <span style="color:#fbbf24;">(-' + pctD + '%)</span>' : '') + '</div>';
+              return '<div style="font-size:11px; color:var(--tt-94a3b8,#94a3b8);">$' + i.precio.toFixed(2) + (pctD ? ' <span style="color:var(--tt-fbbf24,#fbbf24);">(-' + pctD + '%)</span>' : '') + '</div>';
             })() + '</div>' +
             '<div style="display:flex; align-items:center; gap:8px;">' +
               '<button onclick="cambiarCantidadNP(\'' + i.sku + '\', -1)">-</button>' +
               '<input type="number" min="0" step="any" inputmode="decimal" value="' + i.cantidad + '" title="Escribe la cantidad" ' +
-                'style="width:62px; text-align:center; padding:4px 2px; border-radius:6px; border:1px solid #475569; background:#0f172a; color:#fff; font-size:14px;" ' +
+                'style="width:62px; text-align:center; padding:4px 2px; border-radius:6px; border:1px solid var(--tt-475569,#475569); background:var(--tt-0f172a,#0f172a); color:var(--tt-ffffff,#fff); font-size:14px;" ' +
                 'data-sku="' + escaparHtml(String(i.sku)) + '" onfocus="this.select()" onkeydown="cantidadNPEnter(event, this)" onchange="fijarCantidadNP(\'' + i.sku + '\', this.value)">' +
               '<button onclick="cambiarCantidadNP(\'' + i.sku + '\', 1)">+</button>' +
             '</div>' +
@@ -10323,9 +10556,9 @@ $htmlVendedor = @'
   }
   * { box-sizing:border-box; margin:0; padding:0; font-family: 'Segoe UI', system-ui, Tahoma, Arial, sans-serif; }
   body { background:var(--bg); color:var(--texto); padding-bottom:90px; }
-  header { background:#1e293b; color:#fff; padding:12px; display:flex; justify-content:space-between; align-items:center; gap:10px; }
+  header { background:var(--tt-1e293b,#1e293b); color:var(--tt-ffffff,#fff); padding:12px; display:flex; justify-content:space-between; align-items:center; gap:10px; }
   #headerVendedor { font-size:12px; color:#94a3b8; margin-top:3px; display:flex; align-items:center; gap:6px; }
-  #btnReconectar { background:#334155; color:#fff; border:none; border-radius:50%; width:22px; height:22px; padding:0; line-height:22px; text-align:center; font-size:13px; font-weight:700; margin-left:2px; cursor:pointer; flex:0 0 auto; }
+  #btnReconectar { background:var(--tt-334155,#334155); color:var(--tt-ffffff,#fff); border:none; border-radius:50%; width:22px; height:22px; padding:0; line-height:22px; text-align:center; font-size:13px; font-weight:700; margin-left:2px; cursor:pointer; flex:0 0 auto; }
   header > div:first-child { min-width:0; flex:1 1 auto; }
   header > div:last-child { flex:0 0 auto; gap:6px !important; }
   #headerVendedor { min-width:0; flex-wrap:nowrap; }
@@ -10333,29 +10566,29 @@ $htmlVendedor = @'
   #btnReconectar:disabled { opacity:0.7; }
   body.modoCliente #btnReconectar, body.autoservicio #btnReconectar { display:none; }
   #puntoRed { width:9px; height:9px; border-radius:50%; background:#64748b; flex-shrink:0; }
-  #puntoRed.ok { background:#22c55e; }
-  #puntoRed.mal { background:#ef4444; }
+  #puntoRed.ok { background:var(--tt-22c55e,#22c55e); }
+  #puntoRed.mal { background:var(--tt-ef4444,#ef4444); }
 
   /* --- Diagnostico de conexion --- */
   #barrasRed { display:inline-flex; align-items:flex-end; gap:2px; height:12px; margin-left:8px; cursor:pointer; vertical-align:middle; }
   #barrasRed i { display:block; width:3px; background:#64748b; border-radius:1px; }
   #barrasRed i:nth-child(1) { height:4px; } #barrasRed i:nth-child(2) { height:6px; }
   #barrasRed i:nth-child(3) { height:9px; } #barrasRed i:nth-child(4) { height:12px; }
-  #barrasRed.n1 i:nth-child(-n+1) { background:#ef4444; }
-  #barrasRed.n2 i:nth-child(-n+2) { background:#f59e0b; }
+  #barrasRed.n1 i:nth-child(-n+1) { background:var(--tt-ef4444,#ef4444); }
+  #barrasRed.n2 i:nth-child(-n+2) { background:var(--tt-f59e0b,#f59e0b); }
   #barrasRed.n3 i:nth-child(-n+3) { background:#84cc16; }
-  #barrasRed.n4 i:nth-child(-n+4) { background:#22c55e; }
+  #barrasRed.n4 i:nth-child(-n+4) { background:var(--tt-22c55e,#22c55e); }
   #msRed { font-size:11px; opacity:.8; margin-left:6px; cursor:pointer; }
-  #bannerRed { display:none; position:sticky; top:0; z-index:44; padding:10px 14px; font-weight:700; font-size:13px; text-align:center; color:#fff; }
-  #bannerRed.mal { display:block; background:#b91c1c; }
-  #bannerRed.ok { display:block; background:#15803d; }
+  #bannerRed { display:none; position:sticky; top:0; z-index:44; padding:10px 14px; font-weight:700; font-size:13px; text-align:center; color:var(--tt-ffffff,#fff); }
+  #bannerRed.mal { display:block; background:var(--tt-b91c1c,#b91c1c); }
+  #bannerRed.ok { display:block; background:var(--tt-15803d,#15803d); }
   #diagOverlay { display:none; position:fixed; inset:0; background:rgba(15,23,42,0.6); z-index:47; }
-  #diagCaja { background:#f1f5f9; color:#0f172a; border-radius:0 0 16px 16px; max-height:92vh; overflow:auto; }
-  .diag-fila { display:flex; justify-content:space-between; gap:10px; padding:7px 0; border-bottom:1px solid #e2e8f0; font-size:14px; }
+  #diagCaja { background:var(--tt-f1f5f9,#f1f5f9); color:#0f172a; border-radius:0 0 16px 16px; max-height:92vh; overflow:auto; }
+  .diag-fila { display:flex; justify-content:space-between; gap:10px; padding:7px 0; border-bottom:1px solid var(--tt-e2e8f0,#e2e8f0); font-size:14px; }
   .diag-fila span:first-child { color:#64748b; }
   #diagSpark { display:flex; align-items:flex-end; gap:3px; height:44px; margin:10px 0; }
-  #diagSpark div { flex:1; border-radius:2px; background:#22c55e; min-height:4px; }
-  #diagSpark div.f { background:#ef4444; height:44px; }
+  #diagSpark div { flex:1; border-radius:2px; background:var(--tt-22c55e,#22c55e); min-height:4px; }
+  #diagSpark div.f { background:var(--tt-ef4444,#ef4444); height:44px; }
   /* --- Permisos por vendedor (los pone la PC) --- */
   body.sin-ajustes #btnMenu { display:none !important; }
   body.sin-misPedidos #seccionMisPedidos { display:none !important; }
@@ -10365,19 +10598,19 @@ $htmlVendedor = @'
   body.sin-modoCliente #secModoCliente { display:none !important; }
   body.sin-cobrar .mp-btn-cobrar, body.sin-cancelar .mp-btn-cancelar, body.sin-editar .mp-btn-editar, body.sin-imprimir .mp-btn-imprimir { display:none !important; }
   body.sin-cobrar label:has(input[name="estadoPago"][value="cobrado"]) { display:none !important; }
-  #btnMenu { position:relative; background:#334155; color:#fff; border:none; border-radius:10px; padding:9px 10px; font-size:13px; font-weight:600; cursor:pointer; white-space:nowrap; }
-  #btnMenu.alerta::after { content:''; position:absolute; top:5px; right:5px; width:10px; height:10px; border-radius:50%; background:#ef4444; }
-  #btnCampana { position:relative; background:#334155; color:#fff; border:none; border-radius:10px; padding:8px 9px; font-size:15px; cursor:pointer; }
-  #btnTema { position:relative; background:#334155; color:#fff; border:none; border-radius:10px; padding:8px 9px; font-size:15px; cursor:pointer; }
-  .badge-campana { position:absolute; top:-4px; right:-4px; background:#ef4444; color:#fff; border-radius:10px; min-width:18px; height:18px; font-size:11px; font-weight:700; display:flex; align-items:center; justify-content:center; padding:0 4px; }
+  #btnMenu { position:relative; background:var(--tt-334155,#334155); color:var(--tt-ffffff,#fff); border:none; border-radius:10px; padding:9px 10px; font-size:13px; font-weight:600; cursor:pointer; white-space:nowrap; }
+  #btnMenu.alerta::after { content:''; position:absolute; top:5px; right:5px; width:10px; height:10px; border-radius:50%; background:var(--tt-ef4444,#ef4444); }
+  #btnCampana { position:relative; background:var(--tt-334155,#334155); color:var(--tt-ffffff,#fff); border:none; border-radius:10px; padding:8px 9px; font-size:15px; cursor:pointer; }
+  #btnTema { position:relative; background:var(--tt-334155,#334155); color:var(--tt-ffffff,#fff); border:none; border-radius:10px; padding:8px 9px; font-size:15px; cursor:pointer; }
+  .badge-campana { position:absolute; top:-4px; right:-4px; background:var(--tt-ef4444,#ef4444); color:var(--tt-ffffff,#fff); border-radius:10px; min-width:18px; height:18px; font-size:11px; font-weight:700; display:flex; align-items:center; justify-content:center; padding:0 4px; }
   #panelCampana { position:fixed; top:66px; right:10px; left:10px; max-width:380px; margin-left:auto; background:var(--panel-campana-bg); color:var(--texto); border-radius:10px; box-shadow:0 8px 24px var(--sombra-fuerte); z-index:70; max-height:70vh; overflow:hidden; display:flex; flex-direction:column; }
   #listaCampana { overflow:auto; }
   .campana-item { padding:10px 14px; border-bottom:1px solid var(--borde-suave); font-size:13px; }
   .campana-item .campana-hora { font-size:11px; color:var(--gris-suave); margin-bottom:2px; }
   .campana-vacio { padding:16px; color:var(--gris-suave); font-size:13px; text-align:center; }
   .colapsable { width:100%; display:flex; justify-content:space-between; align-items:center; background:none; border:none; padding:0; font-size:13px; color:var(--secundario-texto); text-transform:uppercase; letter-spacing:0.6px; font-weight:700; cursor:pointer; text-align:left; }
-  .colapsable .resumen { text-transform:none; letter-spacing:0; font-weight:600; font-size:12px; color:#92400e; margin-left:6px; }
-  .mp-btn-items { background:none; border:none; color:#2563eb; font-size:12px; font-weight:700; padding:2px 0; margin:0 0 6px; cursor:pointer; }
+  .colapsable .resumen { text-transform:none; letter-spacing:0; font-weight:600; font-size:12px; color:var(--tt-92400e,#92400e); margin-left:6px; }
+  .mp-btn-items { background:none; border:none; color:var(--tt-2563eb,#2563eb); font-size:12px; font-weight:700; padding:2px 0; margin:0 0 6px; cursor:pointer; }
   .mp-items { margin:0 0 8px; padding:8px 10px; background:var(--bg); border-radius:8px; font-size:13px; }
   .mp-items > div { display:flex; justify-content:space-between; gap:10px; padding:2px 0; }
   header h1 { font-size:16px; font-weight:600; line-height:1.2; }
@@ -10386,8 +10619,8 @@ $htmlVendedor = @'
   input[type=text], input[type=number], select {
     width:100%; padding:11px; border:1px solid var(--borde); border-radius:8px; font-size:15px; margin-bottom:8px; background:var(--input-bg); color:var(--texto);
   }
-  .btn { background:#2563eb; color:#fff; border:none; padding:13px; border-radius:10px; font-weight:bold; font-size:15px; width:100%; cursor:pointer; }
-  .btn:active { background:#1d4ed8; }
+  .btn { background:var(--tt-2563eb,#2563eb); color:var(--tt-ffffff,#fff); border:none; padding:13px; border-radius:10px; font-weight:bold; font-size:15px; width:100%; cursor:pointer; }
+  .btn:active { background:var(--tt-1d4ed8,#1d4ed8); }
   .btn-secundario { background:#64748b; }
   #posFiltros { display:none; gap:8px; margin-top:12px; }
   #posFiltros select { flex:1; margin-bottom:0; }
@@ -10395,8 +10628,8 @@ $htmlVendedor = @'
   body.autoservicio #notaPedido, body.modoCliente #notaPedido, body.sin-mensajes #notaPedido { display:none !important; }
   body.autoservicio #clienteNombrePedido, body.modoCliente #clienteNombrePedido { display:none !important; }
   body.sin-verStock #btnDescargarStock { display:none !important; }
-  #estadoCatalogo { font-size:13px; color:#16a34a; margin-bottom:8px; font-weight:600; }
-  #estadoCatalogo.error { color:#991b1b; }
+  #estadoCatalogo { font-size:13px; color:var(--tt-16a34a,#16a34a); margin-bottom:8px; font-weight:600; }
+  #estadoCatalogo.error { color:var(--tt-991b1b,#991b1b); }
   .resultado { display:flex; justify-content:space-between; align-items:center; padding:11px 0; border-bottom:1px solid var(--borde-suave); }
   .resultado .miniatura { width:44px; height:44px; border-radius:6px; object-fit:cover; margin-right:10px; flex-shrink:0; cursor:zoom-in; background:var(--borde-suave); }
   .resultado .info { font-size:14px; flex:1; }
@@ -10419,41 +10652,41 @@ $htmlVendedor = @'
   #camposCobro { display:none; }
   #totalCobroTexto { font-weight:bold; margin-bottom:8px; font-size:15px; color:var(--texto); }
   #mensaje { display:none; padding:12px; border-radius:8px; margin:12px; text-align:center; font-weight:bold; }
-  .ok { background:#dcfce7; color:#166534; }
-  .error { background:#fee2e2; color:#991b1b; }
+  .ok { background:var(--tt-dcfce7,#dcfce7); color:var(--tt-166534,#166534); }
+  .error { background:var(--tt-fee2e2,#fee2e2); color:var(--tt-991b1b,#991b1b); }
   #cambioTexto { font-size:13px; margin-top:4px; }
-  #barraTotal { position:fixed; bottom:0; left:0; right:0; background:#1e293b; color:#fff; padding:14px 18px; display:flex; justify-content:space-between; align-items:center; font-weight:bold; font-size:16px; box-shadow:0 -3px 10px rgba(0,0,0,0.25); }
+  #barraTotal { position:fixed; bottom:0; left:0; right:0; background:var(--tt-1e293b,#1e293b); color:var(--tt-ffffff,#fff); padding:14px 18px; display:flex; justify-content:space-between; align-items:center; font-weight:bold; font-size:16px; box-shadow:0 -3px 10px rgba(0,0,0,0.25); }
   .mp-card { border:1px solid var(--mp-card-borde); border-radius:10px; padding:10px 12px; margin-bottom:10px; }
   .mp-card .mp-top { display:flex; justify-content:space-between; font-size:13px; color:var(--secundario-texto); margin-bottom:4px; }
   .mp-card .mp-estado { font-size:11px; font-weight:bold; padding:2px 8px; border-radius:10px; }
-  .mp-estado.pendiente { background:#fde047; color:#713f12; }
-  .mp-estado.cobrado { background:#86efac; color:#14532d; }
-  .mp-estado.cancelado { background:#e2e8f0; color:#475569; }
+  .mp-estado.pendiente { background:var(--tt-fde047,#fde047); color:var(--tt-713f12,#713f12); }
+  .mp-estado.cobrado { background:var(--tt-86efac,#86efac); color:var(--tt-14532d,#14532d); }
+  .mp-estado.cancelado { background:var(--tt-e2e8f0,#e2e8f0); color:var(--tt-475569,#475569); }
   .mp-card .mp-total { font-weight:bold; margin:4px 0 8px; }
   .mp-acciones { display:flex; gap:6px; flex-wrap:wrap; }
   .mp-acciones button, .mp-acciones select { flex:1; min-width:90px; padding:8px 6px; border-radius:7px; border:none; font-size:12px; font-weight:600; cursor:pointer; }
-  .mp-btn-cobrar { background:#16a34a; color:#fff; }
-  .mp-btn-imprimir { background:#475569; color:#fff; }
-  .cmd-hint { background:#0f172a; color:#fde68a; border:1px dashed #a16207; border-radius:8px; padding:10px 12px; font-size:14px; margin:6px 0; }
+  .mp-btn-cobrar { background:var(--tt-16a34a,#16a34a); color:var(--tt-ffffff,#fff); }
+  .mp-btn-imprimir { background:var(--tt-475569,#475569); color:var(--tt-ffffff,#fff); }
+  .cmd-hint { background:#0f172a; color:var(--tt-fde68a,#fde68a); border:1px dashed var(--tt-a16207,#a16207); border-radius:8px; padding:10px 12px; font-size:14px; margin:6px 0; }
   .cmd-hint span { color:#94a3b8; font-size:12px; }
-  .mp-ficha-axis { display:inline-block; background:#dcfce7; color:#166534; border:1px solid #86efac; border-radius:999px; padding:2px 10px; font-size:12px; font-weight:700; margin:2px 0 6px; }
-  .mp-btn-editar { background:#2563eb; color:#fff; }
-  .mp-btn-cancelar { background:#b91c1c; color:#fff; }
+  .mp-ficha-axis { display:inline-block; background:var(--tt-dcfce7,#dcfce7); color:var(--tt-166534,#166534); border:1px solid var(--tt-86efac,#86efac); border-radius:999px; padding:2px 10px; font-size:12px; font-weight:700; margin:2px 0 6px; }
+  .mp-btn-editar { background:var(--tt-2563eb,#2563eb); color:var(--tt-ffffff,#fff); }
+  .mp-btn-cancelar { background:var(--tt-b91c1c,#b91c1c); color:var(--tt-ffffff,#fff); }
   .mp-select { border:1px solid var(--borde); background:var(--input-bg); color:var(--texto); }
-  #bannerAsignado { display:none; background:#0369a1; color:#fff; padding:12px 16px; border-radius:8px; margin:12px; font-weight:bold; text-align:center; box-shadow:0 4px 12px rgba(3,105,161,0.35); cursor:pointer; }
+  #bannerAsignado { display:none; background:var(--tt-0369a1,#0369a1); color:var(--tt-ffffff,#fff); padding:12px 16px; border-radius:8px; margin:12px; font-weight:bold; text-align:center; box-shadow:0 4px 12px rgba(3,105,161,0.35); cursor:pointer; }
   #seccionAsignados { display:none; }
-  .asig-card { border:1px solid #7dd3fc; background:#f0f9ff; border-radius:10px; padding:10px 12px; margin-bottom:10px; }
-  .asig-card .mp-top { display:flex; justify-content:space-between; font-size:13px; color:#0369a1; margin-bottom:4px; font-weight:700; }
+  .asig-card { border:1px solid var(--tt-7dd3fc,#7dd3fc); background:var(--tt-f0f9ff,#f0f9ff); border-radius:10px; padding:10px 12px; margin-bottom:10px; }
+  .asig-card .mp-top { display:flex; justify-content:space-between; font-size:13px; color:var(--tt-0369a1,#0369a1); margin-bottom:4px; font-weight:700; }
   .asig-card .mp-total { font-weight:bold; margin:4px 0 8px; color:#0f172a; }
-  .mp-btn-visto { background:#0369a1; color:#fff; }
-  .mp-btn-visto[disabled] { background:#7dd3fc; color:#0c4a6e; cursor:default; }
-  .mp-btn-agregar-asig { background:#16a34a; color:#fff; }
+  .mp-btn-visto { background:var(--tt-0369a1,#0369a1); color:var(--tt-ffffff,#fff); }
+  .mp-btn-visto[disabled] { background:var(--tt-7dd3fc,#7dd3fc); color:var(--tt-0c4a6e,#0c4a6e); cursor:default; }
+  .mp-btn-agregar-asig { background:var(--tt-16a34a,#16a34a); color:var(--tt-ffffff,#fff); }
   body.modoCliente #btnMenu, body.modoCliente #barraTotal, body.modoCliente .section:not(#seccionBuscador) { display:none !important; }
   body.modoCliente #seccionBuscador { margin-top:0; }
   body.modoCliente .resultado button, body.modoCliente .resultado .sku { display:none !important; }
   body.modoCliente #recientes { display:none !important; }
   body.modoCliente header { justify-content:center; }
-  #btnSalirModoCliente { display:none; position:fixed; top:10px; right:10px; z-index:60; background:#1e293b; color:#fff; border:none; border-radius:20px; padding:10px 16px; font-size:13px; font-weight:700; }
+  #btnSalirModoCliente { display:none; position:fixed; top:10px; right:10px; z-index:60; background:var(--tt-1e293b,#1e293b); color:var(--tt-ffffff,#fff); border:none; border-radius:20px; padding:10px 16px; font-size:13px; font-weight:700; }
   body.modoCliente #btnSalirModoCliente { display:block; position:static; width:calc(100% - 24px); margin:10px 12px 0; text-align:center; border-radius:12px; }
   body.autoservicio #btnMenu, body.autoservicio #btnCampana, body.autoservicio #bannerAsignado,
   body.autoservicio #seccionAsignados, body.autoservicio #seccionMisPedidos,
@@ -10464,8 +10697,8 @@ $htmlVendedor = @'
   }
 
   /* ---- Pantalla de inicio de sesion del vendedor ---- */
-  #loginOverlay { --acento:#2563eb; position:fixed; inset:0; z-index:100; background:var(--bg); display:none; align-items:center; justify-content:center; padding:16px; overflow:auto; }
-  [data-tema="oscuro"] #loginOverlay { --acento:#3b82f6; }
+  #loginOverlay { --acento:var(--tt-2563eb,#2563eb); position:fixed; inset:0; z-index:100; background:var(--bg); display:none; align-items:center; justify-content:center; padding:16px; overflow:auto; }
+  [data-tema="oscuro"] #loginOverlay { --acento:var(--tt-3b82f6,#3b82f6); }
   #loginTarjeta { width:100%; max-width:400px; background:var(--tarjeta); border:1px solid var(--borde); border-radius:24px; padding:22px 20px; box-shadow:0 10px 30px var(--sombra-fuerte); margin:auto; }
   .login-marca { text-align:center; font-size:22px; font-weight:800; color:var(--acento); letter-spacing:0.3px; }
   .login-titulo { text-align:center; font-size:26px; font-weight:800; margin:2px 0 18px; color:var(--texto); }
@@ -10480,7 +10713,7 @@ $htmlVendedor = @'
   #loginSugerencias { display:none; margin:8px 0 0; background:var(--input-bg); border:1px solid var(--borde); border-radius:14px; max-height:196px; overflow-y:auto; box-shadow:0 6px 18px var(--sombra-fuerte); }
   #loginSugerencias button { display:block; width:100%; text-align:left; background:transparent; color:var(--texto); border:none; border-bottom:1px solid var(--borde); border-radius:0; padding:14px 16px; font-size:17px; font-weight:600; cursor:pointer; }
   #loginSugerencias button:last-child { border-bottom:none; }
-  #loginSugerencias button:active { background:var(--acento); color:#fff; }
+  #loginSugerencias button:active { background:var(--acento); color:var(--tt-ffffff,#fff); }
   .login-usuario { display:flex; align-items:center; justify-content:space-between; gap:8px; background:var(--boton-suave); border-radius:14px; padding:10px 10px 10px 16px; margin-bottom:16px; font-size:18px; font-weight:600; color:var(--texto); }
   .login-usuario span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .login-usuario button { background:transparent; color:var(--texto); border:1px solid var(--borde); border-radius:10px; padding:10px 14px; font-size:14px; font-weight:600; cursor:pointer; flex-shrink:0; }
@@ -10489,13 +10722,13 @@ $htmlVendedor = @'
   #loginPuntos span.lleno { background:var(--acento); border-color:var(--acento); }
   #loginTeclado { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin-bottom:16px; }
   #loginTeclado button { height:clamp(48px,8vh,60px); font-size:26px; font-weight:600; border-radius:16px; border:1px solid transparent; background:var(--boton-suave); color:var(--texto); cursor:pointer; -webkit-tap-highlight-color:transparent; }
-  #loginTeclado button:active { background:var(--acento); color:#fff; }
+  #loginTeclado button:active { background:var(--acento); color:var(--tt-ffffff,#fff); }
   #loginTeclado button.aux { background:transparent; border-color:var(--borde); color:var(--secundario-texto); }
   #loginOverlay .btn { background:var(--acento); padding:15px; font-size:17px; margin-top:0; }
   #btnLoginEntrar:disabled { opacity:0.4; cursor:default; }
   .login-olvido-link { display:block; text-align:center; margin-top:14px; font-size:14px; color:var(--secundario-texto); text-decoration:underline; }
   #loginOlvido { display:none; margin-top:10px; font-size:13px; color:var(--secundario-texto); text-align:center; background:var(--boton-suave); border-radius:10px; padding:10px; }
-  #loginError { min-height:18px; text-align:center; color:#ef4444; font-size:13px; font-weight:600; margin-top:10px; }
+  #loginError { min-height:18px; text-align:center; color:var(--tt-ef4444,#ef4444); font-size:13px; font-weight:600; margin-top:10px; }
   @keyframes loginSacudir { 0%,100%{transform:translateX(0)} 20%{transform:translateX(-9px)} 40%{transform:translateX(9px)} 60%{transform:translateX(-6px)} 80%{transform:translateX(6px)} }
   #loginTarjeta.sacudir { animation:loginSacudir .35s; }
   /* --- Sin zoom y ajustado a la pantalla del movil --- */
@@ -10509,6 +10742,100 @@ $htmlVendedor = @'
 document.addEventListener('gesturestart', function (e) { e.preventDefault(); });
 document.addEventListener('gesturechange', function (e) { e.preventDefault(); });
 document.addEventListener('touchmove', function (e) { if (e.touches && e.touches.length > 1) e.preventDefault(); }, { passive: false });
+</script>
+<script>
+/* Colores personalizables (Ajustes de la PC -> Colores de la interfaz). Sin cambios guardados, todo queda como siempre. */
+(function () {
+  var ROLES = {
+    pc: [
+      { k: 'fondo',   n: 'Fondo de la pantalla y cajas de texto', base: '0f172a', miembros: [] },
+      { k: 'panel',   n: 'Ventanas, paneles y tarjetas', base: '1e293b', miembros: [] },
+      { k: 'borde',   n: 'Bordes y botones oscuros', base: '334155', miembros: [] },
+      { k: 'gris',    n: 'Botones grises (Cerrar, Cancelar)', base: '475569', miembros: [] },
+      { k: 'texto',   n: 'Texto principal', base: 'e2e8f0', miembros: ['cbd5e1'] },
+      { k: 'titulos', n: 'Titulos y texto sobre botones', base: 'ffffff', miembros: [] },
+      { k: 'apagado', n: 'Texto secundario (gris)', base: '94a3b8', miembros: ['64748b'] },
+      { k: 'acento',  n: 'Botones principales y detalles (azul)', base: '0369a1', miembros: ['2563eb', '1d4ed8', '1e40af', '0b3a5c', '7dd3fc', '93c5fd', '38bdf8', 'e0f2fe'] },
+      { k: 'ok',      n: 'Cobrado / correcto (verde)', base: '16a34a', miembros: ['15803d', '166534', '86efac'] },
+      { k: 'aviso',   n: 'Pendiente / aviso (amarillo)', base: 'fbbf24', miembros: ['fde047', 'facc15', 'ca8a04', '7c2d12', '5c2109'] },
+      { k: 'peligro', n: 'Alertas, problemas y eliminar (rojo)', base: 'b91c1c', miembros: ['991b1b', 'ef4444', 'f87171', 'fca5a5', 'fee2e2', '450a0a'] }
+    ],
+    vendedor: [
+      { k: 'fondo',      n: 'Fondo de la pantalla', vars: ['--bg'], base: 'f1f5f9', miembros: [], def: '#f1f5f9' },
+      { k: 'tarjeta',    n: 'Tarjetas y ventanas', vars: ['--tarjeta', '--panel-campana-bg'], miembros: [], def: '#ffffff' },
+      { k: 'texto',      n: 'Texto principal', vars: ['--texto'], miembros: [], def: '#0f172a' },
+      { k: 'secundario', n: 'Texto secundario', vars: ['--secundario-texto'], miembros: [], def: '#475569' },
+      { k: 'borde',      n: 'Bordes', vars: ['--borde', '--mp-card-borde'], base: 'e2e8f0', miembros: [], def: '#cbd5e1' },
+      { k: 'inputbg',    n: 'Cajas de texto', vars: ['--input-bg'], miembros: [], def: '#ffffff' },
+      { k: 'botonsuave', n: 'Botones y etiquetas suaves', vars: ['--boton-suave', '--chip-bg'], miembros: [], def: '#e2e8f0' },
+      { k: 'cabecera',   n: 'Encabezado y barras oscuras', base: '1e293b', miembros: [] },
+      { k: 'botonoscuro', n: 'Botones oscuros (Ajustes, Cerrar)', base: '334155', miembros: [] },
+      { k: 'gris',       n: 'Botones grises', base: '475569', miembros: [] },
+      { k: 'titulos',    n: 'Texto sobre botones y barras', base: 'ffffff', miembros: [] },
+      { k: 'acento',     n: 'Botones principales (azul)', base: '2563eb', miembros: ['0369a1', '1d4ed8', '3b82f6', '0c4a6e', '7dd3fc', 'f0f9ff'] },
+      { k: 'ok',         n: 'Cobrado / correcto (verde)', base: '16a34a', miembros: ['15803d', '166534', '22c55e', '14532d', 'dcfce7', '86efac'] },
+      { k: 'aviso',      n: 'Pendiente / aviso (amarillo)', base: 'f59e0b', miembros: ['b45309', '92400e', '713f12', 'a16207', 'fde68a', 'fef3c7', 'fffbeb', 'fde047'] },
+      { k: 'peligro',    n: 'Alertas y eliminar (rojo)', base: 'b91c1c', miembros: ['991b1b', 'ef4444', 'f87171', 'fee2e2', 'fca5a5'] }
+    ]
+  };
+  function aRgb(h) { h = String(h).replace('#', ''); if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2]; return [parseInt(h.substr(0, 2), 16), parseInt(h.substr(2, 2), 16), parseInt(h.substr(4, 2), 16)]; }
+  function aHsl(c) {
+    var r = c[0] / 255, g = c[1] / 255, b = c[2] / 255, mx = Math.max(r, g, b), mn = Math.min(r, g, b), l = (mx + mn) / 2, h = 0, s = 0, d = mx - mn;
+    if (d) { s = l > 0.5 ? d / (2 - mx - mn) : d / (mx + mn); if (mx === r) h = (g - b) / d + (g < b ? 6 : 0); else if (mx === g) h = (b - r) / d + 2; else h = (r - g) / d + 4; h *= 60; }
+    return [h, s, l];
+  }
+  function deHsl(h, s, l) {
+    h = ((h % 360) + 360) % 360;
+    var c = (1 - Math.abs(2 * l - 1)) * s, x = c * (1 - Math.abs((h / 60) % 2 - 1)), m = l - c / 2, r = 0, g = 0, b = 0;
+    if (h < 60) { r = c; g = x; } else if (h < 120) { r = x; g = c; } else if (h < 180) { g = c; b = x; } else if (h < 240) { g = x; b = c; } else if (h < 300) { r = x; b = c; } else { r = c; b = x; }
+    return [Math.round((r + m) * 255), Math.round((g + m) * 255), Math.round((b + m) * 255)];
+  }
+  function aHex(c) { return '#' + c.map(function (v) { v = Math.max(0, Math.min(255, v)); return (v < 16 ? '0' : '') + v.toString(16); }).join(''); }
+  function acotar(v) { return Math.max(0, Math.min(1, v)); }
+  // Los tonos de la misma familia (ej. el verde claro del texto) se calculan a partir del color elegido, manteniendo la misma diferencia que tenian.
+  function derivar(nuevo, baseDef, miembroDef) {
+    var N = aHsl(aRgb(nuevo)), B = aHsl(aRgb(baseDef)), M = aHsl(aRgb(miembroDef));
+    var s = B[1] > 0.02 ? acotar(N[1] * (M[1] / B[1])) : acotar(N[1] + M[1] - B[1]);
+    return aHex(deHsl(N[0] + (M[0] - B[0]), s, acotar(N[2] + (M[2] - B[2]))));
+  }
+  var puestas = { pc: [], vendedor: [] };
+  function aplicar(panel, cfg) {
+    var st = document.documentElement.style;
+    puestas[panel].forEach(function (v) { st.removeProperty(v); });
+    var ps = puestas[panel] = [];
+    function poner(n, v) { st.setProperty(n, v); ps.push(n); }
+    (ROLES[panel] || []).forEach(function (r) {
+      var c = cfg && cfg[r.k];
+      if (!/^#[0-9a-f]{6}$/i.test(c || '')) return;
+      if (r.base) {
+        poner('--tt-' + r.base, c);
+        (r.miembros || []).forEach(function (m) { poner('--tt-' + m, derivar(c, r.base, m)); });
+      }
+      (r.vars || []).forEach(function (v) { poner(v, c); });
+    });
+  }
+  var cfg = { pc: {}, vendedor: {} };
+  try { var g = JSON.parse(localStorage.getItem('ttColores') || 'null'); if (g) cfg = { pc: g.pc || {}, vendedor: g.vendedor || {} }; } catch (e) {}
+  function fijar(nuevo) {
+    cfg = JSON.parse(JSON.stringify({ pc: (nuevo && nuevo.pc) || {}, vendedor: (nuevo && nuevo.vendedor) || {} }));   // copia: lo que se edita despues no toca lo guardado
+    try { localStorage.setItem('ttColores', JSON.stringify(cfg)); } catch (e) {}
+  }
+  function iniciar(panel) {
+    aplicar(panel, cfg[panel]);
+    function cargar() {
+      fetch('/api/colores').then(function (r) { return r.json(); }).then(function (d) {
+        if (d && d.ok) { fijar(d); aplicar(panel, cfg[panel]); }
+      }).catch(function () {});
+    }
+    cargar();
+    if (panel === 'vendedor') {
+      setInterval(cargar, 60000);
+      document.addEventListener('visibilitychange', function () { if (!document.hidden) cargar(); });
+    }
+  }
+  window.TT = { roles: ROLES, aplicar: aplicar, iniciar: iniciar, fijar: fijar, derivar: derivar, cfg: function () { return cfg; } };
+})();
+TT.iniciar('vendedor');
 </script>
 </head>
 <body>
@@ -10524,14 +10851,14 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
   <div id="bannerRed" onclick="abrirDiagnostico()"></div>
 
   <div id="panelCampana" style="display:none;">
-    <div style="display:flex; justify-content:space-between; align-items:center; padding:10px 14px; background:#1e293b; color:#fff; border-radius:10px 10px 0 0;">
+    <div style="display:flex; justify-content:space-between; align-items:center; padding:10px 14px; background:var(--tt-1e293b,#1e293b); color:var(--tt-ffffff,#fff); border-radius:10px 10px 0 0;">
       <strong style="font-size:14px;">Notificaciones</strong>
-      <button onclick="toggleCampana()" style="background:#334155; color:#fff; border:none; border-radius:7px; padding:5px 10px; font-size:12px;">Cerrar</button>
+      <button onclick="toggleCampana()" style="background:var(--tt-334155,#334155); color:var(--tt-ffffff,#fff); border:none; border-radius:7px; padding:5px 10px; font-size:12px;">Cerrar</button>
     </div>
     <div id="listaCampana"></div>
   </div>
 
-  <div id="colaOfflineAviso" style="display:none; margin:12px; padding:10px 14px; border-radius:8px; background:#fef3c7; color:#92400e; font-size:13px; font-weight:600;"></div>
+  <div id="colaOfflineAviso" style="display:none; margin:12px; padding:10px 14px; border-radius:8px; background:var(--tt-fef3c7,#fef3c7); color:var(--tt-92400e,#92400e); font-size:13px; font-weight:600;"></div>
 
   <div id="bannerAsignado" onclick="irAAsignados()">La caja te armo un pedido nuevo — toca para verlo</div>
 
@@ -10555,7 +10882,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
   <div class="section" id="seccionPedidoActual">
     <h2>Pedido actual</h2>
     <div id="carrito"></div>
-    <div class="total-line">Total: $<span id="totalPedido">0.00</span><span id="notaTransferenciaTotal" style="display:none; font-size:12px; font-weight:normal; color:#0369a1;"> (transferencia x2)</span></div>
+    <div class="total-line">Total: $<span id="totalPedido">0.00</span><span id="notaTransferenciaTotal" style="display:none; font-size:12px; font-weight:normal; color:var(--tt-0369a1,#0369a1);"> (transferencia x2)</span></div>
   </div>
 
   <div class="section" id="seccionCobro">
@@ -10584,8 +10911,8 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
     <input type="text" id="notaPedido" maxlength="200" placeholder="Nota para la caja (opcional)" oninput="actualizarBotonEnviar()">
     <input type="text" id="clienteNombrePedido" maxlength="60" placeholder="Nombre del cliente (opcional, sale en el recibo)">
     <div id="borradoresBox" style="display:none; gap:8px; margin:0 0 8px;">
-      <button class="btn" style="flex:1; width:auto; background:#475569;" onclick="guardarBorrador()">&#128190; Guardar borrador</button>
-      <button class="btn" id="btnVerBorradores" style="flex:1; width:auto; background:#0369a1;" onclick="verBorradores()">&#128194; Borradores (0)</button>
+      <button class="btn" style="flex:1; width:auto; background:var(--tt-475569,#475569);" onclick="guardarBorrador()">&#128190; Guardar borrador</button>
+      <button class="btn" id="btnVerBorradores" style="flex:1; width:auto; background:var(--tt-0369a1,#0369a1);" onclick="verBorradores()">&#128194; Borradores (0)</button>
     </div>
     <button class="btn" id="btnEnviarPedido" onclick="enviarPedido()">Enviar pedido</button>
   </div>
@@ -10652,10 +10979,10 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
   </div>
 
   <div id="menuOverlay" style="display:none; position:fixed; inset:0; background:rgba(15,23,42,0.55); z-index:45;" onclick="if (event.target === this) cerrarMenu()">
-    <div style="background:#f1f5f9; border-radius:0 0 16px 16px; max-height:92vh; overflow:auto; padding-bottom:6px;">
-      <div style="display:flex; justify-content:space-between; align-items:center; padding:14px 16px; background:#1e293b; color:#fff;">
+    <div style="background:var(--tt-f1f5f9,#f1f5f9); border-radius:0 0 16px 16px; max-height:92vh; overflow:auto; padding-bottom:6px;">
+      <div style="display:flex; justify-content:space-between; align-items:center; padding:14px 16px; background:var(--tt-1e293b,#1e293b); color:var(--tt-ffffff,#fff);">
         <strong style="font-size:16px;">Ajustes</strong>
-        <button onclick="cerrarMenu()" style="background:#334155; color:#fff; border:none; border-radius:8px; padding:9px 16px; font-weight:600; font-size:14px;">Cerrar</button>
+        <button onclick="cerrarMenu()" style="background:var(--tt-334155,#334155); color:var(--tt-ffffff,#fff); border:none; border-radius:8px; padding:9px 16px; font-weight:600; font-size:14px;">Cerrar</button>
       </div>
 
       <div class="section">
@@ -10722,10 +11049,10 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
           <button class="btn btn-secundario" onclick="activarModoPOS()">Activar modo punto de venta</button>
         </div>
         <div id="posActivoBox" style="display:none;">
-          <p style="font-size:13px; color:#166534; font-weight:600; margin-bottom:8px;">Modo punto de venta ACTIVO en este tel&eacute;fono. Mira "Ventas (caja)" en la pantalla principal.</p>
+          <p style="font-size:13px; color:var(--tt-166534,#166534); font-weight:600; margin-bottom:8px;">Modo punto de venta ACTIVO en este tel&eacute;fono. Mira "Ventas (caja)" en la pantalla principal.</p>
           <button class="btn btn-secundario" onclick="desactivarModoPOS()">Desactivar en este tel&eacute;fono</button>
         </div>
-        <div id="posMensaje" style="font-size:12px; color:#991b1b; margin-top:6px;"></div>
+        <div id="posMensaje" style="font-size:12px; color:var(--tt-991b1b,#991b1b); margin-top:6px;"></div>
       </div>
 
       <div class="section" id="secModoCliente">
@@ -10743,21 +11070,21 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
       <div id="mapeoCampos"></div>
       <button class="btn" onclick="guardarMapeoYCerrar()" style="margin-top:10px;">Guardar y actualizar catalogo</button>
       <button class="btn btn-secundario" style="margin-top:6px;" onclick="cerrarConfig()">Cancelar</button>
-      <div id="configPaso2Error" style="color:#991b1b; font-size:12px; margin-top:8px;"></div>
+      <div id="configPaso2Error" style="color:var(--tt-991b1b,#991b1b); font-size:12px; margin-top:8px;"></div>
     </div>
   </div>
 
   <div id="diagOverlay" onclick="if (event.target === this) cerrarDiagnostico()">
     <div id="diagCaja">
-      <div style="display:flex; justify-content:space-between; align-items:center; padding:14px 16px; background:#1e293b; color:#fff;">
+      <div style="display:flex; justify-content:space-between; align-items:center; padding:14px 16px; background:var(--tt-1e293b,#1e293b); color:var(--tt-ffffff,#fff);">
         <strong style="font-size:16px;">Diagnóstico de conexión</strong>
-        <button onclick="cerrarDiagnostico()" style="background:#334155; color:#fff; border:none; border-radius:8px; padding:9px 16px; font-weight:600; font-size:14px;">Cerrar</button>
+        <button onclick="cerrarDiagnostico()" style="background:var(--tt-334155,#334155); color:var(--tt-ffffff,#fff); border:none; border-radius:8px; padding:9px 16px; font-weight:600; font-size:14px;">Cerrar</button>
       </div>
       <div class="section">
         <div id="diagResumen" style="font-size:20px; font-weight:700; margin-bottom:4px;">Comprobando...</div>
         <div id="diagSpark"></div>
         <div id="diagDetalle"></div>
-        <div id="diagConsejo" style="font-size:13px; color:#334155; background:#e2e8f0; border-radius:8px; padding:10px 12px; margin-top:10px;"></div>
+        <div id="diagConsejo" style="font-size:13px; color:var(--tt-334155,#334155); background:var(--tt-e2e8f0,#e2e8f0); border-radius:8px; padding:10px 12px; margin-top:10px;"></div>
         <button class="btn" id="diagBtnProbar" style="margin-top:12px;" onclick="probarAhora()">Probar ahora</button>
         <p style="font-size:11px; color:#64748b; margin-top:8px;">La calidad se mide con la rapidez y las fallas al hablar con la PC del negocio (no con internet).</p>
       </div>
@@ -10767,7 +11094,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
   <div id="fotoOverlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.85); align-items:center; justify-content:center; z-index:60;" onclick="cerrarFotoProducto()">
     <div style="max-width:94vw; max-height:90vh; text-align:center;">
       <img id="fotoOverlayImg" src="" style="max-width:94vw; max-height:80vh; border-radius:10px; background:#fff;">
-      <div id="fotoOverlayNombre" style="color:#fff; margin-top:10px; font-size:15px;"></div>
+      <div id="fotoOverlayNombre" style="color:var(--tt-ffffff,#fff); margin-top:10px; font-size:15px;"></div>
     </div>
   </div>
 
@@ -12315,7 +12642,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
       if (!b) {
         b = document.createElement('div');
         b.id = 'alertaBajoCosto';
-        b.style.cssText = 'display:none; position:fixed; left:10px; right:10px; top:60px; z-index:99998; background:#b91c1c; color:#fff; border-radius:12px; padding:14px; font-size:15px; font-weight:700; text-align:center; box-shadow:0 6px 24px rgba(0,0,0,.5);';
+        b.style.cssText = 'display:none; position:fixed; left:10px; right:10px; top:60px; z-index:99998; background:var(--tt-b91c1c,#b91c1c); color:var(--tt-ffffff,#fff); border-radius:12px; padding:14px; font-size:15px; font-weight:700; text-align:center; box-shadow:0 6px 24px rgba(0,0,0,.5);';
         b.onclick = function () { b.style.display = 'none'; };
         document.body.appendChild(b);
       }
@@ -12535,7 +12862,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
         const agotado = tieneStock && disponible <= 0;
         const stockBajo = tieneStock && !agotado && umbralStockBajoActual > 0 && disponible <= umbralStockBajoActual;
         const stockTxt = (tieneStock && !autoservicioActivo)
-          ? ('<div class="sku"' + (stockBajo ? ' style="color:#f87171; font-weight:bold;"' : '') + '>' + (stockBajo ? '&#9888; ' : '') + 'Disponible: ' + disponible + (Number(p.reservado) > 0 ? ' (apartados en pedidos: ' + p.reservado + ')' : '') + '</div>')
+          ? ('<div class="sku"' + (stockBajo ? ' style="color:var(--tt-f87171,#f87171); font-weight:bold;"' : '') + '>' + (stockBajo ? '&#9888; ' : '') + 'Disponible: ' + disponible + (Number(p.reservado) > 0 ? ' (apartados en pedidos: ' + p.reservado + ')' : '') + '</div>')
           : '';
         const fotoTag = tieneFoto(p.sku) ? ('<img class="miniatura" data-sku="' + p.sku + '" src="/foto/' + encodeURIComponent(p.sku) + '.jpg" onerror=\'fotoFallo(this,' + JSON.stringify(String(p.sku)) + ')\' onclick=\'verFotoProducto(' + JSON.stringify(p.sku) + ',' + JSON.stringify(p.nombre) + ')\'>') : '';
         return '<div class="resultado">' +
@@ -12610,7 +12937,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
       const e = document.getElementById('escanerEstadoNat');
       if (!e) return;
       e.textContent = texto || '';
-      e.style.color = ok === true ? '#86efac' : (ok === false ? '#fca5a5' : '#e2e8f0');
+      e.style.color = ok === true ? 'var(--tt-86efac,#86efac)' : (ok === false ? 'var(--tt-fca5a5,#fca5a5)' : 'var(--tt-e2e8f0,#e2e8f0)');
     }
     function escanerSonido(bien) {
       try { if (navigator.vibrate) navigator.vibrate(bien ? 70 : [60, 40, 60]); } catch (e) {}
@@ -12695,11 +13022,11 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
       ov = document.createElement('div'); ov.id = 'escanerNativoOverlay';
       ov.style.cssText = 'display:none; position:fixed; inset:0; z-index:99999; flex-direction:column; justify-content:space-between; background:transparent;';
       ov.innerHTML = '<div style="display:flex; align-items:center; justify-content:space-between; gap:8px; padding:calc(env(safe-area-inset-top,0px) + 10px) 12px 10px; background:rgba(15,23,42,0.88);">' +
-        '<strong style="color:#fff; font-size:16px;">Escanear codigos</strong>' +
-        '<div style="display:flex; gap:8px;"><button type="button" id="escanerNatLuz" style="background:#475569; color:#fff; border:none; border-radius:8px; padding:9px 12px; font-size:16px;">&#128294;</button>' +
-        '<button type="button" id="escanerNatListo" style="background:#2563eb; color:#fff; border:none; border-radius:8px; padding:9px 18px; font-weight:600; font-size:15px;">Listo</button></div></div>' +
+        '<strong style="color:var(--tt-ffffff,#fff); font-size:16px;">Escanear codigos</strong>' +
+        '<div style="display:flex; gap:8px;"><button type="button" id="escanerNatLuz" style="background:var(--tt-475569,#475569); color:var(--tt-ffffff,#fff); border:none; border-radius:8px; padding:9px 12px; font-size:16px;">&#128294;</button>' +
+        '<button type="button" id="escanerNatListo" style="background:var(--tt-2563eb,#2563eb); color:var(--tt-ffffff,#fff); border:none; border-radius:8px; padding:9px 18px; font-weight:600; font-size:15px;">Listo</button></div></div>' +
         '<div style="position:absolute; left:8%; right:8%; top:50%; height:2px; background:rgba(239,68,68,0.9); box-shadow:0 0 8px rgba(239,68,68,0.9); pointer-events:none;"></div>' +
-        '<div id="escanerEstadoNat" style="color:#e2e8f0; font-size:15px; text-align:center; padding:12px 14px calc(env(safe-area-inset-bottom,0px) + 16px); background:rgba(15,23,42,0.88); min-height:46px;">Apunta al codigo de barras</div>';
+        '<div id="escanerEstadoNat" style="color:var(--tt-e2e8f0,#e2e8f0); font-size:15px; text-align:center; padding:12px 14px calc(env(safe-area-inset-bottom,0px) + 16px); background:rgba(15,23,42,0.88); min-height:46px;">Apunta al codigo de barras</div>';
       document.body.appendChild(ov);
       return ov;
     }
@@ -12888,8 +13215,8 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
       const s = String(i.sku).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
       if (!ab) return '<div style="margin-top:3px;"><a href="javascript:void(0)" style="color:#60a5fa; font-size:12px;" onclick="abrirSerie(\'' + s + '\')">+ N&deg; de serie (garantia)</a></div>';
       return '<div style="margin-top:4px; display:flex; gap:6px; align-items:center;">' +
-        '<input type="text" placeholder="N&deg; de serie (opcional)" autocapitalize="characters" value="' + escaparHtml(i.serieTxt || '') + '" oninput="fijarSerie(\'' + s + '\', this.value)" style="flex:1; min-width:0; font-size:16px; padding:6px 8px; border-radius:6px; border:1px solid #475569; background:#0f172a; color:#e2e8f0;">' +
-        '<button type="button" onclick="escanearSerie(\'' + s + '\')" title="Escanear el codigo de la serie" style="background:#475569; color:#fff; border:none; border-radius:6px; padding:7px 10px; font-size:16px;">&#128247;</button></div>';
+        '<input type="text" placeholder="N&deg; de serie (opcional)" autocapitalize="characters" value="' + escaparHtml(i.serieTxt || '') + '" oninput="fijarSerie(\'' + s + '\', this.value)" style="flex:1; min-width:0; font-size:16px; padding:6px 8px; border-radius:6px; border:1px solid var(--tt-475569,#475569); background:#0f172a; color:var(--tt-e2e8f0,#e2e8f0);">' +
+        '<button type="button" onclick="escanearSerie(\'' + s + '\')" title="Escanear el codigo de la serie" style="background:var(--tt-475569,#475569); color:var(--tt-ffffff,#fff); border:none; border-radius:6px; padding:7px 10px; font-size:16px;">&#128247;</button></div>';
     }
     function abrirSerie(sku) { const it = carrito.find(function (x) { return x.sku === sku; }); if (it) { it.serieTxt = it.serieTxt || ''; renderCarrito(); } }
     function fijarSerie(sku, v) { const it = carrito.find(function (x) { return x.sku === sku; }); if (it) it.serieTxt = String(v || ''); }
@@ -12911,7 +13238,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
             ? ('$' + precioMostrado.toFixed(2) + ' c/u' + notaTransf)
             : ('$<input type="number" class="qty-input" style="width:64px;" inputmode="decimal" min="0" step="any" value="' + i.precio.toFixed(2) + '" onfocus="this.select()" onchange="fijarPrecio(\'' + i.sku + '\', this.value)"> c/u' + (factor === 2 ? ' (x2 en transferencia)' : '') + ' — toca para aplicar descuento');
           return '<div class="carrito-item">' +
-            '<div>' + (skusBajoCosto.has(i.sku) ? '<span style="color:#f87171;">&#9888; </span>' : '') + i.nombre + '<div class="sku">' + precioHtml + '</div>' + serieHtml(i) + '</div>' +
+            '<div>' + (skusBajoCosto.has(i.sku) ? '<span style="color:var(--tt-f87171,#f87171);">&#9888; </span>' : '') + i.nombre + '<div class="sku">' + precioHtml + '</div>' + serieHtml(i) + '</div>' +
             '<div class="qty-controls">' +
               '<button onclick="cambiarCantidad(\'' + i.sku + '\', -1)">-</button>' +
               '<input type="number" class="qty-input" inputmode="decimal" min="0" step="any" value="' + i.cantidad + '" onfocus="this.select()" onchange="fijarCantidad(\'' + i.sku + '\', this.value)">' +
@@ -13029,13 +13356,13 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
         const diff = totalProductos - cubierto;
         if (Math.abs(diff) < 0.01) {
           el.textContent = 'Las dos partes cubren el pedido completo.';
-          el.style.color = '#166534';
+          el.style.color = 'var(--tt-166534,#166534)';
         } else if (diff > 0) {
           el.textContent = 'Falta cubrir $' + diff.toFixed(2) + ' del pedido entre las dos partes.';
-          el.style.color = '#991b1b';
+          el.style.color = 'var(--tt-991b1b,#991b1b)';
         } else {
           el.textContent = 'Las partes suman $' + Math.abs(diff).toFixed(2) + ' de mas. Ajustalas para que sumen el total del pedido.';
-          el.style.color = '#991b1b';
+          el.style.color = 'var(--tt-991b1b,#991b1b)';
         }
         return;
       }
@@ -13058,7 +13385,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
         const recibidoUsd = parseFloat(montoInput.value) || 0;
         const cambioUsd = recibidoUsd * tasaDolarActual - totalCobrar;
         el.textContent = cambioUsd >= -0.01 ? ('Cambio a devolver: $' + Math.max(0, cambioUsd).toFixed(2) + ' (\u2248 ' + (Math.max(0, cambioUsd) / tasaDolarActual).toFixed(2) + ' USD)') : ('Falta: $' + Math.abs(cambioUsd).toFixed(2) + ' (\u2248 ' + (Math.abs(cambioUsd) / tasaDolarActual).toFixed(2) + ' USD)');
-        el.style.color = cambioUsd >= -0.01 ? '#166534' : '#991b1b';
+        el.style.color = cambioUsd >= -0.01 ? 'var(--tt-166534,#166534)' : 'var(--tt-991b1b,#991b1b)';
         return;
       }
       if (esTransferencia) {
@@ -13066,15 +13393,15 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
         if (montoInput.value === '') { el.textContent = 'Cuando llegue el mensaje del banco, escribe aqui el monto que llego.'; el.style.color = '#64748b'; return; }
         const llego = parseFloat(montoInput.value) || 0;
         const faltaTr = totalCobrar - llego;
-        if (faltaTr > 0.01) { el.textContent = 'Llego menos de lo que se cobra: faltan $' + faltaTr.toFixed(2) + '. No se puede cerrar la venta.'; el.style.color = '#991b1b'; }
-        else { el.textContent = 'Transferencia completa. La caja la va a revisar.'; el.style.color = '#166534'; }
+        if (faltaTr > 0.01) { el.textContent = 'Llego menos de lo que se cobra: faltan $' + faltaTr.toFixed(2) + '. No se puede cerrar la venta.'; el.style.color = 'var(--tt-991b1b,#991b1b)'; }
+        else { el.textContent = 'Transferencia completa. La caja la va a revisar.'; el.style.color = 'var(--tt-166534,#166534)'; }
         return;
       }
       if (montoInput.value === '') { el.textContent = ''; return; }
       const recibido = parseFloat(montoInput.value) || 0;
       const cambio = recibido - totalCobrar;
       el.textContent = cambio >= 0 ? ('Cambio a devolver: $' + cambio.toFixed(2)) : ('Falta: $' + Math.abs(cambio).toFixed(2));
-      el.style.color = cambio >= 0 ? '#166534' : '#991b1b';
+      el.style.color = cambio >= 0 ? 'var(--tt-166534,#166534)' : 'var(--tt-991b1b,#991b1b)';
     }
 
     // ---- Enviar ----
@@ -13148,11 +13475,11 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
           '<button class="btn" style="flex:0 0 auto; width:auto; background:#7f1d1d;" onclick="borrarBorrador(' + Number(b.id) + ')">Borrar</button>' +
           '</div></div>';
       }).join('');
-      ov.innerHTML = '<div style="background:#1e293b; color:#e2e8f0; padding:18px; border-radius:12px; max-width:480px; width:100%; max-height:85vh; overflow:auto;">' +
-        '<h3 style="margin:0 0 4px; color:#fff;">Borradores</h3>' +
+      ov.innerHTML = '<div style="background:var(--tt-1e293b,#1e293b); color:var(--tt-e2e8f0,#e2e8f0); padding:18px; border-radius:12px; max-width:480px; width:100%; max-height:85vh; overflow:auto;">' +
+        '<h3 style="margin:0 0 4px; color:var(--tt-ffffff,#fff);">Borradores</h3>' +
         '<p style="font-size:12px; color:#94a3b8; margin:0 0 10px;">Se guardan solo en este telefono. Al abrir uno se revisan precio y existencia con el catalogo actual.</p>' +
         (filas || '<div style="color:#94a3b8; font-size:13px; padding:8px 0;">No hay borradores guardados.</div>') +
-        '<button class="btn" style="background:#475569; margin-top:6px;" onclick="cerrarBorradores()">Cerrar</button></div>';
+        '<button class="btn" style="background:var(--tt-475569,#475569); margin-top:6px;" onclick="cerrarBorradores()">Cerrar</button></div>';
       ov.style.display = 'flex';
     }
     function abrirBorrador(id) {
@@ -13510,7 +13837,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
         if (barra || !document.body) return barra;
         barra = document.createElement('div');
         barra.id = 'barraSinRed';
-        barra.style.cssText = 'display:none; position:fixed; left:0; right:0; top:0; z-index:99999; text-align:center; font-size:13px; font-weight:600; padding:6px 10px; padding-top:calc(6px + env(safe-area-inset-top, 0px)); color:#fff;';
+        barra.style.cssText = 'display:none; position:fixed; left:0; right:0; top:0; z-index:99999; text-align:center; font-size:13px; font-weight:600; padding:6px 10px; padding-top:calc(6px + env(safe-area-inset-top, 0px)); color:var(--tt-ffffff,#fff);';
         document.body.appendChild(barra);
         return barra;
       }
@@ -13523,11 +13850,11 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
         const b = asegurarBarra();
         if (!b) return;
         if (sinRed) {
-          b.style.background = '#b45309';
+          b.style.background = 'var(--tt-b45309,#b45309)';
           b.textContent = 'Sin conexion con la PC: reintentando solo. Lo que hagas se guarda en el telefono.' + pendientesTxt();
           b.style.display = 'block';
         } else {
-          b.style.background = '#15803d';
+          b.style.background = 'var(--tt-15803d,#15803d)';
           b.textContent = 'Conexion recuperada.';
           b.style.display = 'block';
           setTimeout(function () { if (fallos === 0) b.style.display = 'none'; }, 2500);
@@ -13636,12 +13963,12 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
         try { cache = JSON.parse(localStorage.getItem(claveCache) || 'null'); } catch(e2) {}
         if (cache && cache.dia === hoyStr() && Array.isArray(cache.mios)) {
           cont.innerHTML =
-            '<div style="color:#92400e; background:#fffbeb; border:1px solid #fde68a; border-radius:8px; padding:8px; font-size:12px; margin-bottom:8px;">⚠ Sin conexion con la PC ahora mismo — esto es lo ultimo que se sabe (puede que la caja ya haya cobrado o cambiado algo mientras tanto).</div>' +
+            '<div style="color:var(--tt-92400e,#92400e); background:var(--tt-fffbeb,#fffbeb); border:1px solid var(--tt-fde68a,#fde68a); border-radius:8px; padding:8px; font-size:12px; margin-bottom:8px;">⚠ Sin conexion con la PC ahora mismo — esto es lo ultimo que se sabe (puede que la caja ya haya cobrado o cambiado algo mientras tanto).</div>' +
             (cache.mios.length === 0
               ? '<div style="color:#94a3b8; font-size:13px;">Sin pedidos todavia hoy.</div>'
               : cache.mios.map(renderMiPedido).join(''));
         } else {
-          cont.innerHTML = '<div style="color:#991b1b; font-size:13px;">No se pudo cargar tus pedidos (revisa la conexion).</div>';
+          cont.innerHTML = '<div style="color:var(--tt-991b1b,#991b1b); font-size:13px;">No se pudo cargar tus pedidos (revisa la conexion).</div>';
         }
       }
     }
@@ -13719,15 +14046,15 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
         '<button class="mp-btn-items" id="mp-btnitems-' + p.id + '" onclick="toggleItemsMP(' + p.id + ')">' +
           (abierto ? 'Ocultar productos &#9652;' : 'Ver productos &#9662;') + '</button>' +
         '<div class="mp-items" id="mp-items-' + p.id + '" style="display:' + (abierto ? 'block' : 'none') + ';">' + lineas +
-          '<div style="border-top:1px solid #e2e8f0; margin-top:4px; padding-top:5px; font-weight:700;"><span>Total productos</span><span>$' + totalBase.toFixed(2) + '</span></div>' +
+          '<div style="border-top:1px solid var(--tt-e2e8f0,#e2e8f0); margin-top:4px; padding-top:5px; font-weight:700;"><span>Total productos</span><span>$' + totalBase.toFixed(2) + '</span></div>' +
         '</div>';
       return '<div class="mp-card" data-sig="' + firmaMP(p) + '">' +
         '<div class="mp-top"><span>Folio #' + p.id + ' — ' + horaCorta + '</span><span class="mp-estado ' + p.estado + '">' + p.estado.toUpperCase() + '</span></div>' +
         (p.ventaAxis ? '<div class="mp-ficha-axis">&#10003; Confirmado en AxisPOS &middot; venta #' + escaparHtml(String(p.ventaAxis)) + '</div>' : '') +
         '<div class="mp-total" id="mp-total-' + p.id + '">' + totalTxt + '</div>' +
         (p.estado === 'pendiente' ? ('<div data-qrpago="1" id="mp-qr-' + p.id + '" style="text-align:center; display:' + ((((metodoMP[p.id] || p.metodoPago) === 'Transferencia') && qrPago.length) ? 'block' : 'none') + ';">' + htmlQrPago() + '</div>') : '') +
-        (p.clienteNombre ? '<div style="font-size:12px; color:#0369a1; margin-bottom:4px;">Cliente: ' + escaparHtml(p.clienteNombre) + '</div>' : '') +
-        (p.nota ? '<div style="font-size:12px; color:#0369a1; margin-bottom:6px;">Tu nota: ' + escaparHtml(p.nota) + '</div>' : '') +
+        (p.clienteNombre ? '<div style="font-size:12px; color:var(--tt-0369a1,#0369a1); margin-bottom:4px;">Cliente: ' + escaparHtml(p.clienteNombre) + '</div>' : '') +
+        (p.nota ? '<div style="font-size:12px; color:var(--tt-0369a1,#0369a1); margin-bottom:6px;">Tu nota: ' + escaparHtml(p.nota) + '</div>' : '') +
         itemsHtml +
         '<div class="mp-acciones">' + acciones + '</div>' +
       '</div>';
@@ -13996,9 +14323,9 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
           : (esTodos ? 'Pedido para el primero que lo tome — ' : 'De la caja — ');
         return '<div class="asig-card">' +
           '<div class="mp-top"><span>' + etiquetaOrigen + horaCorta + '</span></div>' +
-          (a.editado ? '<div style="font-size:12px; font-weight:700; color:#b45309; margin:2px 0;">&#9998; La caja modifico este pedido</div>' : '') +
+          (a.editado ? '<div style="font-size:12px; font-weight:700; color:var(--tt-b45309,#b45309); margin:2px 0;">&#9998; La caja modifico este pedido</div>' : '') +
           '<div class="mp-items" style="display:block;">' + lineas + '</div>' +
-          (a.nota ? '<div style="font-size:13px; color:#0369a1; margin:4px 0;">Nota de la caja: ' + escaparHtml(a.nota) + '</div>' : '') +
+          (a.nota ? '<div style="font-size:13px; color:var(--tt-0369a1,#0369a1); margin:4px 0;">Nota de la caja: ' + escaparHtml(a.nota) + '</div>' : '') +
           '<div class="mp-total">Total: $' + total.toFixed(2) + '</div>' +
           '<div class="mp-acciones">' + btnVisto + btnAgregar +
           '</div>' +
@@ -14438,7 +14765,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
         let cache = null;
         try { cache = JSON.parse(localStorage.getItem(claveCache) || 'null'); } catch (e2) {}
         if (cache && cache.d) pintarVentasPOS(cache.d, cache.t, false, cache.pend || []);
-        else cont.innerHTML = '<div style="color:#991b1b; font-size:13px;">No se pudo cargar el historial (revisa la conexion con la PC).</div>';
+        else cont.innerHTML = '<div style="color:var(--tt-991b1b,#991b1b); font-size:13px;">No se pudo cargar el historial (revisa la conexion con la PC).</div>';
       }
     }
 
@@ -14454,7 +14781,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
       posPedidosPorClave = {};
       const fila = (t, v, fuerte) => '<div' + (fuerte ? ' style="font-weight:700;"' : '') + '><span>' + t + '</span><span>' + v + '</span></div>';
       const aviso = cacheDe
-        ? '<div style="color:#92400e; background:#fffbeb; border:1px solid #fde68a; border-radius:8px; padding:8px; font-size:12px; margin-bottom:8px;">Sin conexion con la PC ahora mismo: se muestra lo ultimo que se vio (' + new Date(cacheDe).toLocaleTimeString().slice(0, 5) + '). Puede estar desactualizado.</div>'
+        ? '<div style="color:var(--tt-92400e,#92400e); background:var(--tt-fffbeb,#fffbeb); border:1px solid var(--tt-fde68a,#fde68a); border-radius:8px; padding:8px; font-size:12px; margin-bottom:8px;">Sin conexion con la PC ahora mismo: se muestra lo ultimo que se vio (' + new Date(cacheDe).toLocaleTimeString().slice(0, 5) + '). Puede estar desactualizado.</div>'
         : '';
       let porVend = '';
       if ((r.porVendedor || []).length > 1) {
@@ -14479,7 +14806,7 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
         : '<div style="color:#94a3b8; font-size:13px;">Sin ventas cobradas en este periodo.</div>';
       const mas = d.hayMas ? '<div style="color:#64748b; font-size:12px; margin-top:6px;">Se muestran las 200 ventas mas recientes (el reporte cuenta todas).</div>' : '';
       const pendHtml = pend.length
-        ? '<div style="font-size:12px; font-weight:700; color:#92400e; margin:2px 0 6px;">Pendientes de cobro (' + pend.length + ')</div>' + pend.map(renderMiPedido).join('')
+        ? '<div style="font-size:12px; font-weight:700; color:var(--tt-92400e,#92400e); margin:2px 0 6px;">Pendientes de cobro (' + pend.length + ')</div>' + pend.map(renderMiPedido).join('')
         : '';
       cont.innerHTML = aviso + pendHtml + rep + lista + mas;
     }
@@ -19600,6 +19927,25 @@ while ($listener.IsListening) {
                 Limpiar-DevolucionesPendientes
                 $devPC = @($global:devolucionesPendientes.Values | Where-Object { ([string]$_.estado -eq "esperando") -and (((Get-Date) - $_.hora).TotalSeconds -lt 180) } | ForEach-Object { [pscustomobject]@{ id = $_.id; vendedor = $_.vendedor; texto = $_.resumen } })
                 Enviar-Json $context @{ ok = $true; mensajes = @($pendMsg); devoluciones = @($devPC) } 200 4
+            }
+
+        } elseif ($method -eq "GET" -and $path -eq "/api/colores") {
+            # Lo piden el Panel de la PC y la app del vendedor para pintarse con los colores elegidos.
+            Enviar-Json $context @{ ok = $true; pc = $global:coloresCfg.pc; vendedor = $global:coloresCfg.vendedor } 200 4
+
+        } elseif ($method -eq "POST" -and $path -eq "/api/colores") {
+            # Solo la PC: guarda los colores elegidos.
+            if (-not [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)) {
+                Enviar-Json $context @{ ok = $false; error = "Los colores se cambian desde la PC." } 403
+            } else {
+                $dCol = Leer-CuerpoJson $request
+                if (-not $dCol) {
+                    Enviar-Json $context @{ ok = $false; error = "Datos invalidos." } 400
+                } else {
+                    $global:coloresCfg = @{ pc = (Limpiar-ColoresPanel $dCol.pc); vendedor = (Limpiar-ColoresPanel $dCol.vendedor) }
+                    Guardar-ColoresCfg
+                    Enviar-Json $context @{ ok = $true } 200
+                }
             }
 
         } elseif ($method -eq "GET" -and $path -eq "/api/mensajes/historial") {
