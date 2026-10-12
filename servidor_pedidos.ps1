@@ -9991,6 +9991,20 @@ $htmlPC = @'
         carritoNP = (asigEditando.items || []).map(i => ({ sku: i.sku, nombre: i.nombre, precio: Number(i.precio) || 0, cantidad: Number(i.cantidad) || 0 }));
         renderCarritoNP();
       }
+      enfocarBuscadorNP();
+    }
+    // El cursor queda directamente en el buscador (con el boton, con F2/F3 o desde "Editar"): se puede escribir el
+    // nombre o el codigo sin hacer clic. Se reintenta unos instantes para ganarle a la carga del catalogo y del borrador.
+    function enfocarBuscadorNP() {
+      const f = function () {
+        const b = document.getElementById('npBuscador');
+        if (!b || !pcVisible('nuevoPedidoOverlay')) return;
+        const a = document.activeElement;
+        if (a && a !== b && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) && a.closest && a.closest('#nuevoPedidoOverlay')) return;   // ya esta escribiendo en otro campo
+        b.focus();
+        try { b.select(); } catch (e) {}
+      };
+      setTimeout(f, 0); setTimeout(f, 80); setTimeout(f, 300);
     }
 
     function cerrarNuevoPedido(yaEnviado) {
@@ -10459,6 +10473,14 @@ $htmlVendedor = @'
   #loginNombreInput { width:100%; padding:15px 16px; font-size:18px; border-radius:14px; border:1px solid var(--borde); background:var(--input-bg); color:var(--texto); outline:none; }
   #loginNombreInput:focus { border-color:var(--acento); }
   .login-ayuda { font-size:14px; color:var(--secundario-texto); margin:10px 0 16px; }
+  .login-campo { position:relative; }
+  #loginNombreInput { padding-right:52px; }
+  .login-flecha { position:absolute; right:6px; top:50%; transform:translateY(-50%); width:42px; height:42px; border:none; background:transparent; color:var(--secundario-texto); font-size:22px; cursor:pointer; border-radius:12px; }
+  .login-flecha:active { background:var(--boton-suave); }
+  #loginSugerencias { display:none; margin:8px 0 0; background:var(--input-bg); border:1px solid var(--borde); border-radius:14px; max-height:196px; overflow-y:auto; box-shadow:0 6px 18px var(--sombra-fuerte); }
+  #loginSugerencias button { display:block; width:100%; text-align:left; background:transparent; color:var(--texto); border:none; border-bottom:1px solid var(--borde); border-radius:0; padding:14px 16px; font-size:17px; font-weight:600; cursor:pointer; }
+  #loginSugerencias button:last-child { border-bottom:none; }
+  #loginSugerencias button:active { background:var(--acento); color:#fff; }
   .login-usuario { display:flex; align-items:center; justify-content:space-between; gap:8px; background:var(--boton-suave); border-radius:14px; padding:10px 10px 10px 16px; margin-bottom:16px; font-size:18px; font-weight:600; color:var(--texto); }
   .login-usuario span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .login-usuario button { background:transparent; color:var(--texto); border:1px solid var(--borde); border-radius:10px; padding:10px 14px; font-size:14px; font-weight:600; cursor:pointer; flex-shrink:0; }
@@ -10600,8 +10622,11 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
 
       <div id="loginPasoNombre">
         <label class="login-label" for="loginNombreInput">Usuario</label>
-        <input type="text" id="loginNombreInput" list="dlUsuariosLogin" placeholder="Escribe o elige tu nombre" autocomplete="off" autocapitalize="words" onkeydown="if (event.key === 'Enter') loginContinuar()">
-        <datalist id="dlUsuariosLogin"></datalist>
+        <div class="login-campo">
+          <input type="text" id="loginNombreInput" placeholder="Escribe o elige tu nombre" autocomplete="off" autocorrect="off" spellcheck="false" autocapitalize="words" oninput="loginFiltrarUsuarios()" onfocus="loginFiltrarUsuarios()" onkeydown="if (event.key === 'Enter') loginContinuar()">
+          <button type="button" class="login-flecha" id="loginFlecha" tabindex="-1" aria-label="Ver usuarios" onmousedown="event.preventDefault()" onclick="loginAlternarUsuarios()">&#9662;</button>
+        </div>
+        <div id="loginSugerencias" role="listbox"></div>
         <p class="login-ayuda">Elige tu nombre de la lista (o escribelo) y entra con tu PIN</p>
         <button type="button" class="btn" onclick="loginContinuar()">Continuar</button>
       </div>
@@ -11157,14 +11182,43 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
     const loginEl = document.getElementById('loginOverlay');
     function loginVisible() { return loginEl.style.display !== 'none'; }
     function setLoginError(t) { document.getElementById('loginError').textContent = t || ''; }
+    // Lista de usuarios propia, dentro de la tarjeta (la lista nativa del navegador se ve mal en la APK).
+    let loginUsuarios = [];
+    let loginVerTodos = false;
     async function cargarListaUsuariosLogin() {
       try {
         const res = await fetch('/api/pines');
         const data = await res.json();
-        const lista = (data && data.vendedoresConPin) || [];
-        document.getElementById('dlUsuariosLogin').innerHTML = lista.map(v => '<option value="' + v + '">').join('');
+        loginUsuarios = (data && data.vendedoresConPin) || [];
       } catch (e) {}
+      loginFiltrarUsuarios();
     }
+    function loginFiltrarUsuarios(todos) {
+      const box = document.getElementById('loginSugerencias');
+      if (!box) return;
+      loginVerTodos = (todos === true);
+      if (autoservicioActivo) { box.style.display = 'none'; return; }
+      const q = loginVerTodos ? '' : normalizar(document.getElementById('loginNombreInput').value.trim());
+      const lista = loginUsuarios.filter(function (n) { return !q || normalizar(n).indexOf(q) >= 0; });
+      // si ya escribio el nombre completo no hace falta mostrarlo
+      if (!lista.length || (lista.length === 1 && q && normalizar(lista[0]) === q)) { box.style.display = 'none'; box.innerHTML = ''; return; }
+      box.innerHTML = lista.map(function (n, i) { return '<button type="button" data-i="' + i + '">' + escaparHtml(n) + '</button>'; }).join('');
+      box._lista = lista;
+      box.style.display = 'block';
+    }
+    function loginAlternarUsuarios() {
+      const box = document.getElementById('loginSugerencias');
+      if (box.style.display === 'block') { box.style.display = 'none'; return; }
+      loginFiltrarUsuarios(true);
+    }
+    document.getElementById('loginSugerencias').addEventListener('click', function (e) {
+      const b = e.target && e.target.closest ? e.target.closest('button[data-i]') : null;
+      const box = document.getElementById('loginSugerencias');
+      if (!b || !box._lista) return;
+      document.getElementById('loginNombreInput').value = box._lista[parseInt(b.getAttribute('data-i'), 10)] || '';
+      box.style.display = 'none';
+      loginContinuar();      // un solo toque: pasa directo a pedir el PIN
+    });
     function abrirLogin(nombre) {
       loginPin = '';
       loginOcupado = false;
@@ -11229,7 +11283,8 @@ document.addEventListener('touchmove', function (e) { if (e.touches && e.touches
       document.querySelector('#loginTarjeta .login-titulo').textContent = 'Tu nombre';
       document.querySelector('#loginPasoNombre .login-label').textContent = 'Nombre';
       const inp = document.getElementById('loginNombreInput');
-      inp.removeAttribute('list');
+      document.getElementById('loginFlecha').style.display = 'none';
+      document.getElementById('loginSugerencias').style.display = 'none';
       inp.placeholder = 'Escribe tu nombre';
       document.querySelector('#loginPasoNombre .login-ayuda').textContent = 'Escribe tu nombre para tu pedido';
     }
