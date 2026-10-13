@@ -3378,15 +3378,132 @@ Cargar-Sinonimos
 # SEGURIDAD, COSTOS Y COMPRAS
 # (roles y limites de descuento, auditoria, costo de reposicion, proveedores)
 # ------------------------------------------------------------------
+# ------------------------------------------------------------------
+# PANEL DE LA PC DESDE EL MOVIL (modo administrador remoto)
+# Abierto en el movil, el Panel de la PC puede hacer lo mismo que en la PC (imprimir etiquetas, colores, permisos...)
+# si se escribe la clave de administrador (la misma que se pone en la PC, menu, PIN de vendedores). La clave da un
+# token que dura 12 horas de uso, se puede cerrar desde el movil y se anula si se cambia la clave.
+# ------------------------------------------------------------------
+$adminRemotoPath = Join-Path $scriptDir "admin_remoto.json"
+$global:adminTokens = @{}
+function Guardar-AdminTokens {
+    $lista = New-Object System.Collections.ArrayList
+    foreach ($k in @($global:adminTokens.Keys)) { [void]$lista.Add([pscustomobject]@{ h = [string]$k; v = [string]$global:adminTokens[$k] }) }
+    Escribir-ArchivoConReintento -ruta $adminRemotoPath -contenido (ConvertTo-Json -InputObject ([pscustomobject]@{ tokens = @($lista) }) -Depth 4) | Out-Null
+}
+function Cargar-AdminTokens {
+    try {
+        if (Test-Path -LiteralPath $adminRemotoPath) {
+            $raw = Get-Content $adminRemotoPath -Raw -Encoding UTF8
+            if ($raw -and $raw.Trim().Length -gt 0) {
+                $o = $raw | ConvertFrom-Json
+                foreach ($t in @($o.tokens)) { if ($t -and $t.h) { $global:adminTokens[[string]$t.h] = [string]$t.v } }
+            }
+        }
+    } catch {}
+}
+Cargar-AdminTokens
+function Admin-TokenValido($request) {
+    $tok = ""
+    try { $tok = [string]$request.Headers["X-Admin-Token"] } catch { $tok = "" }
+    if ([string]::IsNullOrWhiteSpace($tok)) { return $false }
+    if ([string]::IsNullOrEmpty($global:posClaveHash)) { return $false }
+    $h = Pos-Hash $tok
+    if (-not $global:adminTokens.ContainsKey($h)) { return $false }
+    $vence = [datetime]::MinValue
+    try { $vence = [datetime]$global:adminTokens[$h] } catch { $vence = [datetime]::MinValue }
+    $ahora = Get-Date
+    if ($vence -lt $ahora) { [void]$global:adminTokens.Remove($h); try { Guardar-AdminTokens } catch {}; return $false }
+    # Sesion deslizante: con el uso se renueva a 12 horas (se guarda a disco como maximo cada ~10 minutos).
+    if (($vence - $ahora).TotalMinutes -lt 710) {
+        $global:adminTokens[$h] = $ahora.AddHours(12).ToString("yyyy-MM-dd HH:mm:ss")
+        try { Guardar-AdminTokens } catch {}
+    }
+    return $true
+}
 function Es-PeticionPC($request) {
-    try { return [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address) } catch { return $false }
+    try { if ([System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)) { return $true } } catch { return $false }
+    try { return (Admin-TokenValido $request) } catch { return $false }
 }
 function Origen-Peticion($request) {
     try {
         if ([System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)) { return "PC" }
+        if (Admin-TokenValido $request) { return ("PC remoto " + $request.RemoteEndPoint.Address.ToString()) }
         return ("movil " + $request.RemoteEndPoint.Address.ToString())
     } catch { return "" }
 }
+
+# Script que se mete en el Panel de la PC y en la pagina de etiquetas: cuando se abren desde un movil y una accion
+# "solo de la PC" responde 403, pide la clave de administrador una vez y repite la accion sola.
+$global:adminRemotoJs = @'
+<script>(function(){
+var h=location.hostname;
+if(h==='localhost'||h==='127.0.0.1'||h==='[::1]'||h==='::1')return;
+var KEY='tt_admin_token',of=window.fetch,pidiendo=null,pill=null;
+function tok(){try{return localStorage.getItem(KEY)||''}catch(e){return ''}}
+function propio(u){var s=(typeof u==='string')?u:((u&&u.url)||'');return (s.charAt(0)==='/'&&s.charAt(1)!=='/')||s.indexOf(location.origin)===0;}
+function marcar(){
+  if(!pill){if(!document.body)return;pill=document.createElement('button');pill.type='button';
+    pill.style.cssText='position:fixed;left:10px;bottom:10px;z-index:2147483000;border:none;border-radius:999px;padding:8px 14px;font:700 12px Arial,sans-serif;box-shadow:0 3px 10px rgba(0,0,0,.45);cursor:pointer;min-height:0';
+    pill.onclick=function(){if(tok()){salir();}else{pedirClave();}};document.body.appendChild(pill);}
+  if(tok()){pill.textContent='\uD83D\uDD13 Administrador \u00B7 Salir';pill.style.background='#16a34a';pill.style.color='#fff';}
+  else{pill.textContent='\uD83D\uDD12 Administrar desde el m\u00F3vil';pill.style.background='#334155';pill.style.color='#e2e8f0';}
+}
+function salir(){
+  if(!confirm('Cerrar el modo administrador en este tel\u00E9fono?'))return;
+  of('/api/admin/salir',{method:'POST',headers:{'X-Admin-Token':tok()}}).catch(function(){}).then(function(){try{localStorage.removeItem(KEY)}catch(e){}marcar();location.reload();});
+}
+function pedirClave(){
+  if(pidiendo)return pidiendo;
+  pidiendo=new Promise(function(res){
+    var o=document.createElement('div');
+    o.style.cssText='position:fixed;left:0;top:0;right:0;bottom:0;z-index:2147483600;background:rgba(2,6,23,.85);display:flex;align-items:center;justify-content:center;padding:16px;font-family:Arial,sans-serif';
+    o.innerHTML='<div style="background:#1e293b;color:#fff;border:1px solid #475569;border-radius:16px;padding:20px;max-width:380px;width:100%"><div style="font-size:18px;font-weight:800;margin-bottom:6px">Modo administrador</div><div style="font-size:13px;color:#cbd5e1;margin-bottom:12px">Para hacer esto desde el m\u00F3vil escribe la clave de administrador del servidor (la que se pone en la PC: men\u00FA, PIN de vendedores).</div><input id="ttAdmClave" type="password" autocomplete="off" style="width:100%;box-sizing:border-box;padding:12px;font-size:18px;border-radius:10px;border:1px solid #475569;background:#0f172a;color:#fff"><div id="ttAdmMsg" style="font-size:13px;color:#fca5a5;min-height:18px;margin:8px 0"></div><button id="ttAdmOk" style="width:100%;padding:12px;border:none;border-radius:10px;background:#2563eb;color:#fff;font-size:16px;font-weight:700">Entrar</button><button id="ttAdmNo" style="width:100%;padding:10px;margin-top:8px;border:none;border-radius:10px;background:#334155;color:#fff;font-size:14px">Cancelar</button></div>';
+    document.body.appendChild(o);
+    var inp=o.querySelector('#ttAdmClave'),m=o.querySelector('#ttAdmMsg');
+    function cerrar(v){o.parentNode&&o.parentNode.removeChild(o);pidiendo=null;res(v);}
+    function entrar(){
+      var c=inp.value.trim();if(!c){m.textContent='Escribe la clave.';return;}
+      m.style.color='#cbd5e1';m.textContent='Comprobando...';
+      of('/api/admin/entrar',{method:'POST',body:JSON.stringify({clave:c})}).then(function(r){return r.json().catch(function(){return null;});}).then(function(j){
+        if(j&&j.ok&&j.token){try{localStorage.setItem(KEY,j.token)}catch(e){}marcar();cerrar(true);return;}
+        m.style.color='#fca5a5';m.textContent=(j&&j.error)||'No se pudo entrar.';
+      }).catch(function(){m.style.color='#fca5a5';m.textContent='Sin conexi\u00F3n con la PC.';});
+    }
+    o.querySelector('#ttAdmOk').onclick=entrar;
+    o.querySelector('#ttAdmNo').onclick=function(){cerrar(false)};
+    inp.addEventListener('keydown',function(e){if(e.key==='Enter')entrar();});
+    setTimeout(function(){inp.focus()},50);
+  });
+  return pidiendo;
+}
+window.fetch=function(input,init){
+  if(!propio(input))return of.apply(this,arguments);
+  var self=this;init=init||{};
+  function hacer(){
+    var t=tok(),i2=init;
+    if(t){var hd=new Headers(init.headers||((typeof input!=='string'&&input.headers)?input.headers:undefined));hd.set('X-Admin-Token',t);i2=Object.assign({},init,{headers:hd});}
+    return of.call(self,input,i2);
+  }
+  return hacer().then(function(r){
+    if(r.status!==403)return r;
+    var s=(typeof input==='string')?input:(input.url||'');
+    if(s.indexOf('/api/admin/')>=0)return r;
+    return r.clone().json().then(function(j){
+      if(!(j&&j.soloPC))return r;
+      return pedirClave().then(function(ok){return ok?hacer():r;});
+    }).catch(function(){return r;});
+  });
+};
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',marcar);else marcar();
+})();</script>
+'@
+function Inyectar-Admin([string]$html) {
+    $i = $html.IndexOf("<head>")
+    if ($i -lt 0) { return $html }
+    return $html.Insert($i + 6, $global:adminRemotoJs)
+}
+
 
 # ---------- Auditoria: quien hizo que (un renglon JSON por accion, en auditoria.log) ----------
 $auditoriaPath = Join-Path $scriptDir "auditoria.log"
@@ -3435,7 +3552,7 @@ function Avisar-PC([string]$origen, [string]$texto) {
 
 # ---------- Costo de reposicion (manual y/o columna de AxisPOS) ----------
 $costosPath = Join-Path $scriptDir "costos.json"
-$global:costos = @{ manual = @{}; axis = @{}; columnaAxis = ""; ultimaAxis = "" }
+$global:costos = @{ manual = @{}; axis = @{}; columnaAxis = "PriceIn"; ultimaAxis = "" }
 $global:costosUltimoIntento = [datetime]::MinValue
 function Guardar-Costos {
     Escribir-ArchivoConReintento -ruta $costosPath -contenido ($global:costos | ConvertTo-Json -Depth 4) | Out-Null
@@ -3703,7 +3820,7 @@ function Texto-ADouble($v) { $x = 0.0; [void][double]::TryParse(([string]$v).Rep
 # El nombre de la columna se detecta solo (SHOW COLUMNS) o se escribe a mano en Ajustes.
 # ------------------------------------------------------------------
 $minAxisPath = Join-Path $scriptDir "minimos_axis.json"
-$global:minAxis = @{ usar = $true; columna = ""; ultima = ""; error = ""; datos = @{}; maxRef = "" }
+$global:minAxis = @{ usar = $true; columna = "goods.MinQtty"; ultima = ""; error = ""; datos = @{}; maxRef = "goods.NormalQtty" }
 $global:minAxisUltimoIntento = [datetime]::MinValue
 function Guardar-MinAxis {
     Escribir-ArchivoConReintento -ruta $minAxisPath -contenido ($global:minAxis | ConvertTo-Json -Depth 4) | Out-Null
@@ -3730,17 +3847,23 @@ Cargar-MinAxis
 
 # Busca en la tabla de productos de AxisPOS la columna del stock minimo.
 function Detectar-ColumnaMinimoAxis {
-    $texto = Ejecutar-ConsultaAxis "SHOW COLUMNS FROM goods"
-    $cols = New-Object System.Collections.ArrayList
-    foreach ($linea in ($texto -split "`n")) {
-        $campo = (($linea.TrimEnd("`r")) -split "`t")[0].Trim()
-        if ($campo) { [void]$cols.Add($campo) }
+    foreach ($tabla in @('goods', 'store')) {
+        $cols = New-Object System.Collections.ArrayList
+        try {
+            $texto = Ejecutar-ConsultaAxis ("SHOW COLUMNS FROM " + $tabla)
+            foreach ($linea in ($texto -split "`n")) {
+                $campo = (($linea.TrimEnd("`r")) -split "`t")[0].Trim()
+                if ($campo) { [void]$cols.Add($campo) }
+            }
+        } catch { continue }
+        foreach ($pref in @('MinStock', 'StockMin', 'MinQtty', 'MinQty', 'MinQuantity', 'MinimumStock', 'MinimumQtty', 'MinCount', 'MinRest', 'MinRemain', 'MinAmount', 'Minimum', 'LowStock', 'StockLimit')) {
+            foreach ($c in $cols) { if ($c -ieq $pref) { return ($tabla + "." + $c) } }
+        }
+        foreach ($c in $cols) {
+            if (($c -match '(?i)min') -and ($c -match '(?i)(stock|qtty|qty|rest|count|remain|quant|amount|limit)') -and ($c -notmatch '(?i)(price|sum|disc|cost|time|date|minute)')) { return ($tabla + "." + $c) }
+        }
+        foreach ($c in $cols) { if ($c -match '(?i)(stock|qtty|qty).*(min|low|limit)') { return ($tabla + "." + $c) } }
     }
-    foreach ($pref in @('MinStock', 'StockMin', 'MinQtty', 'MinQty', 'MinQuantity', 'MinimumStock', 'MinimumQtty', 'MinCount', 'MinRest', 'MinRemain', 'MinAmount', 'Minimum', 'LowStock', 'StockLimit')) {
-        foreach ($c in $cols) { if ($c -ieq $pref) { return $c } }
-    }
-    foreach ($c in $cols) { if ($c -match '(?i)min' -and $c -match '(?i)(stock|qtty|qty|rest|count|remain|quant|amount|limit)') { return $c } }
-    foreach ($c in $cols) { if ($c -match '(?i)(stock|qtty|qty).*(min|low|limit)') { return $c } }
     return $null
 }
 function Actualizar-MinimosAxis {
@@ -3750,11 +3873,21 @@ function Actualizar-MinimosAxis {
     $col = [string]$global:minAxis.columna
     if (-not $col) {
         $col = Detectar-ColumnaMinimoAxis
-        if (-not $col) { throw "No encontre la columna del stock minimo en AxisPOS. Escribe su nombre a mano (pidele a quien instalo AxisPOS que te lo diga)." }
+        if (-not $col) { throw "No encontre la columna del stock minimo en AxisPOS. Usa 'Ver columnas de AxisPOS' en Ajustes > Stock minimo de AxisPOS para elegirla." }
         $global:minAxis.columna = $col
     }
-    if ($col -notmatch '^[A-Za-z][A-Za-z0-9_]{0,40}$') { throw "Nombre de columna no valido." }
-    $texto = Ejecutar-ConsultaAxis ("SELECT g." + $colSku + ", g." + $col + " FROM goods g WHERE g.Deleted=0")
+    if ($col -notmatch '^(?:(goods|store)\.)?[A-Za-z][A-Za-z0-9_]{0,40}$') { throw "Nombre de columna no valido (columna o tabla.columna)." }
+    $tabla = 'goods'; $campo = $col
+    if ($col.Contains('.')) { $pp = $col.Split('.'); $tabla = $pp[0]; $campo = $pp[1] }
+    if ($tabla -eq 'goods') {
+        $sql = "SELECT g.$colSku, g.$campo FROM goods g WHERE g.Deleted=0"
+    } else {
+        $ids = New-Object System.Collections.ArrayList
+        foreach ($a in @($global:configAxis.almacenes)) { $n = 0; if ([int]::TryParse([string]$a, [ref]$n)) { [void]$ids.Add($n) } }
+        if ($ids.Count -eq 0) { throw "No hay almacenes configurados para leer el minimo por almacen." }
+        $sql = "SELECT g.$colSku, MAX(s.$campo) FROM goods g JOIN store s ON s.GoodID = g.ID WHERE g.Deleted=0 AND s.ObjectID IN (" + ($ids -join ',') + ") GROUP BY g.ID, g.$colSku"
+    }
+    $texto = Ejecutar-ConsultaAxis $sql
     $inv = [System.Globalization.CultureInfo]::InvariantCulture
     $nuevo = @{}
     foreach ($linea in ($texto -split "`n")) {
@@ -3837,10 +3970,10 @@ function Detectar-ColumnaMaximoAxis {
                 if ($campo) { [void]$cols.Add($campo) }
             }
         } catch { continue }
-        foreach ($pref in @('Nominal', 'NominalQtty', 'NominalQty', 'NominalQuantity', 'NominalStock', 'NomQtty', 'MaxStock', 'StockMax', 'MaxQtty', 'MaxQty', 'MaxQuantity', 'MaximumStock', 'MaximumQtty', 'Maximum', 'MaxCount', 'MaxAmount', 'MaxRest', 'MaxRemain', 'NormQtty', 'Norm')) {
+        foreach ($pref in @('Nominal', 'NominalQtty', 'NominalQty', 'NominalQuantity', 'NominalStock', 'NomQtty', 'MaxStock', 'StockMax', 'MaxQtty', 'MaxQty', 'MaxQuantity', 'MaximumStock', 'MaximumQtty', 'Maximum', 'MaxCount', 'MaxAmount', 'MaxRest', 'MaxRemain', 'NormQtty', 'Norm', 'NormalQtty', 'Normal', 'NormalQty', 'NormalQuantity', 'NormalStock', 'QttyNormal', 'NormQty', 'NormalCount')) {
             foreach ($c in $cols) { if ($c -ieq $pref) { return ($tabla + "." + $c) } }
         }
-        foreach ($c in $cols) { if ($c -match '(?i)nominal') { return ($tabla + "." + $c) } }
+        foreach ($c in $cols) { if ($c -match '(?i)(nominal|normal)') { return ($tabla + "." + $c) } }
         foreach ($c in $cols) {
             if (($c -match '(?i)max') -and ($c -match '(?i)(stock|qtty|qty|rest|count|quant|amount|remain|limit)') -and ($c -notmatch '(?i)(price|sum|disc|cost|time|date)')) { return ($tabla + "." + $c) }
         }
@@ -4575,6 +4708,8 @@ function Generar-TextoRecibo($p) {
 # reabastecimiento, ticket de devolucion/garantia, etiquetas.
 # ==================================================================
 function Enviar-Json($Context, $Obj, [int]$StatusCode = 200, [int]$Depth = 6) {
+    # Los 403 que dicen "desde la PC" llevan soloPC: el Panel abierto en un movil pide la clave de administrador y repite la accion.
+    if (($StatusCode -eq 403) -and ($Obj -is [hashtable]) -and (-not $Obj.ContainsKey('sinPermiso')) -and (-not $Obj.ContainsKey('requierePin')) -and (-not $Obj.ContainsKey('posInactivo')) -and ([string]$Obj['error'] -match '\bPC\b')) { $Obj['soloPC'] = $true }
     Enviar-Respuesta -Context $Context -Body ($Obj | ConvertTo-Json -Depth $Depth) -ContentType "application/json; charset=utf-8" -StatusCode $StatusCode
 }
 
@@ -6248,7 +6383,7 @@ TT.iniciar('pc');
       <h3 style="font-size:13px; color:var(--tt-94a3b8,#94a3b8); margin:14px 0 6px; text-transform:uppercase; letter-spacing:0.5px;">Vendedores con PIN puesto</h3>
       <div id="listaConPin" style="font-size:13px; color:var(--tt-e2e8f0,#e2e8f0);">Cargando...</div>
       <h3 style="font-size:13px; color:var(--tt-94a3b8,#94a3b8); margin:14px 0 6px; text-transform:uppercase; letter-spacing:0.5px;">Modo punto de venta en el m&oacute;vil</h3>
-      <p style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin-bottom:8px;">Con esta clave de administrador, un vendedor puede activar en su m&oacute;vil (Ajustes) el modo punto de venta: historial de ventas, devoluciones, descuentos y reporte de efectivo y transferencia. Si la cambias o la quitas, todos los m&oacute;viles pierden el modo.</p>
+      <p style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin-bottom:8px;">Esta misma clave sirve para abrir el Panel de la PC desde el m&oacute;vil como administrador (bot&oacute;n &#128274; abajo a la izquierda): all&iacute; se puede hacer todo lo de la PC, incluso imprimir etiquetas. Con esta clave de administrador, un vendedor puede activar en su m&oacute;vil (Ajustes) el modo punto de venta: historial de ventas, devoluciones, descuentos y reporte de efectivo y transferencia. Si la cambias o la quitas, todos los m&oacute;viles pierden el modo.</p>
       <input type="text" id="posClaveAdmin" class="np-input" placeholder="Clave de administrador (4 a 20 caracteres)" autocomplete="off">
       <button class="btn" onclick="guardarClavePOS()">Guardar clave</button>
       <div id="posClaveEstado" style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin-top:6px;"></div>
@@ -6283,7 +6418,7 @@ TT.iniciar('pc');
       <div id="reposAlmacenes"></div>
       <div style="display:flex; gap:14px; flex-wrap:wrap; margin:10px 0; font-size:13px; color:var(--tt-cbd5e1,#cbd5e1);">
         <label>Ventas de los ultimos <input type="number" id="reposDias" class="np-input" min="1" max="60" value="7" style="width:70px; display:inline-block;" onkeydown="if (event.key === 'Enter') calcularRepos(true)"> dias</label>
-        <label>Cubrir <input type="number" id="reposCob" class="np-input" min="0" max="60" value="7" style="width:70px; display:inline-block;" onkeydown="if (event.key === 'Enter') calcularRepos(true)"> dias de venta <span style="color:var(--tt-94a3b8,#94a3b8); font-size:12px;">(0 = llenar hasta la cantidad nominal / maxima de AxisPOS)</span></label>
+        <label>Cubrir <input type="number" id="reposCob" class="np-input" min="0" max="60" value="7" style="width:70px; display:inline-block;" onkeydown="if (event.key === 'Enter') calcularRepos(true)"> dias de venta <span style="color:var(--tt-94a3b8,#94a3b8); font-size:12px;">(0 = como "Sugerencias de compras" de AxisPOS: lo que está bajo el mínimo, hasta el nominal)</span></label>
       </div>
       <div style="display:flex; gap:8px; flex-wrap:wrap;">
         <button class="btn" id="reposBtnCalc" style="flex:1; width:auto;" onclick="calcularRepos(true)">Calcular</button>
@@ -8056,7 +8191,80 @@ TT.iniciar('pc');
           return '<div style="display:flex; justify-content:space-between; gap:8px; border-top:1px solid var(--tt-1e293b,#1e293b); padding:4px 0;"><span style="min-width:0;">' + escaparHtml(x.nombre) + '</span><span style="color:var(--tt-94a3b8,#94a3b8); text-align:right;">' + detalle(x) + '</span></div>';
         }).join('') + '</div></details>';
     }
+    // ---- 0 dias a cubrir: tabla como "Sugerencias de compras" de AxisPOS (solo lo que esta bajo el minimo) ----
+    let reposItemsNom = [];
+    let reposSelNom = {};
+    let reposNomGenerado = '';
+    function reposNomSel() { return reposItemsNom.filter(function (x, i) { return reposSelNom[i]; }); }
+    function reposNomRefrescar() {
+      const sel = reposNomSel();
+      let uni = 0; sel.forEach(function (x) { uni += Number(x.bajar) || 0; });
+      const t = document.getElementById('rnTotal'); if (t) t.textContent = uni + ' unidades en ' + sel.length + ' de ' + reposItemsNom.length + ' productos';
+      const th = document.getElementById('rnTodo'); if (th) th.checked = (sel.length === reposItemsNom.length && sel.length > 0);
+      const grupos = {};
+      sel.forEach(function (x) {
+        (x.almacenes || []).forEach(function (a) {
+          if (a.bajar > 0) {
+            if (!grupos[a.id]) grupos[a.id] = { nombre: a.nombre, filas: [] };
+            grupos[a.id].filas.push(a.bajar + ' x ' + x.nombre + (x.sku ? ' [' + x.sku + ']' : ''));
+          }
+        });
+      });
+      reposTexto = 'Bajar del almacen (lo que esta bajo el minimo, hasta el nominal) - ' + reposNomGenerado + '\n' +
+        Object.keys(grupos).map(function (k) { return '\n== ' + (grupos[k].nombre || ('Almacen ' + k)) + ' ==\n' + grupos[k].filas.join('\n'); }).join('\n');
+    }
+    function rnMarcar(i, on) { reposSelNom[i] = !!on; reposNomRefrescar(); }
+    function rnTodos(on) {
+      reposItemsNom.forEach(function (x, i) { reposSelNom[i] = !!on; });
+      document.querySelectorAll('.rnChk').forEach(function (c) { c.checked = !!on; });
+      reposNomRefrescar();
+    }
+    function rnImprimir() {
+      const sel = reposNomSel();
+      if (!sel.length) { mostrarBanner('No hay productos marcados.', 3000); return; }
+      const w = window.open('', '_blank');
+      if (!w) return;
+      const filas = sel.map(function (x) {
+        return '<tr><td>&#9744;</td><td>' + escaparHtml(x.nombre) + (x.sku ? ' <small>[' + escaparHtml(x.sku) + ']</small>' : '') + '</td><td>' + x.piso + '</td><td>' + x.minimo + '</td><td>' + x.maximo + '</td><td>' + x.falta + '</td><td><b>' + x.bajar + '</b></td><td>' +
+          (x.almacenes || []).filter(function (a) { return a.bajar > 0; }).map(function (a) { return escaparHtml(a.nombre || ('Almacén ' + a.id)) + ': ' + a.bajar; }).join(', ') + '</td></tr>';
+      }).join('');
+      w.document.write('<html><head><meta charset="UTF-8"><title>Que bajar del almacen</title><style>body{font-family:Arial,sans-serif;padding:20px}table{border-collapse:collapse;width:100%}td,th{border-bottom:1px solid #999;padding:6px 8px;text-align:left;font-size:14px}th{background:#eee}</style></head><body><h2>Qué bajar del almacén - ' +
+        escaparHtml(reposNomGenerado) + '</h2><table><tr><th></th><th>Nombre</th><th>Actual</th><th>Mínimo</th><th>Normal</th><th>Sugerencia</th><th>Bajar</th><th>De</th></tr>' + filas +
+        '</table><script>window.onload=function(){window.print()}<\/script></body></html>');
+      w.document.close();
+    }
+    function pintarReposNominal(d) {
+      const out = document.getElementById('reposResultado');
+      const res = d.resumen || {};
+      reposItemsNom = d.items || [];
+      reposSelNom = {};
+      reposItemsNom.forEach(function (x, i) { reposSelNom[i] = true; });
+      reposNomGenerado = d.generado || '';
+      const th = 'text-align:left; padding:6px 5px; font-size:12px; color:var(--tt-cbd5e1,#cbd5e1); border-bottom:1px solid var(--tt-475569,#475569); white-space:nowrap;';
+      const td = 'padding:6px 5px; font-size:13px; border-bottom:1px solid var(--tt-334155,#334155); vertical-align:middle;';
+      let html = '<p style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin-bottom:8px;">Calculado ' + escaparHtml(d.generado) + '. Muestra lo que está por debajo del mínimo y sugiere llegar a la cantidad normal; solo se baja lo que hay en los almacenes. Cada producto necesita tener puestos el mínimo y el normal en AxisPOS.</p>';
+      if (res.sinNominal) html += '<div style="font-size:12px; color:var(--tt-fbbf24,#fbbf24); margin-bottom:8px;">' + res.sinNominal + ' producto(s) con mínimo y existencia en almacén no tienen cantidad normal en AxisPOS y no entran.</div>';
+      if (!reposItemsNom.length) {
+        html += '<div class="np-vacio">No hace falta bajar nada: ningún producto con mínimo y normal está por debajo de su mínimo en el piso' + (res.sinMinimo ? ' (' + res.sinMinimo + ' productos con existencia en almacén no tienen mínimo puesto)' : '') + '.</div>';
+        out.innerHTML = html; reposTexto = ''; return;
+      }
+      html += '<div style="font-size:18px; font-weight:800; color:var(--tt-ffffff,#fff); margin-bottom:8px;">Total: <span id="rnTotal"></span></div>' +
+        '<div style="margin-bottom:8px;"><button style="background:var(--tt-0369a1,#0369a1); color:var(--tt-ffffff,#fff); border:none; border-radius:6px; padding:5px 10px; font-size:12px; font-weight:600; cursor:pointer;" onclick="rnImprimir()">Imprimir</button></div>' +
+        '<table style="width:100%; border-collapse:collapse; color:var(--tt-e2e8f0,#e2e8f0);"><thead><tr><th style="' + th + '"><input type="checkbox" id="rnTodo" title="Marcar o desmarcar todo" onchange="rnTodos(this.checked)"></th>' +
+        '<th style="' + th + ' width:100%;">Nombre</th><th style="' + th + '">Actual</th><th style="' + th + '">Mínimo</th><th style="' + th + '">Normal</th><th style="' + th + '">Sugerencia</th><th style="' + th + '">Bajar</th></tr></thead><tbody>' +
+        reposItemsNom.map(function (x, i) {
+          const det = (x.almacenes || []).filter(function (a) { return a.bajar > 0; }).map(function (a) { return escaparHtml(a.nombre || ('Almacén ' + a.id)) + ': ' + a.bajar; }).join(' · ');
+          const corto = (Number(x.bajar) < Number(x.falta)) ? ' <span style="color:var(--tt-fbbf24,#fbbf24);">(en almacén solo hay ' + x.origen + ')</span>' : '';
+          return '<tr><td style="' + td + '"><input type="checkbox" class="rnChk" checked onchange="rnMarcar(' + i + ', this.checked)"></td>' +
+            '<td style="' + td + '">' + escaparHtml(x.nombre) + '<br><small style="color:var(--tt-94a3b8,#94a3b8);">' + escaparHtml(x.sku || 'sin SKU') + (det ? ' · ' + det : '') + corto + '</small></td>' +
+            '<td style="' + td + '">' + x.piso + '</td><td style="' + td + '">' + x.minimo + '</td><td style="' + td + '">' + x.maximo + '</td><td style="' + td + '">' + x.falta + '</td>' +
+            '<td style="' + td + ' color:var(--tt-86efac,#86efac); font-weight:800;">' + x.bajar + '</td></tr>';
+        }).join('') + '</tbody></table>';
+      out.innerHTML = html;
+      reposNomRefrescar();
+    }
     function pintarResultadoRepos(d) {
+      if (d.modo === 'nominal') { pintarReposNominal(d); return; }
       const out = document.getElementById('reposResultado');
       const items = d.items || [];
       const res = d.resumen || {};
@@ -9048,27 +9256,113 @@ TT.iniciar('pc');
       const c = pcModal('modComp', 'Compras a proveedores');
       c.innerHTML = '<div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:8px; font-size:13px;">' +
         'Ventas de los últimos <select id="cpDias" class="np-select" style="width:auto; margin:0;"><option value="15">15</option><option value="30" selected>30</option><option value="60">60</option><option value="90">90</option></select> días · ' +
-        'alcanzar para <select id="cpCob" class="np-select" style="width:auto; margin:0;"><option value="7">7</option><option value="15" selected>15</option><option value="30">30</option><option value="45">45</option></select> días ' +
+        'alcanzar para <select id="cpCob" class="np-select" style="width:auto; margin:0;" onchange="cpCambioCob()"><option value="0">0 (solo lo que está bajo el mínimo)</option><option value="7">7</option><option value="15" selected>15</option><option value="30">30</option><option value="45">45</option></select> días ' +
         '<button style="' + PC_BTN + '" onclick="calcularCompras()">Calcular</button></div>' +
         '<div id="cpInfo" style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin-bottom:8px;"></div><div id="cpLista"></div>' +
         '<details style="margin-top:12px;"><summary style="cursor:pointer; font-size:13px; color:var(--tt-7dd3fc,#7dd3fc);">Mis proveedores</summary>' +
         '<p style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin:6px 0;">Una línea por proveedor: nombre, teléfono (para WhatsApp).</p>' +
         '<textarea id="cpProv" rows="4" style="' + PC_AREA + '" placeholder="Ferrimport, 52345678"></textarea>' +
         '<button style="' + PC_BTN + '" onclick="guardarProveedores()">Guardar proveedores</button></details>';
+      try { const g = localStorage.getItem('cpCobV1'); if (g !== null && pcById('cpCob').querySelector('option[value="' + g + '"]')) pcById('cpCob').value = g; } catch (e) {}
+      cpCambioCob(true);
       await calcularCompras();
+    }
+    function cpCambioCob(noGuardar) {
+      const cob = pcById('cpCob').value;
+      if (!noGuardar) { try { localStorage.setItem('cpCobV1', cob); } catch (e) {} }
+      const d = pcById('cpDias'); if (d) d.disabled = (cob === '0');
     }
     async function calcularCompras() {
       pcById('cpLista').innerHTML = '<div class="np-vacio">Calculando...</div>';
       const r = await pcApi('/api/compras/sugerencias?dias=' + pcById('cpDias').value + '&cobertura=' + pcById('cpCob').value);
       if (!r.ok) { pcById('cpLista').innerHTML = '<div class="np-vacio">' + escaparHtml((r.d && r.d.error) || 'No se pudo calcular.') + '</div>'; return; }
-      comprasDatos = r.d; comprasQty = {};
-      (comprasDatos.items || []).forEach((it, i) => { comprasQty[i] = it.sugerido; });
+      comprasDatos = r.d; comprasQty = {}; comprasSel = {};
+      (comprasDatos.items || []).forEach((it, i) => { comprasQty[i] = it.sugerido; comprasSel[i] = true; });
       const ta = pcById('cpProv');
       if (ta && !ta.value) ta.value = (comprasDatos.proveedores || []).map(p => p.nombre + ', ' + (p.telefono || '')).join('\n');
-      pcById('cpInfo').textContent = 'Ventas tomadas de ' + (comprasDatos.fuente === 'axispos' ? 'AxisPOS' : 'los pedidos de la app (no incluye ventas hechas solo en AxisPOS)') + '. Cantidades editables.';
+      pcById('cpInfo').textContent = (comprasDatos.modo === 'nominal') ? 'Sin mirar ventas: actual contra el mínimo y la cantidad normal de AxisPOS. Sugerencia = normal − actual (editable).' :
+        'Ventas tomadas de ' + (comprasDatos.fuente === 'axispos' ? 'AxisPOS' : 'los pedidos de la app (no incluye ventas hechas solo en AxisPOS)') + '. Cantidades editables.';
       renderComprasProv();
     }
+    // ---- 0 dias a cubrir: tabla como "Sugerencias de compras" de AxisPOS ----
+    let comprasSel = {};
+    const CN_TH = 'text-align:left; padding:6px 5px; font-size:12px; color:var(--tt-cbd5e1,#cbd5e1); border-bottom:1px solid var(--tt-475569,#475569); white-space:nowrap;';
+    const CN_TD = 'padding:6px 5px; font-size:13px; border-bottom:1px solid var(--tt-334155,#334155); vertical-align:middle;';
+    function cnSeleccion() {
+      const items = (comprasDatos && comprasDatos.items) || [];
+      const sel = [];
+      items.forEach((it, i) => {
+        const q = Number(comprasQty[i]) || 0;
+        if (comprasSel[i] && q > 0) sel.push({ it: it, q: q, t: (it.costo != null ? Number(it.costo) * q : 0) });
+      });
+      return sel;
+    }
+    function cnRefrescar() {
+      const items = (comprasDatos && comprasDatos.items) || [];
+      let total = 0, sinCosto = 0;
+      items.forEach((it, i) => {
+        const q = Number(comprasQty[i]) || 0;
+        const t = (it.costo != null) ? Number(it.costo) * q : 0;
+        const td = pcById('cnT' + i); if (td) td.textContent = pcMoney(t);
+        if (comprasSel[i] && q > 0) { total += t; if (it.costo == null) sinCosto++; }
+      });
+      const n = cnSeleccion().length;
+      const tt = pcById('cnTotal'); if (tt) tt.textContent = pcMoney(total);
+      const inf = pcById('cnInfo'); if (inf) inf.textContent = n + ' de ' + items.length + ' marcados' + (sinCosto ? ' · ' + sinCosto + ' sin costo (cuentan 0$)' : '');
+      const th = pcById('cnTodo'); if (th) th.checked = (n === items.length && n > 0);
+    }
+    function cnMarcar(i, on) { comprasSel[i] = !!on; cnRefrescar(); }
+    function cnTodos(on) {
+      (comprasDatos.items || []).forEach((it, i) => { comprasSel[i] = !!on; });
+      document.querySelectorAll('.cnChk').forEach(c => { c.checked = !!on; });
+      cnRefrescar();
+    }
+    function cnCantidad(i, v) { comprasQty[i] = Math.max(0, parseFloat(v) || 0); cnRefrescar(); }
+    function renderComprasNominal() {
+      const items = (comprasDatos && comprasDatos.items) || [];
+      const cont = pcById('cpLista');
+      const ayuda = '<p style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin-bottom:8px;">Muestra los productos cuya cantidad está por debajo del mínimo y sugiere comprar hasta alcanzar la cantidad normal. Cada producto necesita tener puestos el mínimo y el normal.</p>';
+      if (!items.length) {
+        cont.innerHTML = ayuda + '<div class="np-vacio">Nada que comprar: ningún producto con mínimo y normal está por debajo de su mínimo.' +
+          (comprasDatos.sinNormal ? ' Hay ' + comprasDatos.sinNormal + ' producto(s) bajo el mínimo sin cantidad normal en AxisPOS; no entran.' : '') + '</div>';
+        return;
+      }
+      const num = 'style="' + CN_TD + '"';
+      cont.innerHTML = ayuda +
+        '<div style="font-size:20px; font-weight:800; color:var(--tt-ffffff,#fff); margin-bottom:8px;">Total: <span id="cnTotal"></span> <span id="cnInfo" style="font-size:12px; font-weight:400; color:var(--tt-94a3b8,#94a3b8);"></span></div>' +
+        '<div style="margin-bottom:8px;"><button style="' + PC_BTN + '" onclick="imprimirComprasNom()">Imprimir</button><button style="' + PC_BTN + '" onclick="copiarComprasNom()">Copiar</button></div>' +
+        '<table style="width:100%; border-collapse:collapse; color:var(--tt-e2e8f0,#e2e8f0);"><thead><tr>' +
+        '<th style="' + CN_TH + '"><input type="checkbox" id="cnTodo" title="Marcar o desmarcar todo" onchange="cnTodos(this.checked)"></th>' +
+        '<th style="' + CN_TH + ' width:100%;">Nombre</th><th style="' + CN_TH + '">Actual</th><th style="' + CN_TH + '">Mínimo</th><th style="' + CN_TH + '">Normal</th><th style="' + CN_TH + '">Sugerencia</th><th style="' + CN_TH + '">Total</th></tr></thead><tbody>' +
+        items.map((it, i) =>
+          '<tr><td ' + num + '><input type="checkbox" class="cnChk" ' + (comprasSel[i] ? 'checked' : '') + ' onchange="cnMarcar(' + i + ', this.checked)"></td>' +
+          '<td ' + num + '>' + escaparHtml(it.nombre) + (it.sku ? '<br><small style="color:var(--tt-94a3b8,#94a3b8);">' + escaparHtml(it.sku) + '</small>' : '') + '</td>' +
+          '<td ' + num + '>' + it.stock + '</td><td ' + num + '>' + it.minimo + '</td><td ' + num + '>' + it.normal + '</td>' +
+          '<td ' + num + '><input type="number" min="0" value="' + comprasQty[i] + '" style="width:70px; background:var(--tt-1e293b,#1e293b); color:var(--tt-ffffff,#fff); border:1px solid var(--tt-475569,#475569); border-radius:6px; padding:3px;" onchange="cnCantidad(' + i + ', this.value)"></td>' +
+          '<td id="cnT' + i + '" style="' + CN_TD + ' white-space:nowrap;"></td></tr>'
+        ).join('') + '</tbody></table>';
+      cnRefrescar();
+    }
+    function copiarComprasNom() {
+      const sel = cnSeleccion();
+      if (!sel.length) { mostrarBanner('No hay productos marcados.', 3000); return; }
+      let total = 0; sel.forEach(s => { total += s.t; });
+      pcCopiar('LISTA DE COMPRAS ' + new Date().toLocaleDateString('es-ES') + '\n' + sel.map(s => '- ' + s.q + ' x ' + s.it.nombre + (s.it.sku ? ' [' + s.it.sku + ']' : '')).join('\n') + '\nTotal aprox.: ' + pcMoney(total));
+    }
+    function imprimirComprasNom() {
+      const sel = cnSeleccion();
+      if (!sel.length) { mostrarBanner('No hay productos marcados.', 3000); return; }
+      const w = window.open('', '_blank');
+      if (!w) return;
+      let total = 0;
+      const filas = sel.map(s => { total += s.t; return '<tr><td>&#9744;</td><td>' + escaparHtml(s.it.nombre) + (s.it.sku ? ' <small>[' + escaparHtml(s.it.sku) + ']</small>' : '') + '</td><td>' + s.it.stock + '</td><td>' + s.it.minimo + '</td><td>' + s.it.normal + '</td><td><b>' + s.q + '</b></td><td>' + pcMoney(s.t) + '</td></tr>'; }).join('');
+      w.document.write('<html><head><meta charset="UTF-8"><title>Sugerencias de compras</title><style>body{font-family:Arial,sans-serif;padding:20px}table{border-collapse:collapse;width:100%}td,th{border-bottom:1px solid #999;padding:6px 8px;text-align:left;font-size:14px}th{background:#eee}</style></head><body><h2>Sugerencias de compras - ' +
+        new Date().toLocaleDateString('es-ES') + '</h2><p><b>Total: ' + pcMoney(total) + '</b></p><table><tr><th></th><th>Nombre</th><th>Actual</th><th>Mínimo</th><th>Normal</th><th>Sugerencia</th><th>Total</th></tr>' + filas +
+        '</table><script>window.onload=function(){window.print()}<\/script></body></html>');
+      w.document.close();
+    }
     function renderComprasProv() {
+      if (comprasDatos && comprasDatos.modo === 'nominal') { renderComprasNominal(); return; }
       const items = (comprasDatos && comprasDatos.items) || [];
       if (!items.length) { pcById('cpLista').innerHTML = '<div class="np-vacio">Nada que reponer con estos datos.</div>'; return; }
       const nombresProv = (comprasDatos.proveedores || []).map(p => p.nombre);
@@ -9122,11 +9416,11 @@ TT.iniciar('pc');
       c.innerHTML = '<p style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin-bottom:10px;">Toma el stock mínimo que ya tienes configurado en AxisPOS para cada producto. Prioridad: 1) el mínimo que fijes aquí en la app (Lista de compras), 2) el de AxisPOS, 3) el mínimo general. Si un producto tiene 0 en AxisPOS, se usa el general.</p>' +
         (d.axisActivo === false ? '<div style="' + PC_CAJA + 'color:var(--tt-fca5a5,#fca5a5);">AxisPOS no está activado en la configuración del servidor.</div>' : '') +
         '<label style="font-size:13px; display:flex; align-items:center; gap:8px; margin-bottom:10px;"><input type="checkbox" id="maUsar"' + (d.usar !== false ? ' checked' : '') + '> Usar los mínimos de AxisPOS</label>' +
-        '<label style="font-size:13px; display:block; margin-bottom:4px;">Columna del mínimo en AxisPOS (déjala vacía para que se detecte sola):</label>' +
+        '<label style="font-size:13px; display:block; margin-bottom:4px;">Columna del mínimo en AxisPOS (columna o tabla.columna, ej. goods.MinQtty; vacía = se detecta sola):</label>' +
         '<input id="maCol" class="np-input" value="' + escaparHtml(d.columna || '') + '" placeholder="se detecta sola">' +
         '<label style="font-size:13px; display:block; margin:8px 0 4px;">Cantidad nominal / máxima (cuánto cabe en el piso o estante), como tabla.columna, ej. store.MaxQtty o goods.MaxStock. Vacía = se detecta sola. La usa "Qué bajar del almacén" con 0 días a cubrir y como tope:</label>' +
         '<input id="maMax" class="np-input" value="' + escaparHtml(d.maxRef || '') + '" placeholder="se detecta sola">' +
-        '<button style="' + PC_BTN + '" onclick="probarMaxAxis()">Detectar y probar nominal / máximo</button><div id="maMaxMsg" style="font-size:12px; margin:6px 0 8px;"></div>' +
+        '<button style="' + PC_BTN + '" onclick="probarMaxAxis()">Detectar y probar nominal / máximo</button> <button style="' + PC_BTN + '" onclick="verColumnasAxis()">Ver columnas de AxisPOS</button><div id="maMaxMsg" style="font-size:12px; margin:6px 0 8px;"></div><div id="maCols" style="margin:0 0 8px;"></div>' +
         '<div style="' + PC_CAJA + '">Productos con mínimo en AxisPOS: <b>' + (d.n || 0) + '</b>' + (d.ultima ? '<br>Última lectura: ' + escaparHtml(d.ultima) : '') +
         (d.error ? '<br><span style="color:var(--tt-fca5a5,#fca5a5);">' + escaparHtml(d.error) + '</span>' : '') + '</div>' +
         '<button style="' + PC_BTN + '" onclick="guardarMinAxis(false)">Guardar</button> <button style="' + PC_BTN + '" onclick="guardarMinAxis(true)">Guardar y leer de AxisPOS ahora</button><div id="maMsg" style="font-size:12px; margin-top:8px;"></div>';
@@ -9139,6 +9433,29 @@ TT.iniciar('pc');
       msg.style.color = 'var(--tt-86efac,#86efac)';
       msg.textContent = cargar ? ('Listo: ' + r.d.n + ' productos con mínimo en AxisPOS (columna ' + r.d.columna + ').') : 'Guardado.';
       if (cargar) pcById('maCol').value = r.d.columna || pcById('maCol').value;
+    }
+
+    // Muestra las columnas de AxisPOS que parecen de minimo / normal / stock para poder elegirlas con un toque.
+    async function verColumnasAxis() {
+      const cont = pcById('maCols');
+      cont.innerHTML = '<div style="font-size:12px;">Leyendo AxisPOS...</div>';
+      const r = await pcApi('/api/minimos/axis/columnas');
+      if (!r.ok) { cont.innerHTML = '<div style="font-size:12px; color:var(--tt-fca5a5,#fca5a5);">' + escaparHtml((r.d && r.d.error) || 'No se pudo leer.') + '</div>'; return; }
+      cont.innerHTML = (r.d.tablas || []).map(function (t) {
+        return '<div style="font-size:12px; font-weight:700; margin:8px 0 4px;">Tabla ' + escaparHtml(t.tabla) + '</div>' +
+          ((t.columnas || []).length ? t.columnas.map(function (c) {
+            const ref = t.tabla + '.' + c.campo;
+            return '<div style="display:flex; justify-content:space-between; align-items:center; gap:6px; border-top:1px solid var(--tt-334155,#334155); padding:4px 0; font-size:12px;"><span>' + escaparHtml(c.campo) + ' <span style="color:var(--tt-94a3b8,#94a3b8);">(' + (c.conValor === null || c.conValor === undefined ? '?' : c.conValor) + ' con valor)</span></span>' +
+              '<span><button style="' + PC_BTN + '" data-ref="' + escaparHtml(ref) + '" data-cual="min" onclick="usarColumnaAxis(this)">mínimo</button><button style="' + PC_BTN + '" data-ref="' + escaparHtml(ref) + '" data-cual="normal" onclick="usarColumnaAxis(this)">normal</button></span></div>';
+          }).join('') : '<div style="font-size:12px; color:var(--tt-94a3b8,#94a3b8);">Sin columnas parecidas.</div>');
+      }).join('');
+    }
+    function usarColumnaAxis(btn) {
+      const ref = btn.getAttribute('data-ref');
+      if (btn.getAttribute('data-cual') === 'min') pcById('maCol').value = ref; else pcById('maMax').value = ref;
+      const m = pcById('maMaxMsg');
+      m.style.color = 'var(--tt-86efac,#86efac)';
+      m.textContent = (btn.getAttribute('data-cual') === 'min' ? 'Mínimo' : 'Normal') + ' = ' + ref + '. Pulsa Guardar.';
     }
 
     async function probarMaxAxis() {
@@ -17572,6 +17889,7 @@ function Calcular-Reposicion([int]$piso, $origenes, [int]$dias, [int]$cobertura)
         if ($modoNominal) { throw $_ }
     }
     $sinNominal = 0
+    $sinMinimo = 0
 
     # 3) Minimos explicitos (propios o de AxisPOS) del catalogo
     $catPorSku = @{}
@@ -17608,7 +17926,11 @@ function Calcular-Reposicion([int]$piso, $origenes, [int]$dias, [int]$cobertura)
         $maxP = 0.0
         if ($maxMapa.ContainsKey([string]$p.sku)) { $maxP = [double]$maxMapa[[string]$p.sku] }
         if ($modoNominal) {
+            # Igual que "Sugerencias de compras" de AxisPOS: solo entra lo que esta POR DEBAJO de su minimo
+            # y se sugiere llegar a la cantidad normal. Sin minimo (propio o de AxisPOS) o sin normal no entra.
+            if ($minimo -le 0) { $sinMinimo++; continue }
             if ($maxP -le 0) { $sinNominal++; continue }
+            if ($pisoStock -ge $minimo) { continue }
             $demanda = $maxP
             $objetivo = $maxP
         } else {
@@ -17651,6 +17973,7 @@ function Calcular-Reposicion([int]$piso, $origenes, [int]$dias, [int]$cobertura)
             minimo = $minimo
             maximo = $maxP
             razon = $razon
+            falta = [double][math]::Ceiling($falta)
             clase = ""
             bajar = [double]$sug
             almacenes = @($detalle.ToArray())
@@ -17691,6 +18014,7 @@ function Calcular-Reposicion([int]$piso, $origenes, [int]$dias, [int]$cobertura)
         unidadesVendidas = [math]::Round($totalV, 2)
         sinMovimiento = $sinMov.Count
         sinNominal = $sinNominal
+        sinMinimo = $sinMinimo
         pisoNombre = (& $nombreDe $piso)
         porAlmacen = $porAlmLista
     }
@@ -17698,7 +18022,40 @@ function Calcular-Reposicion([int]$piso, $origenes, [int]$dias, [int]$cobertura)
     $menosVendidos = @($ordV | Where-Object { ([double]$_.piso + [double]$_.origen) -ge 1 } | Sort-Object -Property @{ Expression = { [double]$_.vendido } } | Select-Object -First 10)
     $sinMovLista = @($sinMov | Sort-Object -Property @{ Expression = { [double]$_.piso + [double]$_.origen } } -Descending | Select-Object -First 40)
     $orden = @($items | Sort-Object @{ Expression = { if ($null -eq $_.diasPiso) { 99999 } else { [double]$_.diasPiso } } }, @{ Expression = { [double]$_.vendido }; Descending = $true } | Select-Object -First 200)
+    if ($modoNominal) { $orden = @($items | Sort-Object -Property @{ Expression = { [string]$_.nombre } } | Select-Object -First 400) }
     return @{ items = $orden; resumen = $resumen; masVendidos = $masVendidos; menosVendidos = $menosVendidos; sinMovimiento = $sinMovLista; modo = $(if ($modoNominal) { "nominal" } else { "ventas" }); avisoMax = $avisoMax }
+}
+
+# Lista de compras con 0 dias a cubrir: igual que "Sugerencias de compras" de AxisPOS.
+# Solo productos con stock ACTUAL por debajo de su MINIMO (propio o de AxisPOS) y con cantidad NORMAL puesta;
+# la sugerencia es NORMAL - ACTUAL.
+function Calcular-ComprasNominal {
+    if (-not $global:configAxis.activo) { throw "AxisPOS no esta activo (config_axis.json)." }
+    $pisoN = 0
+    try { $pisoN = [int]$global:configApp.reposPiso } catch {}
+    if ($pisoN -le 0) { foreach ($aN in @($global:configAxis.almacenes)) { $nN = 0; if ([int]::TryParse([string]$aN, [ref]$nN)) { $pisoN = $nN; break } } }
+    $mapaN = Leer-MaximosAxis $pisoN
+    $filasN = New-Object System.Collections.ArrayList
+    $sinNormalN = 0
+    foreach ($p in $global:catalogo) {
+        if ($null -eq $p.stock) { continue }
+        $skN = [string]$p.sku
+        if (-not $skN) { continue }
+        if ((Origen-Minimo $p) -eq "general") { continue }
+        $minN = [double](Minimo-Efectivo $p)
+        if ($minN -le 0) { continue }
+        $stockN = [double]$p.stock
+        if ($stockN -ge $minN) { continue }
+        if (-not $mapaN.ContainsKey($skN)) { $sinNormalN++; continue }
+        $normN = [double]$mapaN[$skN]
+        $sugN = [math]::Ceiling($normN - $stockN)
+        if ($sugN -lt 1) { continue }
+        $provN = ""
+        if ($global:proveedores.porSku.ContainsKey($skN)) { $provN = [string]$global:proveedores.porSku[$skN] }
+        [void]$filasN.Add([pscustomobject]@{ sku = $skN; nombre = [string]$p.nombre; stock = $stockN; minimo = $minN; normal = $normN; origenMin = (Origen-Minimo $p); velDia = 0; diasRestantes = $null; sugerido = $sugN; costo = (Obtener-Costo $skN); proveedor = $provN })
+    }
+    $ordN = @($filasN | Sort-Object -Property @{ Expression = { [string]$_.nombre } } | Select-Object -First 600)
+    return @{ items = $ordN; sinNormal = $sinNormalN }
 }
 
 # ------------------------------------------------------------------
@@ -17876,12 +18233,12 @@ while ($listener.IsListening) {
         $vendHdr = ""
         try { $vendHdr = [uri]::UnescapeDataString([string]$request.Headers["X-Vendedor"]) } catch { $vendHdr = "" }
         $vendHdr = $vendHdr.Trim()
-        $esLocalGate = [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)
+        $esLocalGate = (Es-PeticionPC $request)
         if ($permReq -and $vendHdr -and (-not $esLocalGate) -and (-not (Tiene-Permiso $vendHdr $permReq))) {
             Enviar-Json $context @{ ok = $false; error = "Tu usuario no tiene permiso para hacer esto. Pidele al encargado que lo active desde la PC."; sinPermiso = $true; permiso = $permReq } 403
 
         } elseif ($method -eq "GET" -and ($path -eq "/" -or $path -eq "/pc")) {
-            Enviar-Respuesta -Context $context -Body (Inyectar-Guardian $htmlPC)
+            Enviar-Respuesta -Context $context -Body (Inyectar-Admin (Inyectar-Guardian $htmlPC))
 
         } elseif ($method -eq "GET" -and $path -eq "/vendedor") {
             Enviar-Respuesta -Context $context -Body (Inyectar-Guardian $htmlVendedor)
@@ -17896,7 +18253,7 @@ while ($listener.IsListening) {
         } elseif ($method -eq "GET" -and $path -eq "/api/caja-axis") {
             # Caja de AxisPOS por usuario o de todos, para el arqueo (Contador de Dinero). Si hay clave de administrador, se pide.
             try {
-                $esLocalCaja = [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)
+                $esLocalCaja = (Es-PeticionPC $request)
                 $ipCaja = [string]$request.RemoteEndPoint.Address
                 $claveCaja = ""
                 try { $claveCaja = [string]$request.Headers["X-Clave-Caja"] } catch { $claveCaja = "" }
@@ -17961,7 +18318,7 @@ while ($listener.IsListening) {
             }
 
         } elseif ($method -eq "GET" -and $path -eq "/api/cuadre") {
-            if (-not [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)) {
+            if (-not (Es-PeticionPC $request)) {
                 Enviar-Json $context @{ ok = $false; error = "El cuadre solo se consulta desde la PC." } 403
             } else {
                 $diasC = 1
@@ -17978,7 +18335,7 @@ while ($listener.IsListening) {
             }
 
         } elseif ($method -eq "GET" -and $path -eq "/api/cierre") {
-            if (-not [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)) {
+            if (-not (Es-PeticionPC $request)) {
                 Enviar-Json $context @{ ok = $false; error = "El cierre solo se consulta desde la PC." } 403
             } else {
                 try {
@@ -18060,7 +18417,7 @@ while ($listener.IsListening) {
             }
             Enviar-Json $context @{ ok = $true; qrs = @($listaQrPago) } 200 4
 
-        } elseif ($path -like "/api/recibo/*" -and -not [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)) {
+        } elseif ($path -like "/api/recibo/*" -and -not (Es-PeticionPC $request)) {
             Enviar-Json $context @{ ok = $false; error = "El comprobante solo se edita desde la PC." } 403
 
         } elseif ($method -eq "GET" -and $path -eq "/api/recibo/config") {
@@ -18543,7 +18900,7 @@ while ($listener.IsListening) {
             $data = $bodyText | ConvertFrom-Json
             $vend = if ($data -and $data.vendedor) { ([string]$data.vendedor).Trim() } else { "" }
             $pinNuevo = if ($data -and $data.pin) { [string]$data.pin } else { "" }
-            $esLocalPin = [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)
+            $esLocalPin = (Es-PeticionPC $request)
             $clave = $vend.ToLowerInvariant()
             $yaExiste = $vend -and $global:pinesVendedores.ContainsKey($clave)
             if (-not $vend) {
@@ -18582,7 +18939,7 @@ while ($listener.IsListening) {
             $clienteOrigen = if ($data -and $data.cliente) { ([string]$data.cliente).Trim() } else { "" }
             # La nota solo la puede poner la propia PC (un cliente no puede mandar mensajes a los vendedores).
             $notaAsig = ""
-            if ($data -and $data.nota -and [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)) { $notaAsig = Limpiar-TextoMensaje $data.nota }
+            if ($data -and $data.nota -and (Es-PeticionPC $request)) { $notaAsig = Limpiar-TextoMensaje $data.nota }
             $claveEnvioAsig = if ($data -and $data.claveEnvio) { "asig|" + [string]$data.claveEnvio } else { "" }
             $minVigAsig = 60
             try { $mvA = [int]$data.minutosVigencia; if ($mvA -ge 5 -and $mvA -le 1440) { $minVigAsig = $mvA } } catch {}
@@ -18873,7 +19230,16 @@ while ($listener.IsListening) {
         } elseif ($method -eq "GET" -and $path -eq "/api/compras/sugerencias" -and (Es-PeticionPC $request)) {
             # Que comprar: productos que se acaban (por minimo o por ritmo de ventas), con cantidad sugerida.
             $diasC = 30; try { $dd = [int]$request.QueryString["dias"]; if ($dd -ge 7 -and $dd -le 365) { $diasC = $dd } } catch {}
-            $cobC = 15; try { $cc = [int]$request.QueryString["cobertura"]; if ($cc -ge 1 -and $cc -le 120) { $cobC = $cc } } catch {}
+            $cobC = 15; try { $cc = [int]$request.QueryString["cobertura"]; if ($cc -ge 0 -and $cc -le 120) { $cobC = $cc } } catch {}
+            if ($cobC -eq 0) {
+                # 0 dias a cubrir = como "Sugerencias de compras" de AxisPOS (solo bajo el minimo, hasta el normal)
+                try {
+                    $resN = Calcular-ComprasNominal
+                    Enviar-Json $context @{ ok = $true; modo = "nominal"; fuente = "axispos"; dias = $diasC; cobertura = 0; items = @($resN.items); sinNormal = [int]$resN.sinNormal; proveedores = @($global:proveedores.lista) } 200 5
+                } catch {
+                    Enviar-Json $context @{ ok = $false; error = [string]$_.Exception.Message } 400
+                }
+            } else {
             $vC = Obtener-VentasProductos $diasC
             $filasC = New-Object System.Collections.ArrayList
             foreach ($p in $global:catalogo) {
@@ -18898,6 +19264,7 @@ while ($listener.IsListening) {
             }
             $ordC = @($filasC | Sort-Object -Property @{ Expression = { if ($null -eq $_.diasRestantes) { 99999 } else { [double]$_.diasRestantes } } }, @{ Expression = { [double]$_.stock } } | Select-Object -First 400)
             Enviar-Json $context @{ ok = $true; fuente = [string]$vC.fuente; dias = $diasC; cobertura = $cobC; items = $ordC; proveedores = @($global:proveedores.lista) } 200 5
+            }
 
         } elseif ($method -eq "GET" -and $path -eq "/api/reportes/estatico") {
             # Stock estatico: hay existencias pero no se vendio nada en N dias. Capital parado y sugerencia de oferta.
@@ -18932,6 +19299,51 @@ while ($listener.IsListening) {
                 Enviar-Json $context @{ ok = $true; fuente = [string]$vE.fuente; dias = $diasE; total = $filasE.Count; capitalTotal = [math]::Round($capTotal, 2); sinCosto = $sinCosto; items = $ordE } 200 5
             }
 
+        } elseif ($method -eq "GET" -and $path -eq "/api/minimos/axis/columnas") {
+            # Muestra las columnas de AxisPOS que parecen de minimo / normal / stock, con cuantos productos tienen valor.
+            if (-not (Es-PeticionPC $request)) {
+                Enviar-Json $context @{ ok = $false; error = "Solo desde la PC." } 403
+            } elseif (-not $global:configAxis.activo) {
+                Enviar-Json $context @{ ok = $false; error = "AxisPOS no esta activado en la configuracion." } 400
+            } else {
+                try {
+                    $tablasC = New-Object System.Collections.ArrayList
+                    foreach ($tablaC in @('goods', 'store')) {
+                        $textoC = Ejecutar-ConsultaAxis ("SHOW COLUMNS FROM " + $tablaC)
+                        $cand = New-Object System.Collections.ArrayList
+                        foreach ($lineaC in ($textoC -split "`n")) {
+                            $fC = ($lineaC.TrimEnd("`r")) -split "`t"
+                            if ($fC.Count -lt 2) { continue }
+                            $nomC = $fC[0].Trim(); $tipoC = $fC[1].Trim()
+                            if (($nomC -match '^[A-Za-z][A-Za-z0-9_]{0,40}$') -and ($nomC -match '(?i)(min|max|norm|nomin|stock|qtty|qty|rest|limit|count|remain|quant)') -and ($tipoC -match '(?i)(int|decimal|double|float|numeric)')) {
+                                [void]$cand.Add([pscustomobject]@{ campo = $nomC; tipo = $tipoC; conValor = $null })
+                            }
+                        }
+                        $primeras = @($cand | Select-Object -First 30)
+                        if ($primeras.Count -gt 0) {
+                            try {
+                                $sumasC = ($primeras | ForEach-Object { "SUM(IF(t." + $_.campo + " > 0, 1, 0))" }) -join ", "
+                                $filtroC = ""
+                                if ($tablaC -eq 'goods') { $filtroC = " WHERE t.Deleted=0" }
+                                $tc = Ejecutar-ConsultaAxis ("SELECT " + $sumasC + " FROM " + $tablaC + " t" + $filtroC)
+                                $primeraLinea = (($tc -split "`n") | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -First 1)
+                                if ($primeraLinea) {
+                                    $vals = $primeraLinea.TrimEnd("`r") -split "`t"
+                                    for ($i = 0; $i -lt $primeras.Count -and $i -lt $vals.Count; $i++) {
+                                        $nv = 0; if ([int]::TryParse(([string]$vals[$i]).Trim(), [ref]$nv)) { $primeras[$i].conValor = $nv } else { $primeras[$i].conValor = 0 }
+                                    }
+                                }
+                            } catch {}
+                        }
+                        $ordC = @($primeras | Sort-Object -Property @{ Expression = { if ($null -eq $_.conValor) { -1 } else { [int]$_.conValor } } } -Descending)
+                        [void]$tablasC.Add([pscustomobject]@{ tabla = $tablaC; columnas = $ordC })
+                    }
+                    Enviar-Json $context @{ ok = $true; tablas = @($tablasC) } 200 6
+                } catch {
+                    Enviar-Json $context @{ ok = $false; error = "$($_.Exception.Message)" } 400
+                }
+            }
+
         } elseif ($method -eq "GET" -and $path -eq "/api/minimos/axis") {
             if (-not (Es-PeticionPC $request)) {
                 Enviar-Json $context @{ ok = $false; error = "Solo desde la PC." } 403
@@ -18948,7 +19360,7 @@ while ($listener.IsListening) {
                 $errMa = ""
                 if ($dataMa -and (-not $soloCargar)) {
                     $colMa = ([string]$dataMa.columna).Trim()
-                    if ($colMa -and ($colMa -notmatch '^[A-Za-z][A-Za-z0-9_]{0,40}$')) { $errMa = "Nombre de columna no valido (solo letras, numeros y guion bajo)." }
+                    if ($colMa -and ($colMa -notmatch '^(?:(goods|store)\.)?[A-Za-z][A-Za-z0-9_]{0,40}$')) { $errMa = "Nombre de columna no valido (columna o tabla.columna, solo letras, numeros y guion bajo)." }
                     else {
                         if ($colMa -ne [string]$global:minAxis.columna) { $global:minAxis.datos = @{}; $global:minAxis.ultima = "" }
                         $global:minAxis.columna = $colMa
@@ -19068,7 +19480,7 @@ while ($listener.IsListening) {
             }
 
         } elseif ($method -eq "GET" -and $path -eq "/api/respaldo") {
-            if (-not [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)) {
+            if (-not (Es-PeticionPC $request)) {
                 Enviar-Json $context @{ ok = $false; error = "Solo desde la PC." } 403
             } else {
                 $listaResp = @()
@@ -19086,7 +19498,7 @@ while ($listener.IsListening) {
             $reader.Close()
             $data = $null
             if ($bodyText -and $bodyText.Trim().Length -gt 0) { $data = $bodyText | ConvertFrom-Json }
-            if (-not [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)) {
+            if (-not (Es-PeticionPC $request)) {
                 Enviar-Json $context @{ ok = $false; error = "Solo desde la PC." } 403
             } elseif (-not $data) {
                 Enviar-Json $context @{ ok = $false; error = "Faltan datos." } 400
@@ -19117,7 +19529,7 @@ while ($listener.IsListening) {
             }
 
         } elseif ($method -eq "POST" -and $path -eq "/api/respaldo/ahora") {
-            if (-not [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)) {
+            if (-not (Es-PeticionPC $request)) {
                 Enviar-Json $context @{ ok = $false; error = "Solo desde la PC." } 403
             } else {
                 $resR = @(Crear-Respaldo "manual") | Select-Object -Last 1
@@ -19128,7 +19540,7 @@ while ($listener.IsListening) {
         } elseif ($method -eq "GET" -and $path -eq "/api/pedidos/asignados/mios") {
             # Solo la PC: lista de los pedidos que armo y envio a vendedores (con productos), para poder
             # ver en que estado estan, editarlos o retirarlos.
-            if (-not [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)) {
+            if (-not (Es-PeticionPC $request)) {
                 Enviar-Json $context @{ ok = $false; error = "Solo se puede consultar desde la PC." } 403
             } else {
                 $ahoraMios = Get-Date
@@ -19149,7 +19561,7 @@ while ($listener.IsListening) {
             # mientras nadie lo haya tomado ni agregado a su pedido. Los moviles que ya lo tienen en
             # pantalla lo actualizan solos (ver "actualizados" en GET /api/pedidos/asignados).
             $idAsig = [int]$Matches[1]
-            $esLocalEdA = [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)
+            $esLocalEdA = (Es-PeticionPC $request)
             $reader = New-Object System.IO.StreamReader($request.InputStream, [System.Text.Encoding]::UTF8)
             $bodyText = $reader.ReadToEnd()
             $reader.Close()
@@ -19323,7 +19735,7 @@ while ($listener.IsListening) {
             }
 
             # Permisos del vendedor (los define la PC). Desde la propia PC no se limita nada.
-            $esLocalCrear = [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)
+            $esLocalCrear = (Es-PeticionPC $request)
             if ($continuarPedido -and (-not $esAutoCli) -and (-not $esLocalCrear) -and $data.vendedor) {
                 $vendCrear = [string]$data.vendedor
                 $noPermitido = ""
@@ -19564,7 +19976,7 @@ while ($listener.IsListening) {
                 # de pago propio; en cualquier otro caso cobro el VENDEDOR desde su movil
                 # (y hace falta su PIN, si tiene uno puesto) y el pedido queda "por revisar"
                 # en el Panel hasta que la caja lo confirme.
-                $esLocal = [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)
+                $esLocal = (Es-PeticionPC $request)
                 $cobroCaja = $esLocal -and -not ($data -and $data.metodoPago)
                 if ((-not $cobroCaja) -and -not (Pin-Valido $pedido.vendedor $data.pin)) {
                     Enviar-Respuesta -Context $context -Body (@{ ok = $false; error = "PIN incorrecto."; requierePin = $true } | ConvertTo-Json) -ContentType "application/json; charset=utf-8" -StatusCode 403
@@ -19717,11 +20129,47 @@ while ($listener.IsListening) {
                 }
             }
         } elseif ($method -eq "GET" -and $path -eq "/etiquetas") {
-            Enviar-Respuesta -Context $context -Body (Inyectar-Guardian $htmlEtiquetas)
+            Enviar-Respuesta -Context $context -Body (Inyectar-Admin (Inyectar-Guardian $htmlEtiquetas))
 
         } elseif ($method -eq "GET" -and $path -eq "/api/catalogo/nuevos") {
             # Productos que aparecieron por primera vez en el ultimo Excel cargado (para sus etiquetas).
             Enviar-Json $context @{ ok = $true; fecha = [string]$global:productosNuevos.fecha; skus = @($global:productosNuevos.skus) } 200 4
+
+        } elseif ($method -eq "POST" -and $path -eq "/api/admin/entrar") {
+            $dAdm = Leer-CuerpoJson $request
+            $ipAdm = [string]$request.RemoteEndPoint.Address
+            $localAdm = [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)
+            $esperaAdm = 0
+            if (-not $localAdm) { $esperaAdm = Pos-Bloqueado $ipAdm }
+            if ($localAdm) {
+                Enviar-Json $context @{ ok = $true; local = $true } 200
+            } elseif ($esperaAdm -gt 0) {
+                Enviar-Json $context @{ ok = $false; error = ("Demasiados intentos. Espera " + $esperaAdm + " segundos.") } 429
+            } elseif ([string]::IsNullOrEmpty($global:posClaveHash)) {
+                Enviar-Json $context @{ ok = $false; error = "Primero hay que poner la clave de administrador en la PC (menu, PIN de vendedores)."; sinClave = $true } 409
+            } elseif ((-not $dAdm) -or ((Pos-Hash ([string]$dAdm.clave).Trim()) -ne $global:posClaveHash)) {
+                Pos-Fallo $ipAdm
+                Enviar-Json $context @{ ok = $false; error = "Clave de administrador incorrecta." } 403
+            } else {
+                if ($global:posIntentos.ContainsKey($ipAdm)) { $global:posIntentos.Remove($ipAdm) }
+                $tokAdm = [guid]::NewGuid().ToString("N") + [guid]::NewGuid().ToString("N")
+                $global:adminTokens[(Pos-Hash $tokAdm)] = (Get-Date).AddHours(12).ToString("yyyy-MM-dd HH:mm:ss")
+                Guardar-AdminTokens
+                Registrar-Auditoria "Administrador" "acceso_remoto" ("Entro al Panel de la PC desde el movil " + $ipAdm) $null $null $true ("movil " + $ipAdm)
+                Enviar-Json $context @{ ok = $true; token = $tokAdm } 200
+            }
+
+        } elseif ($method -eq "POST" -and $path -eq "/api/admin/salir") {
+            $tokSal = ""
+            try { $tokSal = [string]$request.Headers["X-Admin-Token"] } catch { $tokSal = "" }
+            if ($tokSal) {
+                $hSal = Pos-Hash $tokSal
+                if ($global:adminTokens.ContainsKey($hSal)) { [void]$global:adminTokens.Remove($hSal); Guardar-AdminTokens }
+            }
+            Enviar-Json $context @{ ok = $true } 200
+
+        } elseif ($method -eq "GET" -and $path -eq "/api/admin/estado") {
+            Enviar-Json $context @{ ok = $true; remoto = (-not [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)); activo = [bool](Es-PeticionPC $request); claveDefinida = (-not [string]::IsNullOrEmpty($global:posClaveHash)) } 200
 
         } elseif ($method -eq "GET" -and $path -eq "/api/pos/estado") {
             # El movil pregunta si el administrador ya puso la clave y si este movil sigue con el modo activado.
@@ -19732,7 +20180,7 @@ while ($listener.IsListening) {
             # Solo desde la PC: pone, cambia o quita la clave de administrador del modo punto de venta.
             # Al cambiarla o quitarla, todos los moviles pierden el modo y deben volver a activarlo.
             $dPosC = Leer-CuerpoJson $request
-            $localPosC = [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)
+            $localPosC = (Es-PeticionPC $request)
             $clavePosN = if ($dPosC -and $dPosC.clave) { ([string]$dPosC.clave).Trim() } else { "" }
             if (-not $localPosC) {
                 Enviar-Json $context @{ ok = $false; error = "La clave de administrador solo se cambia desde la PC." } 403
@@ -19743,6 +20191,8 @@ while ($listener.IsListening) {
                 $global:posTokens = @{}
                 $global:posIntentos = @{}
                 Guardar-Pos
+                $global:adminTokens = @{}
+                Guardar-AdminTokens
                 Enviar-Json $context @{ ok = $true; definida = ($clavePosN -ne "") }
             }
 
@@ -19799,7 +20249,7 @@ while ($listener.IsListening) {
                 Enviar-Json $context @{ ok = $false; error = "PIN incorrecto."; requierePin = $true } 403
             } else {
                 try {
-                    $esLocalDevP = [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)
+                    $esLocalDevP = (Es-PeticionPC $request)
                     if ($esLocalDevP) {
                         # Desde la propia PC no hace falta pedir confirmacion.
                         $resPosD = Registrar-DevolucionPos $dPosD $vPosD
@@ -19838,7 +20288,7 @@ while ($listener.IsListening) {
 
         } elseif ($method -eq "POST" -and $path -eq "/api/pos/devolucion/decidir") {
             # Solo la PC: aprueba o rechaza una devolucion pedida desde un movil.
-            if (-not [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)) {
+            if (-not (Es-PeticionPC $request)) {
                 Enviar-Json $context @{ ok = $false; error = "Las devoluciones se confirman desde la PC." } 403
             } else {
                 $dDec = Leer-CuerpoJson $request
@@ -19916,7 +20366,7 @@ while ($listener.IsListening) {
 
         } elseif ($method -eq "GET" -and $path -eq "/api/mensajes/pc") {
             # Solo la PC: entrega (una sola vez) los mensajes de vendedores que todavia no se han mostrado.
-            if (-not [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)) {
+            if (-not (Es-PeticionPC $request)) {
                 Enviar-Json $context @{ ok = $false; error = "Solo desde la PC." } 403
             } else {
                 $pendMsg = @($global:mensajesPc | Where-Object { -not $_.leido })
@@ -19935,7 +20385,7 @@ while ($listener.IsListening) {
 
         } elseif ($method -eq "POST" -and $path -eq "/api/colores") {
             # Solo la PC: guarda los colores elegidos.
-            if (-not [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)) {
+            if (-not (Es-PeticionPC $request)) {
                 Enviar-Json $context @{ ok = $false; error = "Los colores se cambian desde la PC." } 403
             } else {
                 $dCol = Leer-CuerpoJson $request
@@ -19950,7 +20400,7 @@ while ($listener.IsListening) {
 
         } elseif ($method -eq "GET" -and $path -eq "/api/mensajes/historial") {
             # Solo la PC: todos los mensajes guardados (recibidos de vendedores/AxisPOS y enviados por la caja), del mas viejo al mas nuevo.
-            if (-not [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)) {
+            if (-not (Es-PeticionPC $request)) {
                 Enviar-Json $context @{ ok = $false; error = "Solo desde la PC." } 403
             } else {
                 $histMsg = @($global:mensajesPc | ForEach-Object { [pscustomobject]@{ id = $_.id; de = [string]$_.vendedor; texto = [string]$_.texto; hora = [string]$_.hora; enviado = ([string]$_.sentido -eq "enviado") } })
@@ -19963,7 +20413,7 @@ while ($listener.IsListening) {
             $txtMsgE = if ($dMsgE) { Limpiar-TextoMensaje $dMsgE.texto } else { "" }
             $paraTodosMsg = [bool]($dMsgE -and $dMsgE.todos)
             $destMsg = if ($dMsgE -and $dMsgE.vendedor) { ([string]$dMsgE.vendedor).Trim() } else { "" }
-            if (-not [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)) {
+            if (-not (Es-PeticionPC $request)) {
                 Enviar-Json $context @{ ok = $false; error = "Los mensajes a vendedores se envian desde la PC." } 403
             } elseif (-not $txtMsgE) {
                 Enviar-Json $context @{ ok = $false; error = "Escribe el mensaje." } 400
@@ -19998,7 +20448,7 @@ while ($listener.IsListening) {
         } elseif ($method -eq "POST" -and $path -eq "/api/permisos") {
             # Solo desde la PC. Guarda los permisos de un vendedor y le avisa al movil.
             $dataPerm = Leer-CuerpoJson $request
-            $esLocalPerm = [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)
+            $esLocalPerm = (Es-PeticionPC $request)
             $vendPerm = if ($dataPerm -and $dataPerm.vendedor) { ([string]$dataPerm.vendedor).Trim() } else { "" }
             $clavePerm = $vendPerm.ToLowerInvariant()
             if (-not $esLocalPerm) {
@@ -20051,7 +20501,7 @@ while ($listener.IsListening) {
         } elseif ($method -eq "POST" -and $path -eq "/api/minimos") {
             # Fija (o quita) el minimo de seguridad de un producto. Solo desde la PC.
             $dataMin = Leer-CuerpoJson $request
-            $esLocalMin = [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)
+            $esLocalMin = (Es-PeticionPC $request)
             $skuMin = if ($dataMin -and $dataMin.sku) { ([string]$dataMin.sku).Trim() } else { "" }
             if (-not $esLocalMin) {
                 Enviar-Json $context @{ ok = $false; error = "Solo se puede cambiar desde la PC." } 403
@@ -20071,7 +20521,7 @@ while ($listener.IsListening) {
         } elseif ($method -eq "POST" -and $path -eq "/api/reabastecer/imprimir") {
             # Imprime la lista de compras en el ticket de 32 columnas.
             $dataCmp = Leer-CuerpoJson $request
-            $esLocalCmp = [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)
+            $esLocalCmp = (Es-PeticionPC $request)
             if (-not $esLocalCmp) {
                 Enviar-Json $context @{ ok = $false; error = "Solo se puede imprimir desde la PC." } 403
             } elseif ((-not $dataCmp) -or @($dataCmp.items).Count -eq 0) {
@@ -20088,7 +20538,7 @@ while ($listener.IsListening) {
         } elseif ($method -eq "POST" -and $path -eq "/api/etiquetas/imprimir") {
             # Imprime etiquetas en la misma termica del ticket (RAW / ESC-POS). Solo desde la PC.
             $dataEt = Leer-CuerpoJson $request
-            $esLocalEt = [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)
+            $esLocalEt = (Es-PeticionPC $request)
             $totalEt = 0
             if ($dataEt) { foreach ($x in @($dataEt.items)) { try { $totalEt += [int]$x.copias } catch {} } }
             if (-not $esLocalEt) {
@@ -20110,7 +20560,7 @@ while ($listener.IsListening) {
         } elseif ($method -eq "POST" -and $path -eq "/api/etiquetas/raw") {
             # Recibe los bytes ESC/POS ya dibujados por la pagina de etiquetas y los manda
             # tal cual a la termica (RAW). Reemplaza al "ayudante de impresion" (puerto 8787).
-            $esLocalRaw = [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)
+            $esLocalRaw = (Es-PeticionPC $request)
             if (-not $esLocalRaw) {
                 Enviar-Json $context @{ ok = $false; error = "Solo se imprime desde la PC." } 403
             } else {
@@ -20137,7 +20587,7 @@ while ($listener.IsListening) {
 
         } elseif ($method -eq "POST" -and $path -eq "/api/red/fijar") {
             $dataRed = Leer-CuerpoJson $request
-            $esLocalRed = [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)
+            $esLocalRed = (Es-PeticionPC $request)
             if (-not $esLocalRed) {
                 Enviar-Json $context @{ ok = $false; error = "Solo se cambia desde la PC." } 403
             } else {
@@ -20152,7 +20602,7 @@ while ($listener.IsListening) {
             }
 
         } elseif ($method -eq "POST" -and $path -eq "/api/red/dhcp") {
-            $esLocalRed2 = [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)
+            $esLocalRed2 = (Es-PeticionPC $request)
             if (-not $esLocalRed2) {
                 Enviar-Json $context @{ ok = $false; error = "Solo se cambia desde la PC." } 403
             } else {
@@ -20171,7 +20621,7 @@ while ($listener.IsListening) {
             # Registra una devolucion / cambio / garantia, (opcional) reintegra el
             # stock y imprime el comprobante de 32 columnas. Solo desde la PC.
             $dataDev = Leer-CuerpoJson $request
-            $esLocalDev = [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)
+            $esLocalDev = (Es-PeticionPC $request)
             $itemsDev = @()
             if ($dataDev) {
                 foreach ($it in @($dataDev.items)) {
@@ -20261,7 +20711,7 @@ while ($listener.IsListening) {
             $data = $null
             if ($bodyText -and $bodyText.Trim().Length -gt 0) { $data = $bodyText | ConvertFrom-Json }
             $pedido = $global:pedidos | Where-Object { [int]$_.id -eq $id }
-            $esLocalCanc = [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)
+            $esLocalCanc = (Es-PeticionPC $request)
             if (-not $pedido) {
                 Enviar-Respuesta -Context $context -Body (@{ ok = $false; error = "Pedido no encontrado" } | ConvertTo-Json) -ContentType "application/json; charset=utf-8" -StatusCode 404
             } elseif ($pedido.estado -eq "cancelado") {
@@ -20300,7 +20750,7 @@ while ($listener.IsListening) {
             # desde la PC. Se suma al pedido, se recalcula el total y se le
             # avisa al vendedor en su movil (alerta + su lista se actualiza sola).
             $id = [int]$Matches[1]
-            $esLocalAgregar = [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)
+            $esLocalAgregar = (Es-PeticionPC $request)
             $reader = New-Object System.IO.StreamReader($request.InputStream, [System.Text.Encoding]::UTF8)
             $bodyText = $reader.ReadToEnd()
             $reader.Close()
@@ -20385,7 +20835,7 @@ while ($listener.IsListening) {
             $reader.Close()
             $data = $null
             if ($bodyText -and $bodyText.Trim().Length -gt 0) { try { $data = $bodyText | ConvertFrom-Json } catch {} }
-            if (-not [System.Net.IPAddress]::IsLoopback($request.RemoteEndPoint.Address)) {
+            if (-not (Es-PeticionPC $request)) {
                 Enviar-Json $context @{ ok = $false; error = "Solo se edita desde la PC." } 403
             } elseif (-not $data) {
                 Enviar-Json $context @{ ok = $false; error = "Faltan datos." } 400
