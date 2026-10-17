@@ -18,7 +18,13 @@ namespace TotoLic
         static long _expTicks;
         static string _dir = "";
         static string _cli = "";
+        static string _modo = "";          // "licencia", "prueba" o "vencida"
+        static string _motivo = "";        // por que esta cerrado (para mostrarlo en pantalla)
+        static string _licMsg = "";        // problema de la licencia escrita (si la hay)
+        static DateTime _trialWrote = DateTime.MinValue;
+        static readonly object _lk = new object();
         const string RegPath = @"SOFTWARE\TotoTools";
+        public const int TrialDays = 7;    // dias de prueba gratis
 
         public static void Init(string dir) { _dir = dir; }
         public static bool IsOpen() { return _ok && DateTime.Now.Ticks < Interlocked.Read(ref _expTicks); }
@@ -34,6 +40,9 @@ namespace TotoLic
             return (int)Math.Ceiling((new DateTime(t) - DateTime.Now).TotalDays);
         }
         static void Cerrar() { _ok = false; Interlocked.Exchange(ref _expTicks, 0); }
+        public static string Modo() { return _modo; }
+        public static string Motivo() { return _motivo; }
+        public static string Cliente() { return _cli; }
 
         // ---------- codigo de esta PC ----------
         static string MachineRaw()
@@ -156,28 +165,147 @@ namespace TotoLic
             try { string f = StampFile(); Directory.CreateDirectory(Path.GetDirectoryName(f)); File.WriteAllText(f, raw); } catch { }
         }
 
+        // ---------- prueba gratis (7 dias desde el primer arranque) ----------
+        // La fecha de inicio se guarda firmada en 3 sitios (registro, ProgramData y carpeta del programa).
+        // Si falta alguno se repone con los otros; si se borran los 3 a la vez, empieza otra vez (no es a prueba de todo).
+        static string TrialMac(string s) { return Mac("TRIAL|" + s); }
+        static string TrialFile() { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "TotoTools", "tp.dat"); }
+        static string TrialFile2() { return Path.Combine(_dir, ".tt_prueba"); }
+        static bool TrialParse(string raw, out long start, out long last)
+        {
+            start = 0; last = 0;
+            try
+            {
+                if (string.IsNullOrEmpty(raw)) return false;
+                string[] p = raw.Trim().Split(';');
+                if (p.Length != 3 || TrialMac(p[0] + ";" + p[1]) != p[2]) return false;
+                start = long.Parse(p[0]); last = long.Parse(p[1]);
+                return true;
+            }
+            catch { return false; }
+        }
+        static void TrialWrite(long start, long last)
+        {
+            string body = start.ToString() + ";" + last.ToString();
+            string raw = body + ";" + TrialMac(body);
+            try { using (RegistryKey k = Registry.LocalMachine.CreateSubKey(RegPath)) k.SetValue("tp", raw); } catch { }
+            try { string f = TrialFile(); Directory.CreateDirectory(Path.GetDirectoryName(f)); File.WriteAllText(f, raw); } catch { }
+            try
+            {
+                string f2 = TrialFile2();
+                if (File.Exists(f2)) File.SetAttributes(f2, FileAttributes.Normal);
+                File.WriteAllText(f2, raw);
+                File.SetAttributes(f2, FileAttributes.Hidden);
+            }
+            catch { }
+            _trialWrote = DateTime.Now;
+        }
+        // true = la prueba sigue abierta (end = cuando termina)
+        static bool Trial(out DateTime end, out string msg)
+        {
+            end = DateTime.MinValue; msg = "";
+            string[] raws = new string[3];
+            try { using (RegistryKey k = Registry.LocalMachine.OpenSubKey(RegPath)) { if (k != null) raws[0] = k.GetValue("tp") as string; } } catch { }
+            try { if (File.Exists(TrialFile())) raws[1] = File.ReadAllText(TrialFile()); } catch { }
+            try { if (File.Exists(TrialFile2())) raws[2] = File.ReadAllText(TrialFile2()); } catch { }
+            long now = DateTime.UtcNow.Ticks;
+            int found = 0, valid = 0;
+            long start = long.MaxValue, last = 0;
+            foreach (string r in raws)
+            {
+                if (string.IsNullOrEmpty(r)) continue;
+                found++;
+                long s, l;
+                if (TrialParse(r, out s, out l)) { valid++; if (s < start) start = s; if (l > last) last = l; }
+            }
+            if (found == 0)
+            {
+                start = now; last = now;
+                TrialWrite(start, last);
+            }
+            else if (valid == 0)
+            {
+                msg = "No se pudo comprobar la prueba gratis de esta PC.";
+                return false;
+            }
+            else
+            {
+                if (now < last - TimeSpan.FromHours(36).Ticks)
+                {
+                    msg = "El reloj de Windows fue atrasado. Corrige la fecha y hora.";
+                    return false;
+                }
+                bool faltan = (found < 3) || (valid < found);
+                if ((faltan && (DateTime.Now - _trialWrote).TotalSeconds > 60) || now > last + TimeSpan.FromMinutes(10).Ticks)
+                {
+                    if (now > last) last = now;
+                    TrialWrite(start, last);
+                }
+            }
+            end = new DateTime(start, DateTimeKind.Utc).AddDays(TrialDays).ToLocalTime();
+            if (DateTime.Now >= end) { msg = "La prueba gratis de " + TrialDays.ToString() + " dias termino."; return false; }
+            return true;
+        }
+
         // ---------- estado de la licencia ----------
+        // Orden: licencia valida > prueba gratis > bloqueado.
         public static bool Check(out string msg)
         {
+            lock (_lk) { return CheckLocked(out msg); }
+        }
+        static bool CheckLocked(out string msg)
+        {
             msg = "";
+            DateTime tEnd; string tMsg;
+            bool trialOk = Trial(out tEnd, out tMsg);
             string token = "";
             try { string f = Path.Combine(_dir, "licencia.lic"); if (File.Exists(f)) token = File.ReadAllText(f); } catch { }
-            if (token.Trim().Length == 0) { Cerrar(); msg = "No hay licencia activada en esta PC."; return false; }
-            DateTime exp; string cli, err;
-            if (!Leer(token, out exp, out cli, out err)) { Cerrar(); msg = err; return false; }
-            if (DateTime.Now >= exp) { Cerrar(); msg = "La licencia vencio el " + exp.ToString("dd/MM/yyyy") + "."; return false; }
-            long su; string sm;
-            StampGet(out su, out sm);
-            string e8 = exp.ToString("yyyyMMdd");
-            long now = DateTime.UtcNow.Ticks;
-            int cmp = string.CompareOrdinal(e8, sm);
-            if (cmp < 0) { Cerrar(); msg = "Esta licencia es anterior a otra ya usada en esta PC."; return false; }
-            if (cmp == 0 && now < su - TimeSpan.FromMinutes(30).Ticks) { Cerrar(); msg = "El reloj de Windows fue atrasado. Corrige la fecha y hora."; return false; }
-            if (cmp > 0 || now > su + TimeSpan.FromMinutes(1).Ticks) StampSet(now, e8);
-            _cli = cli;
-            Interlocked.Exchange(ref _expTicks, exp.Ticks);
-            _ok = true;
-            return true;
+            bool hayToken = token.Trim().Length > 0;
+            string lmsg = "";
+            bool licOk = false;
+            DateTime exp = DateTime.MinValue; string cli = "";
+            if (!hayToken) lmsg = "No hay licencia activada en esta PC.";
+            else
+            {
+                string err;
+                if (!Leer(token, out exp, out cli, out err)) lmsg = err;
+                else if (DateTime.Now >= exp) lmsg = "La licencia vencio el " + exp.ToString("dd/MM/yyyy") + ".";
+                else
+                {
+                    long su; string sm;
+                    StampGet(out su, out sm);
+                    string e8 = exp.ToString("yyyyMMdd");
+                    long now = DateTime.UtcNow.Ticks;
+                    int cmp = string.CompareOrdinal(e8, sm);
+                    if (cmp < 0) lmsg = "Esta licencia es anterior a otra ya usada en esta PC.";
+                    else if (cmp == 0 && now < su - TimeSpan.FromMinutes(30).Ticks) lmsg = "El reloj de Windows fue atrasado. Corrige la fecha y hora.";
+                    else
+                    {
+                        if (cmp > 0 || now > su + TimeSpan.FromMinutes(1).Ticks) StampSet(now, e8);
+                        licOk = true;
+                    }
+                }
+            }
+            _licMsg = lmsg;
+            if (licOk)
+            {
+                _cli = cli; _modo = "licencia"; _motivo = "";
+                Interlocked.Exchange(ref _expTicks, exp.Ticks);
+                _ok = true;
+                return true;
+            }
+            if (trialOk)
+            {
+                _cli = "Prueba gratis"; _modo = "prueba"; _motivo = hayToken ? lmsg : "";
+                Interlocked.Exchange(ref _expTicks, tEnd.Ticks);
+                _ok = true;
+                return true;
+            }
+            Cerrar();
+            _modo = "vencida";
+            msg = hayToken ? (lmsg + " " + tMsg).Trim() : tMsg;
+            _motivo = msg;
+            return false;
         }
         static bool Activate(string token, out string msg)
         {
@@ -189,10 +317,27 @@ namespace TotoLic
             string old = null;
             try { if (File.Exists(f)) old = File.ReadAllText(f); } catch { }
             File.WriteAllText(f, token.Trim());
-            if (Check(out msg)) return true;
+            string m1;
+            bool ok = Check(out m1);
+            if (ok && _modo == "licencia") return true;
+            msg = string.IsNullOrEmpty(_licMsg) ? m1 : _licMsg;
             try { if (old != null) File.WriteAllText(f, old); else File.Delete(f); } catch { }
             Check(out err);
             return false;
+        }
+        // Para activar desde la pagina /licencia del programa: devuelve "" si salio bien, o el motivo del error.
+        public static string Activar(string token)
+        {
+            try
+            {
+                lock (_lk)
+                {
+                    string m;
+                    if (Activate(token ?? "", out m)) return "";
+                    return string.IsNullOrEmpty(m) ? "No se pudo activar la licencia." : m;
+                }
+            }
+            catch (Exception ex) { return "No se pudo activar: " + ex.Message; }
         }
 
         static void CopyClip(string t)
@@ -213,15 +358,17 @@ namespace TotoLic
             while (true)
             {
                 string msg;
-                if (Check(out msg))
+                if (Check(out msg) && _modo == "licencia")
                 {
                     Console.WriteLine(" Licencia OK - " + _cli + " - vence el " + VenceTexto());
                     return;
                 }
+                if (_ok) return;
                 CopyClip(MachineCode());
                 Console.WriteLine();
                 Console.WriteLine("==================================================");
                 Console.WriteLine(" LICENCIA REQUERIDA - el sistema esta BLOQUEADO");
+                Console.WriteLine(" (tambien puedes activarla desde el navegador: pagina /licencia)");
                 Console.WriteLine(" " + msg);
                 Console.WriteLine("");
                 Console.WriteLine(" Codigo de esta PC:  " + MachineCode());
@@ -241,6 +388,21 @@ namespace TotoLic
             }
         }
 
+        static int _ask = 0;
+        // Pide la licencia por la consola (opcional: tambien se puede activar desde la pagina /licencia).
+        public static void StartAsk()
+        {
+            if (Interlocked.CompareExchange(ref _ask, 1, 0) != 0) return;
+            Thread t = new Thread(delegate() { try { AskLoop(); } finally { Interlocked.Exchange(ref _ask, 0); } });
+            t.IsBackground = true;
+            t.Start();
+        }
+        public static void Aviso()
+        {
+            if (_modo == "licencia") Console.WriteLine(" Licencia OK - " + _cli + " - vence el " + VenceTexto());
+            else if (_modo == "prueba") Console.WriteLine(" PRUEBA GRATIS: quedan " + Dias() + " dias (hasta el " + VenceTexto() + "). Activa la licencia desde la pantalla de Ayuda o la pagina /licencia.");
+        }
+
         public static void StartMonitor()
         {
             Thread t = new Thread(delegate()
@@ -250,10 +412,11 @@ namespace TotoLic
                 {
                     Thread.Sleep(20000);
                     string msg;
-                    if (!Check(out msg)) { AskLoop(); lastWarn = DateTime.MinValue; }
-                    else if (Dias() <= 5 && (DateTime.Now - lastWarn).TotalMinutes > 60)
+                    if (!Check(out msg)) { StartAsk(); lastWarn = DateTime.MinValue; }
+                    else if (((_modo == "licencia" && Dias() <= 5) || _modo == "prueba") && (DateTime.Now - lastWarn).TotalMinutes > 60)
                     {
-                        Console.WriteLine(" AVISO: la licencia vence el " + VenceTexto() + " (quedan " + Dias() + " dias).");
+                        if (_modo == "prueba") Console.WriteLine(" AVISO: prueba gratis, quedan " + Dias() + " dias (hasta el " + VenceTexto() + ").");
+                        else Console.WriteLine(" AVISO: la licencia vence el " + VenceTexto() + " (quedan " + Dias() + " dias).");
                         lastWarn = DateTime.Now;
                     }
                 }
@@ -332,7 +495,14 @@ namespace TotoLic
             try { Console.SetIn(new StreamReader(Console.OpenStandardInput(8192), Console.InputEncoding, false, 8192)); } catch { }
             string dir = AppDomain.CurrentDomain.BaseDirectory.TrimEnd('\\');
             Gate.Init(dir);
-            Gate.AskLoop();
+            string m0;
+            if (Gate.Check(out m0)) Gate.Aviso();
+            else
+            {
+                Console.WriteLine(" " + m0);
+                Console.WriteLine(" Codigo de esta PC: " + Gate.MachineCode());
+                Gate.StartAsk();
+            }
             Gate.StartMonitor();
             string ps, js;
             if (!Payload(out ps, out js)) { Console.WriteLine("Programa danado. Pide uno nuevo al proveedor."); Thread.Sleep(15000); return 2; }
