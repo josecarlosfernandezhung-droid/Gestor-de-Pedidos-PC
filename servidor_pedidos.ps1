@@ -7676,7 +7676,9 @@ TT.iniciar('pc');
       const factorTr = (p.metodoPago === 'Transferencia') ? 2 : 1;   // en transferencia todo sale al precio x2
       const items = (p.items || []).map(it => {
         const fotoIt = tieneFoto(it.sku) ? ('<img class="ped-miniatura" src="/foto/' + encodeURIComponent(it.sku) + '.jpg" onerror=\'fotoFallo(this,' + JSON.stringify(String(it.sku)) + ')\' onclick=\'verFotoProductoNP(' + JSON.stringify(it.sku) + ',' + JSON.stringify(it.nombre || '') + ')\'>') : '';
-        return '<li>' + fotoIt + '<span>' + it.cantidad + ' x ' + it.nombre + ' — $' + (it.precio * factorTr * it.cantidad).toFixed(2) + '</span></li>';
+        const skuIt = String(it.sku == null ? '' : it.sku).trim();
+        const skuTag = skuIt ? ('<b style="font-family:Consolas,monospace; font-size:1.05em; background:rgba(0,0,0,0.14); border:1px solid rgba(0,0,0,0.28); border-radius:6px; padding:0 6px; margin-right:6px; user-select:all;" title="SKU (toca dos veces para copiarlo)">' + escaparHtml(skuIt) + '</b>') : '';
+        return '<li>' + fotoIt + '<span>' + skuTag + it.cantidad + ' x ' + it.nombre + ' — $' + (it.precio * factorTr * it.cantidad).toFixed(2) + '</span></li>';
       }).join('');
 
       // Si este pedido venia de un "para todos" que alguien tomo, se deja
@@ -9141,6 +9143,7 @@ TT.iniciar('pc');
       resumenCompras();
     }
 
+    function comprasSeleccionadas() { return comprasItems.filter(i => i.incluir && i.comprar > 0); }
     function resumenCompras() {
       const s = comprasSeleccionadas();
       let u = 0; s.forEach(i => { u += Number(i.comprar) || 0; });
