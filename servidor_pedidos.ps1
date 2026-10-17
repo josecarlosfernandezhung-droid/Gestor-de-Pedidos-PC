@@ -6643,7 +6643,7 @@ TT.iniciar('pc');
       <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:6px;">
         <button class="btn" style="flex:1; width:auto;" onclick="imprimirCompras()">Imprimir ticket</button>
         <button class="btn" style="flex:1; width:auto; background:var(--tt-0369a1,#0369a1);" onclick="copiarCompras()">Copiar texto</button>
-        <button class="btn" style="flex:1; width:auto; background:var(--tt-475569,#475569);" onclick="hojaCompras()">Hoja / PDF</button>
+        <button class="btn" style="flex:1; width:auto; background:var(--tt-475569,#475569);" onclick="pdfCompras()" title="Descarga la lista en PDF">PDF</button>
       </div>
       <div id="comprasMsg" style="font-size:12px; color:var(--tt-86efac,#86efac); min-height:16px;"></div>
       <h3 style="font-size:13px; color:var(--tt-94a3b8,#94a3b8); margin:12px 0 6px; text-transform:uppercase; letter-spacing:0.5px;">Mínimo por producto</h3>
@@ -6666,6 +6666,7 @@ TT.iniciar('pc');
       <div style="display:flex; gap:8px; flex-wrap:wrap;">
         <button class="btn" id="reposBtnCalc" style="flex:1; width:auto;" onclick="calcularRepos(true)">Calcular</button>
         <button class="btn" style="flex:1; width:auto; background:var(--tt-0369a1,#0369a1);" onclick="copiarRepos()">Copiar lista</button>
+        <button class="btn" style="flex:1; width:auto; background:var(--tt-0369a1,#0369a1);" onclick="rpPdf()" title="Descarga la lista en PDF (hoja Carta horizontal)">PDF</button>
         <button class="btn" style="flex:1; width:auto; background:var(--tt-475569,#475569);" onclick="cerrarRepos()">Cerrar</button>
       </div>
       <div id="reposResultado" style="margin-top:12px;"></div>
@@ -8364,6 +8365,7 @@ TT.iniciar('pc');
     // ---- Que bajar del almacen (Alt+B): sugerencia segun las ventas recientes del piso ----
     let reposAlmacenes = [];
     let reposTexto = '';
+    let reposUltimo = null;
     function reposLeerGuardado() {
       try { return JSON.parse(localStorage.getItem('reposCfgV1') || '{}') || {}; } catch (e) { return {}; }
     }
@@ -8509,6 +8511,7 @@ TT.iniciar('pc');
       reposNomRefrescar();
     }
     function pintarResultadoRepos(d) {
+      reposUltimo = d;
       if (d.modo === 'nominal') { pintarReposNominal(d); return; }
       const out = document.getElementById('reposResultado');
       const items = d.items || [];
@@ -8571,6 +8574,64 @@ TT.iniciar('pc');
       document.body.appendChild(t); t.select();
       try { document.execCommand('copy'); } catch (e) {}
       document.body.removeChild(t);
+    }
+    function pdfFecha() { return new Date().toISOString().slice(0, 10); }
+    function pdfNeg() { return String(window.TT_NEGOCIO || ''); }
+    function rpPdf() {
+      if (!window.TTPdf) { mostrarBanner('No se pudo preparar el PDF.', 3000); return; }
+      const dd = reposUltimo;
+      if (!dd || !dd.items || !dd.items.length) { mostrarBanner('Primero calcula la lista.', 3000); return; }
+      const de = function (x) { return (x.almacenes || []).filter(function (a) { return a.bajar > 0; }).map(function (a) { return (a.nombre || ('Almacén ' + a.id)) + ': ' + a.bajar; }).join(', '); };
+      let d;
+      if (dd.modo === 'nominal') {
+        const sel = reposNomSel();
+        if (!sel.length) { mostrarBanner('No hay productos marcados.', 3000); return; }
+        let uni = 0; sel.forEach(function (x) { uni += Number(x.bajar) || 0; });
+        d = TTPdf.tabla({
+          titulo: 'Qué bajar del almacén', subtitulo: 'Hasta la cantidad normal · ' + (dd.generado || ''), apaisado: true, firma: pdfNeg(),
+          cols: [{ t: '', w: 0.6, caja: 1, al: 'c' }, { t: 'SKU', w: 2 }, { t: 'Producto', w: 6 }, { t: 'Actual', w: 1, al: 'r' }, { t: 'Mínimo', w: 1, al: 'r' }, { t: 'Normal', w: 1, al: 'r' }, { t: 'Bajar', w: 1, al: 'r', b: true }, { t: 'De', w: 3.5 }],
+          filas: sel.map(function (x) { return ['', x.sku || '', x.nombre, x.piso, x.minimo, x.maximo, x.bajar, de(x)]; }),
+          pie: 'Total: ' + uni + ' unidades en ' + sel.length + ' productos'
+        });
+      } else {
+        const its = dd.items; let uni = 0; its.forEach(function (x) { uni += Number(x.bajar) || 0; });
+        d = TTPdf.tabla({
+          titulo: 'Qué bajar del almacén', subtitulo: 'Ventas de ' + dd.dias + ' días, cubrir ' + dd.cobertura + ' días · ' + (dd.generado || ''), apaisado: true, firma: pdfNeg(),
+          cols: [{ t: '', w: 0.6, caja: 1, al: 'c' }, { t: 'SKU', w: 2 }, { t: 'Producto', w: 6 }, { t: 'Piso', w: 1, al: 'r' }, { t: 'Vendió', w: 1, al: 'r' }, { t: 'Bajar', w: 1, al: 'r', b: true }, { t: 'De', w: 4.5 }],
+          filas: its.map(function (x) { return ['', x.sku || '', x.nombre, x.piso, x.vendido, x.bajar, de(x)]; }),
+          pie: 'Total: ' + uni + ' unidades en ' + its.length + ' productos'
+        });
+      }
+      d.guardar('bajar-del-almacen-' + pdfFecha() + '.pdf');
+      mostrarBanner('PDF generado: míralo en Descargas.', 3500);
+    }
+    function pdfComprasNom() {
+      if (!window.TTPdf) return;
+      const sel = cnSeleccion();
+      if (!sel.length) { mostrarBanner('No hay productos marcados.', 3000); return; }
+      let total = 0; sel.forEach(function (s) { total += s.t; });
+      const d = TTPdf.tabla({
+        titulo: 'Sugerencias de compras', subtitulo: new Date().toLocaleDateString('es-ES'), apaisado: true, firma: pdfNeg(),
+        cols: [{ t: '', w: 0.6, caja: 1, al: 'c' }, { t: 'SKU', w: 2 }, { t: 'Producto', w: 6 }, { t: 'Actual', w: 1, al: 'r' }, { t: 'Mínimo', w: 1, al: 'r' }, { t: 'Normal', w: 1, al: 'r' }, { t: 'Comprar', w: 1.2, al: 'r', b: true }, { t: 'Total', w: 1.6, al: 'r' }],
+        filas: sel.map(function (s) { return ['', s.it.sku || '', s.it.nombre, s.it.stock, s.it.minimo, s.it.normal, s.q, s.t ? pcMoney(s.t) : '']; }),
+        pie: 'Total aprox.: ' + pcMoney(total) + ' · ' + sel.length + ' productos'
+      });
+      d.guardar('sugerencias-de-compras-' + pdfFecha() + '.pdf');
+      mostrarBanner('PDF generado: míralo en Descargas.', 3500);
+    }
+    function pdfCompras() {
+      if (!window.TTPdf) return;
+      const s = comprasSeleccionadas();
+      if (!s.length) { pcById('comprasMsg').style.color = 'var(--tt-fca5a5,#fca5a5)'; pcById('comprasMsg').textContent = 'No hay artículos marcados.'; return; }
+      let u = 0; s.forEach(function (i) { u += Number(i.comprar) || 0; });
+      const d = TTPdf.tabla({
+        titulo: 'Lista de compras', subtitulo: new Date().toLocaleDateString('es-ES'), firma: pdfNeg(),
+        cols: [{ t: '', w: 0.7, caja: 1, al: 'c' }, { t: 'Cant.', w: 1, al: 'r', b: true }, { t: 'Producto', w: 6 }, { t: 'SKU', w: 2 }, { t: 'Hay', w: 0.9, al: 'r' }, { t: 'Mín.', w: 0.9, al: 'r' }],
+        filas: s.map(function (i) { return ['', i.comprar, i.nombre, i.sku || '', i.stock, i.minimo]; }),
+        pie: u + ' unidades en ' + s.length + ' artículos'
+      });
+      d.guardar('lista-de-compras-' + pdfFecha() + '.pdf');
+      pcById('comprasMsg').style.color = 'var(--tt-86efac,#86efac)'; pcById('comprasMsg').textContent = 'PDF generado: míralo en Descargas.';
     }
     function copiarRepos() {
       if (!reposTexto) return;
@@ -9638,7 +9699,7 @@ TT.iniciar('pc');
       const num = 'style="' + CN_TD + '"';
       cont.innerHTML = ayuda +
         '<div style="font-size:20px; font-weight:800; color:var(--tt-ffffff,#fff); margin-bottom:8px;">Total: <span id="cnTotal"></span> <span id="cnInfo" style="font-size:12px; font-weight:400; color:var(--tt-94a3b8,#94a3b8);"></span></div>' +
-        '<div style="margin-bottom:8px;"><button style="' + PC_BTN + '" onclick="imprimirComprasNom()">Imprimir</button><button style="' + PC_BTN + '" onclick="copiarComprasNom()">Copiar</button></div>' + cpBarraHtml() +
+        '<div style="margin-bottom:8px;"><button style="' + PC_BTN + '" onclick="imprimirComprasNom()">Imprimir</button><button style="' + PC_BTN + '" onclick="copiarComprasNom()">Copiar</button><button style="' + PC_BTN + '" onclick="pdfComprasNom()">PDF</button></div>' + cpBarraHtml() +
         '<table style="width:100%; border-collapse:collapse; color:var(--tt-e2e8f0,#e2e8f0);"><thead><tr>' +
         '<th style="' + CN_TH + '"><input type="checkbox" id="cnTodo" title="Marcar o desmarcar todo" onchange="cnTodos(this.checked)"></th>' +
         '<th style="' + CN_TH + ' width:100%;">Nombre</th><th style="' + CN_TH + '">Actual</th><th style="' + CN_TH + '">Mínimo</th><th style="' + CN_TH + '">Normal</th><th style="' + CN_TH + '">Vendió</th><th style="' + CN_TH + '">Sugerencia</th><th style="' + CN_TH + '">Total</th></tr></thead><tbody>' +
@@ -15755,6 +15816,7 @@ $htmlEtiquetas = @'
     </div>
     <label class="chk" style="margin-top:8px;"><input type="checkbox" id="oSinStock" onchange="cambioSinStock()"> Ocultar productos sin stock</label>
     <div class="nota" id="notaSinStock" style="margin-top:0;"></div>
+    <div id="barCambios"></div>
     <div id="lista"><div class="vacio">Cargando catálogo...</div></div>
     <div class="nota" id="resumen"></div>
 
@@ -15826,6 +15888,90 @@ $htmlEtiquetas = @'
     <label style="font-size:12px; color:#94a3b8; display:block; margin-top:8px;">Tamaño de letra</label>
     <input type="range" id="escala" min="60" max="160" value="100" oninput="cambio()">
 
+    <style>
+      details.ex { border:1px solid #334155; border-radius:8px; margin-top:10px; padding:0 10px 8px; }
+      details.ex > summary { cursor:pointer; font-size:12px; font-weight:700; color:#7dd3fc; padding:8px 0; text-transform:uppercase; letter-spacing:.5px; }
+      details.ex label.l { font-size:12px; color:#94a3b8; display:block; margin-top:6px; }
+      details.ex textarea { width:100%; padding:8px; border-radius:6px; border:1px solid #334155; background:#0f172a; color:#e2e8f0; font-size:14px; }
+      .et .ex1 { font-size:calc(var(--k) * 2.4mm); line-height:1.1; }
+      .et .ex2 { font-size:calc(var(--k) * 3.2mm); font-weight:800; line-height:1.1; }
+      #hojaPrev { display:grid; gap:1px; background:#475569; padding:1px; margin-top:6px; max-width:210px; }
+      #hojaPrev div { background:#fff; min-height:10px; }
+      #hojaPrev div.u { background:#bfdbfe; }
+      #barCambios { background:#064e3b; border-radius:8px; padding:8px 10px; margin-top:8px; font-size:13px; display:none; }
+      #barCambios button { padding:4px 8px; font-size:12px; margin:4px 4px 0 0; }
+      #msgCodigos { font-size:12px; color:#fbbf24; margin-top:6px; white-space:pre-wrap; }
+    </style>
+    <details class="ex" open><summary>Contenido extra</summary>
+      <label class="l">Texto libre en la etiqueta (opcional)</label>
+      <input type="text" id="exTexto" class="exc" maxlength="60" placeholder="Ej.: Garantía 30 días" oninput="cambio()">
+      <label class="chk"><input type="checkbox" id="exFecha" class="exc" onchange="cambio()"> Mostrar la fecha de impresión</label>
+      <label class="l">Promoción (el precio grande no cambia)</label>
+      <div class="fila">
+        <select id="pTipo" class="exc" onchange="cambio()">
+          <option value="ninguna">Sin promoción</option><option value="pct">Descuento en % (se muestra en $)</option>
+          <option value="fijo">Descuento fijo en $</option><option value="2x1">2 x 1</option>
+          <option value="antes">Precio anterior</option><option value="texto">Solo texto</option>
+        </select>
+        <input type="number" id="pValor" class="exc" min="0" step="any" placeholder="valor" oninput="cambio()">
+      </div>
+      <input type="text" id="pTexto" class="exc" maxlength="30" placeholder="Texto: SOLO HOY, CON TARJETA…" style="margin-top:6px;" oninput="cambio()">
+      <select id="pDonde" class="exc" style="margin-top:6px;" onchange="cambio()"><option value="precio">Debajo del precio</option><option value="arriba">Arriba de todo</option></select>
+      <div class="nota">Sin texto no se imprime la promoción.</div>
+      <label class="l">Código de barras</label>
+      <select id="tipoBarras" class="exc" onchange="cambio()">
+        <option value="code128">Code 128 (como hasta ahora)</option><option value="auto">Automático (EAN13 / Code 39 / Code 128)</option>
+        <option value="ean13">EAN13 (12 o 13 dígitos)</option><option value="code39">Code 39 (más compatible con térmicas viejas)</option>
+      </select>
+      <button style="margin-top:6px;" onclick="revisarCodigos()">Revisar códigos de barras</button>
+      <div id="msgCodigos"></div>
+      <label class="chk" style="margin-top:10px;"><input type="checkbox" id="lbOn" class="exc" onchange="cambio()"> <b>Etiqueta libre</b> (toda la tanda sale con este diseño, sin datos de producto)</label>
+      <input type="text" id="lbCab" class="exc" maxlength="40" placeholder="Cabecera" oninput="cambio()" style="margin-top:4px;">
+      <input type="text" id="lbCuerpo" class="exc" maxlength="80" placeholder="Cuerpo (texto grande)" oninput="cambio()" style="margin-top:4px;">
+      <input type="text" id="lbPie" class="exc" maxlength="50" placeholder="Pie" oninput="cambio()" style="margin-top:4px;">
+      <div class="fila" style="margin-top:4px;">
+        <select id="lbTam" class="exc" onchange="cambio()"><option value="70">Cuerpo pequeño</option><option value="100" selected>Cuerpo mediano</option><option value="140">Cuerpo grande</option></select>
+        <input type="number" id="lbCopias" class="exc" min="1" max="200" value="1" title="Copias" oninput="cambio()">
+      </div>
+      <div class="nota">Copias de la etiqueta libre a la derecha. Desmárcala para volver a las etiquetas de productos.</div>
+    </details>
+    <details class="ex"><summary>Hoja Carta en PDF</summary>
+      <div class="fila">
+        <div><label class="l">Columnas</label><select id="shCols" class="exc" onchange="cambio()"><option value="2">2</option><option value="3" selected>3</option><option value="4">4</option><option value="5">5</option></select></div>
+        <div><label class="l">Hoja</label><select id="shOri" class="exc" onchange="cambio()"><option value="v">Vertical</option><option value="h">Horizontal</option></select></div>
+        <div><label class="l">Margen mm</label><input type="number" id="shMargen" class="exc" min="0" max="30" value="8" oninput="cambio()"></div>
+      </div>
+      <label class="chk"><input type="checkbox" id="shGuias" class="exc" checked onchange="cambio()"> Guías de corte</label>
+      <div id="hojaPrevTxt" class="nota"></div><div id="hojaPrev"></div>
+      <button class="pri" style="margin-top:8px; width:100%;" onclick="generarHojaPDF()">Generar PDF (hoja Carta)</button>
+      <div class="nota">El ancho de cada etiqueta sale de las columnas; el alto mantiene la proporción del tamaño elegido arriba. El PDF se descarga y se imprime al 100 % sin márgenes extra.</div>
+    </details>
+    <details class="ex"><summary>Listado de precios</summary>
+      <input type="text" id="lpTitulo" class="exc" maxlength="60" placeholder="Título (Lista de precios)" oninput="guardarExtra()">
+      <input type="text" id="lpSub" class="exc" maxlength="80" placeholder="Subtítulo (opcional)" style="margin-top:6px;" oninput="guardarExtra()">
+      <div class="fila" style="margin-top:6px;">
+        <select id="lpOrden" class="exc" onchange="guardarExtra()"><option value="nombre">Orden: nombre</option><option value="sku">Orden: SKU</option><option value="pmenor">Precio menor a mayor</option><option value="pmayor">Precio mayor a menor</option></select>
+        <select id="lpPapel" class="exc" onchange="guardarExtra()"><option value="384">Térmica 58 mm</option><option value="576">Térmica 80 mm</option></select>
+      </div>
+      <label class="chk"><input type="checkbox" id="lpCSku" class="exc" checked onchange="guardarExtra()"> Columna SKU</label>
+      <label class="chk"><input type="checkbox" id="lpCPre" class="exc" checked onchange="guardarExtra()"> Precio efectivo</label>
+      <label class="chk"><input type="checkbox" id="lpCTr" class="exc" onchange="guardarExtra()"> Precio transferencia (x2)</label>
+      <label class="chk"><input type="checkbox" id="lpCStock" class="exc" onchange="guardarExtra()"> Existencias</label>
+      <label class="chk"><input type="checkbox" id="lpDos" class="exc" onchange="guardarExtra()"> Dos columnas por hoja</label>
+      <label class="chk"><input type="checkbox" id="lpAp" class="exc" onchange="guardarExtra()"> Hoja horizontal</label>
+      <div class="fila" style="margin-top:8px;"><button class="pri" onclick="listadoPDF()">Listado en PDF</button><button onclick="listadoTermica()">Listado simple en la térmica</button></div>
+      <div id="msgListado" class="nota"></div>
+      <div class="nota">Usa los productos marcados; si no hay ninguno, todos los de la lista (según la búsqueda). La térmica cierra con total, mínimo, máximo y promedio.</div>
+    </details>
+    <details class="ex"><summary>Mis etiquetas</summary>
+      <select id="meLista" onchange="meElegida()"></select>
+      <input type="text" id="meNombre" maxlength="40" placeholder="Nombre (Oferta fin de semana…)" style="margin-top:6px;">
+      <div class="fila" style="margin-top:6px; flex-wrap:wrap;">
+        <button class="pri" onclick="meGuardar()">Guardar actual</button><button onclick="meUsar()">Usar</button><button onclick="mePred()">★ Predeterminada</button><button onclick="meBorrar()">Borrar</button>
+      </div>
+      <div id="msgMe" class="nota"></div>
+      <div class="nota">Se guardan en esta PC (hasta 60). Guardan estilo, tamaño, contenido, promoción y etiqueta libre. La marcada con ★ se pone sola al abrir.</div>
+    </details>
     <h2>Imprimir</h2>
     <div class="fila">
       <div><label style="font-size:12px; color:#94a3b8;">Avance extra entre etiquetas (mm)</label><input type="number" id="feed" min="0" max="30" value="5" oninput="cambio()"></div>
@@ -15872,7 +16018,7 @@ $htmlEtiquetas = @'
     return v.map(function (x) { return C128[x]; }).join('');
   }
 
-  function barcodeSVG(txt) {
+  function barcodeSVG_viejo(txt) {
     var w = code128(txt), x = 10, r = '';
     for (var i = 0; i < w.length; i++) {
       var a = parseInt(w[i], 10);
@@ -15934,7 +16080,9 @@ $htmlEtiquetas = @'
       ? '@page { size: A4; margin: 8mm; }'
       : '@page { size: ' + w + 'mm ' + h + 'mm; margin: 0; }';
     guardarAjustes();
+    guardarExtra();
     pintarVista();
+    try { evaluarCambios(false); } catch (e) {}
   }
 
   function hayControlStockEt() {
@@ -15963,7 +16111,7 @@ $htmlEtiquetas = @'
     var visibles = catalogo.filter(function (p) { return !q || norm(p.nombre).indexOf(q) >= 0 || norm(p.sku).indexOf(q) >= 0; }).slice(0, 300);
     $('lista').innerHTML = visibles.length ? visibles.map(function (p) {
       var k = clave(p), on = sel[k] > 0;
-      return '<div class="prod"><input type="checkbox" ' + (on ? 'checked' : '') + ' onchange="marcar(' + esc(JSON.stringify(k)) + ',this.checked)">' +
+      return '<div class="prod"' + (cambiosSet[k] ? ' style="background:#064e3b"' : '') + '><input type="checkbox" ' + (on ? 'checked' : '') + ' onchange="marcar(' + esc(JSON.stringify(k)) + ',this.checked)">' +
         '<div class="n">' + esc(p.nombre) + '<small>' + esc(p.sku || 'sin SKU') + ' · $' + fmt(p.precio) + '</small></div>' +
         '<input type="number" min="1" max="500" value="' + (on ? sel[k] : 1) + '" ' + (on ? '' : 'disabled') + ' onchange="copias(' + esc(JSON.stringify(k)) + ',this.value)"></div>';
     }).join('') : '<div class="vacio">Sin resultados.</div>';
@@ -16000,15 +16148,18 @@ $htmlEtiquetas = @'
   }
 
   function etiquetaHTML(p) {
+    if (p.libre) return etiquetaLibreHTML(p);
     var neg = $('negocio').value.trim();
     var s = '<div class="et" style="width:' + $('ancho').value + 'mm;height:' + $('alto').value + 'mm;--k:' + (($('escala').value || 100) / 100) + '">';
     if ($('oNeg').checked && neg) s += '<div class="neg">' + esc(neg) + '</div>';
+    s += extraHTML(p, 'arriba');
     if ($('oNom').checked) s += '<div class="nom">' + esc(p.nombre) + '</div>';
     var modo = $('modoPrecio').value, mon = $('moneda').value || '$';
     if ($('oPre').checked) {
       s += '<div class="pre">' + mon + fmt(modo === 'transferencia' ? p.precio * 2 : p.precio) + '</div>';
       if (modo === 'ambos') s += '<div class="tr">Transferencia: ' + mon + fmt(p.precio * 2) + '</div>';
     }
+    s += extraHTML(p, 'abajo');
     if ($('oBc').checked && p.sku) s += '<div class="bc">' + barcodeSVG(String(p.sku)) + '</div>';
     if ($('oSk').checked && p.sku) s += '<div class="sk">' + esc(p.sku) + '</div>';
     return s + '</div>';
@@ -16016,18 +16167,18 @@ $htmlEtiquetas = @'
 
   function pintarVista() {
     var out = [], n = 0;
-    catalogo.forEach(function (p) {
-      var c = sel[clave(p)] || 0;
-      for (var i = 0; i < c; i++) { out.push(etiquetaHTML(p)); n++; }
+    listaImpresion().forEach(function (x) {
+      for (var i = 0; i < x.cant; i++) { out.push(etiquetaHTML(x.p)); n++; }
     });
     $('hoja').innerHTML = out.length ? out.join('') : '<div class="vacio">Marca productos a la izquierda para ver las etiquetas.</div>';
     $('cuenta').textContent = n ? '(' + n + ' etiquetas)' : '';
     resumen();
     pintarRaster();
+    pintarHojaPrev();
   }
 
   function imprimir() {
-    if (!Object.keys(sel).length) { alert('Marca al menos un producto.'); return; }
+    if (!Object.keys(sel).length && !libreActiva()) { alert('Marca al menos un producto.'); return; }
     window.print();
   }
 
@@ -16054,6 +16205,7 @@ $htmlEtiquetas = @'
     return cfg;
   }
   function itemsMarcados() {
+    if (libreActiva()) return [libreItem()];
     var out = [];
     catalogo.forEach(function (p) {
       var c = sel[clave(p)] || 0;
@@ -16191,6 +16343,12 @@ function trazarLineaPunteada(g, x, y, w, grosor) {
   }
 
 function rasterEtiqueta(it) {
+    if (it.libre) return rasterLibre(it);
+    cfg._sc = 1; var rr = rasterEtiqueta0(it), exr = extrasDatos(it);
+    if (exr.texto || exr.promo) { while (cfg._aH < Math.min(40, cfg.alto * DOTS_MM * 0.18) && cfg._sc > 0.55) { cfg._sc -= 0.07; rr = rasterEtiqueta0(it); } }
+    cfg._sc = 1; return rr;
+  }
+  function rasterEtiqueta0(it) {
     const D = DOTS_MM, wl = cfg.ancho, hl = cfg.alto;
     const est = estiloActual();
     const famBase = FUENTES[cfg.fuente] || FUENTES.arial;
@@ -16267,6 +16425,7 @@ function rasterEtiqueta(it) {
       }
     }
 
+    y = extrasRasterArriba(g, it, y, pad, inner, cx, famBase, D);
     // Parte inferior (de abajo hacia arriba): código en texto, barras, precio
     let yb = H - pad;
     const conBarras = cfg.verBarras && it.codigo, conCodigo = cfg.verCodigo && it.codigo;
@@ -16276,9 +16435,9 @@ function rasterEtiqueta(it) {
       g.fillText(it.codigo, cx, yb);
     }
     if (conBarras) {
-      const m = code128Modulos(it.codigo);
+      const m = barrasDe(it.codigo, tipoBarrasSel());
       if (m) {
-        const hb = Math.round(clamp(hl * 0.2, 5, 10) * D);
+        const hb = Math.round(clamp(hl * 0.2, 5, 10) * D * (cfg._sc || 1));
         const mod = Math.max(1, Math.min(3, Math.floor(inner / m.total)));
         const x0 = izq ? pad : Math.round((W - m.total * mod) / 2);
         yb -= hb;
@@ -16286,9 +16445,10 @@ function rasterEtiqueta(it) {
         yb -= 2;
       }
     }
+    yb = extrasRasterAbajo(g, it, yb, cx, inner, famBase, D);
     if (cfg.verPrecio) {
       const ptxt = formatoPrecio(precioEtiquetaR(it));
-      const ps = ajustar1(ptxt, 'bold', clamp(hl * est.factorPrecio, 5, 14) * D * (cfg.tamPrecio / 100), famBase, 20);
+      const ps = ajustar1(ptxt, 'bold', clamp(hl * est.factorPrecio, 5, 14) * D * (cfg.tamPrecio / 100) * (cfg._sc || 1), famBase, 20);
       if (est.precioBanner) {
         const altoBanner = Math.round(ps * 1.35);
         yb -= altoBanner;
@@ -16311,7 +16471,7 @@ function rasterEtiqueta(it) {
     }
 
     // Nombre en el espacio que queda
-    const aH = yb - y - 4;
+    const aH = yb - y - 4; cfg._aH = aH;
     if (aH > 8) {
       const fNombre = cfg.verPrecio ? est.factorNombre : est.factorNombre * 1.8;
       let fs = clamp(hl * fNombre, 3, cfg.verPrecio ? 6 : 10) * D, lineas = [];
@@ -16418,8 +16578,542 @@ function rasterEtiqueta(it) {
     imprimiendoTermica = false;
   }
 
+
+  // =================== Mejoras (manual): codigos, extras, libre, PDF, listados, plantillas ===================
+  // ---- Codigos de barras: Code 128 (B/C), Code 39 y EAN13. Devuelve {barras:[[x,w]], total, tipo} (con 10 modulos de margen) ----
+  var C39 = {'0':'nnnwwnwnn','1':'wnnwnnnnw','2':'nnwwnnnnw','3':'wnwwnnnnn','4':'nnnwwnnnw','5':'wnnwwnnnn','6':'nnwwwnnnn','7':'nnnwnnwnw','8':'wnnwnnwnn','9':'nnwwnnwnn',
+    'A':'wnnnnwnnw','B':'nnwnnwnnw','C':'wnwnnwnnn','D':'nnnnwwnnw','E':'wnnnwwnnn','F':'nnwnwwnnn','G':'nnnnnwwnw','H':'wnnnnwwnn','I':'nnwnnwwnn','J':'nnnnwwwnn',
+    'K':'wnnnnnnww','L':'nnwnnnnww','M':'wnwnnnnwn','N':'nnnnwnnww','O':'wnnnwnnwn','P':'nnwnwnnwn','Q':'nnnnnnwww','R':'wnnnnnwwn','S':'nnwnnnwwn','T':'nnnnwnwwn',
+    'U':'wwnnnnnnw','V':'nwwnnnnnw','W':'wwwnnnnnn','X':'nwnnwnnnw','Y':'wwnnwnnnn','Z':'nwwnwnnnn','-':'nwnnnnwnw','.':'wwnnnnwnn',' ':'nwwnnnwnn','*':'nwnnwnwnn',
+    '$':'nwnwnwnnn','/':'nwnwnnnwn','+':'nwnnnwnwn','%':'nnnwnwnwn'};
+  var EAN_L = ['0001101','0011001','0010011','0111101','0100011','0110001','0101111','0111011','0110111','0001011'];
+  var EAN_G = ['0100111','0110011','0011011','0100001','0011101','0111001','0000101','0010001','0001001','0010111'];
+  var EAN_R = ['1110010','1100110','1101100','1000010','1011100','1001110','1010000','1000100','1001000','1110100'];
+  var EAN_P = ['LLLLLL','LLGLGG','LLGGLG','LLGGGL','LGLLGG','LGGLLG','LGGGLL','LGLGLG','LGLGGL','LGGLGL'];
+  function runsDeBits(bits) {
+    var barras = [], i = 0;
+    while (i < bits.length) {
+      var j = i; while (j < bits.length && bits[j] === bits[i]) j++;
+      if (bits[i] === '1') barras.push([10 + i, j - i]);
+      i = j;
+    }
+    return { barras: barras, total: bits.length + 20 };
+  }
+  function ean13Digito(d12) { var s = 0; for (var i = 0; i < 12; i++) s += (+d12[i]) * (i % 2 ? 3 : 1); return (10 - s % 10) % 10; }
+  function ean13Bits(txt) {
+    if (!/^\d{12,13}$/.test(txt)) return null;
+    var d = txt.slice(0, 12), cd = ean13Digito(d);
+    if (txt.length === 13 && +txt[12] !== cd) return null;
+    var full = d + cd, par = EAN_P[+full[0]], bits = '101';
+    for (var i = 0; i < 6; i++) bits += (par[i] === 'L' ? EAN_L : EAN_G)[+full[i + 1]];
+    bits += '01010';
+    for (var j = 7; j < 13; j++) bits += EAN_R[+full[j]];
+    return bits + '101';
+  }
+  function code39Bits(txt) {
+    var t = String(txt).toUpperCase();
+    if (!t || /[^0-9A-Z \-.$\/+%]/.test(t)) return null;
+    var s = '*' + t + '*', bits = '';
+    for (var i = 0; i < s.length; i++) {
+      var p = C39[s[i]], neg = true;
+      for (var k = 0; k < 9; k++) { var w = p[k] === 'w' ? 3 : 1; bits += (neg ? '1' : '0').repeat(w); neg = !neg; }
+      if (i < s.length - 1) bits += '0';
+    }
+    return bits;
+  }
+  function code128Bits(txt) {
+    var limpio = String(txt).normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^\x20-\x7e]/g, '');
+    if (!limpio) return null;
+    var v;
+    if (/^\d{4,}$/.test(limpio) && limpio.length % 2 === 0) { v = [105]; for (var i = 0; i < limpio.length; i += 2) v.push(parseInt(limpio.substr(i, 2), 10)); }
+    else { v = [104]; for (var j = 0; j < limpio.length; j++) v.push(limpio.charCodeAt(j) - 32); }
+    var suma = v[0]; for (var k = 1; k < v.length; k++) suma += v[k] * k;
+    v.push(suma % 103, 106);
+    var bits = '', neg;
+    v.forEach(function (x) { neg = true; C128[x].split('').forEach(function (d) { bits += (neg ? '1' : '0').repeat(+d); neg = !neg; }); });
+    return bits;
+  }
+  function barrasDe(texto, tipo) {
+    var t = String(texto == null ? '' : texto).trim();
+    if (!t) return null;
+    tipo = tipo || 'code128';
+    if (tipo === 'auto') tipo = /^\d{12,13}$/.test(t) && ean13Bits(t) ? 'ean13' : (code39Bits(t) ? 'code39' : 'code128');
+    var bits = tipo === 'ean13' ? ean13Bits(t) : (tipo === 'code39' ? code39Bits(t) : code128Bits(t));
+    if (!bits) return null;
+    var r = runsDeBits(bits); r.tipo = tipo; return r;
+  }
+  function tipoBarrasSel() { var e = $('tipoBarras'); return e ? e.value : 'code128'; }
+  function barcodeSVG(txt) {
+    var m = barrasDe(txt, tipoBarrasSel());
+    if (!m) return '';
+    var r = m.barras.map(function (b) { return '<rect x="' + b[0] + '" y="0" width="' + b[1] + '" height="50"/>'; }).join('');
+    return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' + m.total + ' 50" preserveAspectRatio="none" shape-rendering="crispEdges" fill="#000">' + r + '</svg>';
+  }
+
+  // ---- Extras: texto libre, fecha, promocion ----
+  function nEx(v) { return fmt(v); }
+  function extrasDatos(it) {
+    var r = { texto: '', promo: null }, partes = [], t = ($('exTexto').value || '').trim();
+    if (t) partes.push(t);
+    if ($('exFecha').checked) partes.push(new Date().toLocaleDateString('es-ES'));
+    r.texto = partes.join(' · ');
+    var tipo = $('pTipo').value, txt = ($('pTexto').value || '').trim(), val = parseFloat(String($('pValor').value).replace(',', '.')) || 0;
+    if (tipo !== 'ninguna' && txt) {
+      var n = parsePrecio(it.precio), mon = $('moneda').value || '$', v2 = '';
+      if (tipo === 'pct' && n > 0 && val > 0) v2 = '-' + mon + nEx(n * val / 100);
+      else if (tipo === 'fijo' && val > 0) v2 = '-' + mon + nEx(val);
+      else if (tipo === '2x1') v2 = '2 x 1';
+      else if (tipo === 'antes' && val > 0) v2 = 'Antes ' + mon + nEx(val);
+      r.promo = { l1: txt, l2: v2, donde: $('pDonde').value };
+    }
+    return r;
+  }
+  function extraHTML(p, donde) {
+    var e = extrasDatos(p), s = '';
+    if (donde === 'arriba') {
+      if (e.promo && e.promo.donde === 'arriba') s += '<div class="ex1">' + esc(e.promo.l1) + '</div>' + (e.promo.l2 ? '<div class="ex2">' + esc(e.promo.l2) + '</div>' : '');
+      return s;
+    }
+    if (e.texto) s += '<div class="ex1">' + esc(e.texto) + '</div>';
+    if (e.promo && e.promo.donde === 'precio') s += '<div class="ex1">' + esc(e.promo.l1) + '</div>' + (e.promo.l2 ? '<div class="ex2">' + esc(e.promo.l2) + '</div>' : '');
+    return s;
+  }
+  // ---- Etiqueta libre ----
+  function libreActiva() { return !!($('lbOn') && $('lbOn').checked); }
+  function libreCopias() { return Math.max(1, Math.min(200, parseInt($('lbCopias').value, 10) || 1)); }
+  function libreItem() { return { libre: true, nombre: '', precio: 0, codigo: '', cab: $('lbCab').value.trim(), cuerpo: $('lbCuerpo').value.trim(), pie: $('lbPie').value.trim(), tam: (+$('lbTam').value || 100) / 100, cant: libreCopias() }; }
+  function listaImpresion() {
+    if (libreActiva()) { var l = libreItem(); return [{ p: l, cant: l.cant }]; }
+    var out = [];
+    catalogo.forEach(function (p) { var c = sel[clave(p)] || 0; if (c > 0) out.push({ p: { nombre: p.nombre, precio: p.precio, sku: p.sku, codigo: p.sku || '', stock: p.stock }, cant: c }); });
+    return out;
+  }
+  function etiquetaLibreHTML(p) {
+    var k = ($('escala').value || 100) / 100, h = +$('alto').value || 30;
+    var cs = Math.min(h * 0.14, 5) * k, bs = Math.min(h * 0.32, 12) * p.tam * k, ps = Math.min(h * 0.09, 3.5) * k;
+    return '<div class="et" style="width:' + $('ancho').value + 'mm;height:' + $('alto').value + 'mm;--k:' + k + '">' +
+      '<div style="font-weight:700;font-size:' + cs.toFixed(2) + 'mm;">' + esc(p.cab) + '</div>' +
+      '<div style="flex:1;display:flex;align-items:center;justify-content:center;font-weight:800;line-height:1.05;overflow:hidden;font-size:' + bs.toFixed(2) + 'mm;">' + esc(p.cuerpo) + '</div>' +
+      '<div style="font-size:' + ps.toFixed(2) + 'mm;">' + esc(p.pie) + '</div></div>';
+  }
+  function dimsRaster() {
+    var D = DOTS_MM, wl = cfg.ancho, hl = cfg.alto, rot = cfg.orient === 'v90' || cfg.orient === 'v270';
+    var maxPapel = (rot ? hl : wl) <= 65 ? 384 : 576;
+    var W = rot ? Math.max(8, Math.round(wl * D)) : Math.max(8, Math.floor(Math.min(wl * D, maxPapel) / 8) * 8);
+    var H = rot ? Math.max(8, Math.floor(Math.min(hl * D, maxPapel) / 8) * 8) : Math.round(hl * D);
+    return { W: W, H: H, rot: rot };
+  }
+  function cierreRaster(cv, g, W, H) {
+    var cvF = cv, gF = g, WF = W, HF = H;
+    if (cfg.orient === 'v90' || cfg.orient === 'v270') {
+      cvF = document.createElement('canvas'); cvF.width = H; cvF.height = W;
+      gF = cvF.getContext('2d', { willReadFrequently: true });
+      gF.fillStyle = '#fff'; gF.fillRect(0, 0, H, W);
+      if (cfg.orient === 'v90') { gF.translate(H, 0); gF.rotate(Math.PI / 2); } else { gF.translate(0, W); gF.rotate(-Math.PI / 2); }
+      gF.drawImage(cv, 0, 0); WF = H; HF = W;
+    }
+    var b = bitsDeCanvas(cvF, WF, HF); b.cv = cvF; return b;
+  }
+  function bitsDeCanvas(cv, WF, HF) {
+    var img = cv.getContext('2d').getImageData(0, 0, WF, HF).data, bpr = WF / 8, bits = new Uint8Array(bpr * HF);
+    for (var py = 0; py < HF; py++) for (var px = 0; px < WF; px++) {
+      var i = (py * WF + px) * 4;
+      if (img[i] * 0.299 + img[i + 1] * 0.587 + img[i + 2] * 0.114 < 150) bits[py * bpr + (px >> 3)] |= 0x80 >> (px & 7);
+    }
+    return { W: WF, H: HF, bpr: bpr, bits: bits };
+  }
+  function rasterLibre(it) {
+    var D = DOTS_MM, dm = dimsRaster(), W = dm.W, H = dm.H, hl = cfg.alto, fam = FUENTES[cfg.fuente] || FUENTES.arial;
+    var cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+    var g = cv.getContext('2d', { willReadFrequently: true });
+    g.fillStyle = '#fff'; g.fillRect(0, 0, W, H); g.fillStyle = '#000'; g.textBaseline = 'top'; g.textAlign = 'center';
+    var pad = Math.round(1.5 * D), inner = W - 2 * pad, y = pad, yb = H - pad;
+    function bloque(txt, px, peso) {
+      g.font = peso + ' ' + px + 'px ' + fam;
+      return partirLineas(g, txt, inner);
+    }
+    if (it.cab) { var pc = Math.round(Math.min(hl * 0.14, 5) * D), l = bloque(it.cab, pc, 'bold'); l.forEach(function (t) { g.fillText(t, W / 2, y); y += pc * 1.1; }); y += 3; }
+    if (it.pie) { var pp = Math.round(Math.min(hl * 0.09, 3.5) * D), l2 = bloque(it.pie, pp, 'normal'); yb -= l2.length * pp * 1.1; var yy = yb; l2.forEach(function (t) { g.fillText(t, W / 2, yy); yy += pp * 1.1; }); yb -= 3; }
+    if (it.cuerpo) {
+      var aH = yb - y, px = Math.round(Math.min(hl * 0.32, 12) * it.tam * D), lin;
+      for (;;) { lin = bloque(it.cuerpo, px, 'bold'); if (lin.length * px * 1.05 <= aH || px <= 10) break; px -= 2; }
+      var ty = y + Math.max(0, (aH - lin.length * px * 1.05) / 2);
+      lin.forEach(function (t) { g.fillText(t, W / 2, ty); ty += px * 1.05; });
+    }
+    return cierreRaster(cv, g, W, H);
+  }
+  // ---- Extras en la termica (raster) ----
+  function extrasRasterArriba(g, it, y, pad, inner, cx, famBase, D) {
+    var e = extrasDatos(it);
+    if (e.promo && e.promo.donde === 'arriba') {
+      var sc0 = cfg._sc || 1; g.font = 'normal ' + Math.round(2.4 * D * sc0) + 'px ' + famBase; g.fillText(e.promo.l1, cx, y); y += Math.round(2.4 * D * sc0 * 1.15);
+      if (e.promo.l2) { g.font = 'bold ' + Math.round(3.4 * D * sc0) + 'px ' + famBase; g.fillText(e.promo.l2, cx, y); y += Math.round(3.4 * D * sc0 * 1.15); }
+      y += 2;
+    }
+    return y;
+  }
+  function extrasRasterAbajo(g, it, yb, cx, inner, famBase, D) {
+    var e = extrasDatos(it);
+    function linea(txt, peso, mm) {
+      var px = Math.round(mm * D * (cfg._sc || 1));
+      while (px > 8) { g.font = peso + ' ' + px + 'px ' + famBase; if (g.measureText(txt).width <= inner) break; px -= 1; }
+      yb -= Math.round(px * 1.15); g.fillText(txt, cx, yb);
+    }
+    if (e.texto) linea(e.texto, 'normal', 2.4);
+    if (e.promo && e.promo.donde === 'precio') { if (e.promo.l1) linea(e.promo.l1, 'normal', 2.4); if (e.promo.l2) linea(e.promo.l2, 'bold', 3.4); }
+    return yb;
+  }
+
+  // ---- PDF vectorial de una etiqueta ----
+  var PT = 72 / 25.4;
+  function ajusteMm(txt, bold, mm, minMm, inner) { while (mm > minMm && TTPdf.ancho(txt, mm * PT, bold) > inner) mm -= 0.1; return mm; }
+  var NULLD = { rect: function () {}, linea: function () {}, texto: function () {} };
+  function pdfEtiqueta(d, x0, y0, w, h, it) {
+    if (it.libre) return pdfLibre(d, x0, y0, w, h, it);
+    var need = Math.min(5.5, h * 0.18), sc = 1, a;
+    for (;;) { a = pdfEtiquetaPase(NULLD, x0, y0, w, h, it, sc); if (a >= need || sc <= 0.45) break; sc -= 0.05; }
+    pdfEtiquetaPase(d, x0, y0, w, h, it, sc);
+  }
+  function pdfEtiquetaPase(d, x0, y0, w, h, it, sc) {
+    var C = cfg, est = estiloActual(), izq = est.alinear === 'izquierda', inset = 0, al = izq ? 'l' : 'c', aH = 0;
+    if (est.marco === 'simple' || est.marco === 'grueso') { var gz = est.marco === 'grueso' ? 0.6 : 0.3; d.rect(x0, y0, w, h, 's', gz); inset = gz + 0.5; }
+    else if (est.marco === 'punteado') { d.rect(x0, y0, w, h, 's', 0.35, [0.8, 0.8]); inset = 0.85; }
+    else if (est.marco === 'doble') { d.rect(x0, y0, w, h, 's', 0.22); d.rect(x0 + 0.9, y0 + 0.9, w - 1.8, h - 1.8, 's', 0.22); inset = 1.42; }
+    var pad = est.padding + inset, inner = w - 2 * pad, cx = izq ? x0 + pad : x0 + w / 2, y = y0 + pad;
+    var ex = extrasDatos(it);
+    if (C.verEmpresa && C.empresa.trim()) {
+      var txt = C.empresa.trim().toUpperCase(), fs = ajusteMm(txt, true, clamp(h * 0.075, 2.2, 3.5), 1.4, inner);
+      if (est.header === 'banner') {
+        var bh = fs * 1.7; d.rect(x0, y - 0.4, w, bh, 'f', 0.1, null, 0);
+        d.texto(txt, cx, y - 0.4 + bh / 2 + fs * 0.33, fs * PT, true, al, 1); y += bh + 0.4;
+      } else if (est.header === 'lineas') {
+        d.linea(x0 + pad, y, x0 + pad + inner, y, 0.25); y += 0.7;
+        d.texto(txt, cx, y + fs * 0.85, fs * PT, true, al); y += fs * 1.15 + 0.4;
+        d.linea(x0 + pad, y, x0 + pad + inner, y, 0.25); y += 0.9;
+      } else {
+        d.texto(txt, cx, y + fs * 0.85, fs * PT, true, al); y += fs * 1.15 + 0.4;
+        if (est.header === 'linea') { d.linea(x0 + pad, y, x0 + pad + inner, y, 0.25); y += 0.9; }
+        else if (est.header === 'punteada') { d.linea(x0 + pad, y, x0 + pad + inner, y, 0.25, [0.6, 0.6]); y += 0.9; }
+        else y += 0.4;
+      }
+    }
+    if (ex.promo && ex.promo.donde === 'arriba') {
+      var a1 = ajusteMm(ex.promo.l1, false, 2.4 * sc, 1.2, inner); d.texto(ex.promo.l1, cx, y + a1 * 0.85, a1 * PT, false, al); y += a1 * 1.15;
+      if (ex.promo.l2) { var a2 = ajusteMm(ex.promo.l2, true, 3.4 * sc, 1.4, inner); d.texto(ex.promo.l2, cx, y + a2 * 0.85, a2 * PT, true, al); y += a2 * 1.15; }
+      y += 0.3;
+    }
+    var yb = y0 + h - pad;
+    if (C.verCodigo && it.codigo) { var cs = ajusteMm(it.codigo, false, 2.4 * sc, 1.3, inner); yb -= cs * 1.1; d.texto(it.codigo, cx, yb + cs * 0.85, cs * PT, false, al); }
+    if (C.verBarras && it.codigo) {
+      var m = barrasDe(it.codigo, tipoBarrasSel());
+      if (m) {
+        var hb = clamp(h * 0.2, 5, 10) * sc, mod = Math.min(inner / m.total, 0.5), bw = m.total * mod, bx = izq ? x0 + pad : x0 + (w - bw) / 2;
+        yb -= hb; m.barras.forEach(function (b) { d.rect(bx + b[0] * mod, yb, b[1] * mod, hb, 'f', 0.01, null, 0); }); yb -= 0.4;
+      }
+    }
+    function lineaInf(txt, bold, mm, minMm) { var s = ajusteMm(txt, bold, mm * sc, minMm * 0.8, inner); yb -= s * 1.15; d.texto(txt, cx, yb + s * 0.85, s * PT, bold, al); }
+    if (ex.texto) lineaInf(ex.texto, false, 2.4, 1.4);
+    if (ex.promo && ex.promo.donde === 'precio') { if (ex.promo.l1) lineaInf(ex.promo.l1, false, 2.4, 1.4); if (ex.promo.l2) lineaInf(ex.promo.l2, true, 3.4, 1.6); }
+    if (C.verPrecio) {
+      var ptxt = formatoPrecio(precioEtiquetaR(it)), ps = ajusteMm(ptxt, true, clamp(h * est.factorPrecio, 5, 14) * (C.tamPrecio / 100) * sc, 3, inner);
+      if (est.precioBanner) { var bh2 = ps * 1.35; yb -= bh2; d.rect(x0 + pad, yb, inner, bh2, 'f', 0.1, null, 0); d.texto(ptxt, cx, yb + bh2 / 2 + ps * 0.33, ps * PT, true, al, 1); yb -= 0.5; }
+      else { yb -= ps * 1.05; d.texto(ptxt, cx, yb + ps * 0.85, ps * PT, true, al); }
+      if (C.modoPrecio === 'ambos') lineaInf('Transf. ' + formatoPrecio(parsePrecio(it.precio) * 2), false, 2.6, 1.5);
+    }
+    aH = yb - y - 0.5;
+    if (aH > 2 && d !== NULLD) {
+      var fn = C.verPrecio ? est.factorNombre : est.factorNombre * 1.8, fs2 = clamp(h * fn, 3, C.verPrecio ? 6 : 10), lin, nombre = it.nombre || 'Producto';
+      for (;;) { lin = TTPdf.partir(nombre, inner, fs2 * PT, true); if (lin.length * fs2 * 1.1 <= aH || fs2 <= 1.8) break; fs2 -= 0.1; }
+      lin = lin.slice(0, Math.max(1, Math.floor(aH / (fs2 * 1.1))));
+      var ty = y + Math.max(0, (aH - lin.length * fs2 * 1.1) / 2);
+      lin.forEach(function (t) { d.texto(t, cx, ty + fs2 * 0.85, fs2 * PT, true, al); ty += fs2 * 1.1; });
+    }
+    return aH;
+  }
+  function pdfLibre(d, x0, y0, w, h, it) {
+    var pad = 1.5, inner = w - 2 * pad, y = y0 + pad, yb = y0 + h - pad, cx = x0 + w / 2;
+    if (it.cab) { var cs = Math.min(h * 0.14, 5), l = TTPdf.partir(it.cab, inner, cs * PT, true); l.forEach(function (t) { d.texto(t, cx, y + cs * 0.85, cs * PT, true, 'c'); y += cs * 1.1; }); y += 0.5; }
+    if (it.pie) { var ps = Math.min(h * 0.09, 3.5), l2 = TTPdf.partir(it.pie, inner, ps * PT, false); yb -= l2.length * ps * 1.1; var yy = yb; l2.forEach(function (t) { d.texto(t, cx, yy + ps * 0.85, ps * PT, false, 'c'); yy += ps * 1.1; }); yb -= 0.5; }
+    if (it.cuerpo) {
+      var aH = yb - y, bs = Math.min(h * 0.32, 12) * it.tam, lin;
+      for (;;) { lin = TTPdf.partir(it.cuerpo, inner, bs * PT, true); if (lin.length * bs * 1.05 <= aH || bs <= 2) break; bs -= 0.2; }
+      var ty = y + Math.max(0, (aH - lin.length * bs * 1.05) / 2);
+      lin.forEach(function (t) { d.texto(t, cx, ty + bs * 0.85, bs * PT, true, 'c'); ty += bs * 1.05; });
+    }
+  }
+  // ---- Hoja Carta ----
+  function geometriaHoja() {
+    leerCfgRaster();
+    var ap = $('shOri').value === 'h', PW = ap ? 279.4 : 215.9, PH = ap ? 215.9 : 279.4;
+    var M = Math.max(0, Math.min(30, parseFloat($('shMargen').value) || 0)), cols = +$('shCols').value || 3;
+    var lw = (PW - 2 * M) / cols, lh = lw * cfg.alto / cfg.ancho, rows = Math.max(1, Math.floor((PH - 2 * M) / lh));
+    return { PW: PW, PH: PH, M: M, cols: cols, lw: lw, lh: lh, rows: rows, por: cols * rows };
+  }
+  function pintarHojaPrev() {
+    var t = $('hojaPrevTxt'), g = $('hojaPrev');
+    if (!t || !g) return;
+    try {
+      var G = geometriaHoja(), tot = 0; listaImpresion().forEach(function (x) { tot += x.cant; });
+      t.textContent = tot + ' etiqueta(s) → ' + Math.max(0, Math.ceil(tot / G.por)) + ' hoja(s) · ' + G.cols + ' x ' + G.rows + ' por hoja · etiqueta de ' + G.lw.toFixed(1) + ' x ' + G.lh.toFixed(1) + ' mm';
+      g.style.gridTemplateColumns = 'repeat(' + G.cols + ',1fr)'; g.style.aspectRatio = G.PW + '/' + G.PH;
+      var h = ''; for (var i = 0; i < G.por; i++) h += '<div' + (i < tot ? ' class="u"' : '') + '></div>';
+      g.innerHTML = h; g.style.maxWidth = (G.PW > G.PH ? 260 : 190) + 'px';
+    } catch (e) {}
+  }
+  function generarHojaPDF() {
+    var m = $('msgListado'); 
+    var lista = listaImpresion();
+    if (!lista.length) { alert('Marca al menos un producto (o activa la etiqueta libre).'); return; }
+    var G = geometriaHoja(), todas = [];
+    lista.forEach(function (x) { for (var i = 0; i < x.cant; i++) todas.push(x.p); });
+    if (todas.length > 3000) { alert('Máximo 3000 etiquetas por PDF.'); return; }
+    var d = new TTPdf.Doc(G.PW, G.PH);
+    for (var i = 0; i < todas.length; i++) {
+      var pos = i % G.por;
+      if (i > 0 && pos === 0) d.nueva();
+      if (pos === 0 && $('shGuias').checked) {
+        var n = Math.min(G.por, todas.length - i), filas = Math.ceil(n / G.cols), x2 = G.M + G.cols * G.lw, y2 = G.M + filas * G.lh;
+        for (var c = 0; c <= G.cols; c++) d.linea(G.M + c * G.lw, G.M, G.M + c * G.lw, y2, 0.15, [1, 1], null);
+        for (var r = 0; r <= filas; r++) d.linea(G.M, G.M + r * G.lh, x2, G.M + r * G.lh, 0.15, [1, 1]);
+      }
+      pdfEtiqueta(d, G.M + (pos % G.cols) * G.lw, G.M + Math.floor(pos / G.cols) * G.lh, G.lw, G.lh, todas[i]);
+    }
+    d.guardar('etiquetas-' + new Date().toISOString().slice(0, 10) + '.pdf');
+  }
+  // ---- Listados de precios ----
+  function filasBase() {
+    var q = norm($('q').value), base;
+    if (Object.keys(sel).length) base = catalogo.filter(function (p) { return sel[clave(p)] > 0; });
+    else base = catalogo.filter(function (p) { return !q || norm(p.nombre).indexOf(q) >= 0 || norm(p.sku).indexOf(q) >= 0; });
+    var o = $('lpOrden').value;
+    base = base.slice().sort(function (a, b) {
+      if (o === 'sku') return String(a.sku || '').localeCompare(String(b.sku || ''), 'es', { numeric: true });
+      if (o === 'pmenor') return parsePrecio(a.precio) - parsePrecio(b.precio);
+      if (o === 'pmayor') return parsePrecio(b.precio) - parsePrecio(a.precio);
+      return String(a.nombre).localeCompare(String(b.nombre), 'es', { sensitivity: 'base' });
+    });
+    return base;
+  }
+  function resumenPrecios(base) {
+    var v = base.map(function (p) { return parsePrecio(p.precio); }).filter(function (n) { return !isNaN(n); });
+    if (!v.length) return null;
+    var s = v.reduce(function (a, b) { return a + b; }, 0);
+    return { n: base.length, min: Math.min.apply(null, v), max: Math.max.apply(null, v), prom: s / v.length };
+  }
+  function listadoPDF() {
+    var base = filasBase(), m = $('msgListado');
+    if (!base.length) { m.textContent = 'No hay productos para listar.'; return; }
+    leerCfgRaster();
+    var cols = [], campos = [];
+    if ($('lpCSku').checked) { cols.push({ t: 'SKU', w: 2.7 }); campos.push(function (p) { return p.sku || ''; }); }
+    cols.push({ t: 'Producto', w: 7 }); campos.push(function (p) { return p.nombre; });
+    if ($('lpCPre').checked) { cols.push({ t: $('lpCTr').checked ? 'Efectivo' : 'Precio', w: 1.8, al: 'r', b: true }); campos.push(function (p) { return formatoPrecio(parsePrecio(p.precio)); }); }
+    if ($('lpCTr').checked) { cols.push({ t: 'Transfer.', w: 1.8, al: 'r', b: true }); campos.push(function (p) { return formatoPrecio(parsePrecio(p.precio) * 2); }); }
+    if ($('lpCStock').checked) { cols.push({ t: 'Exist.', w: 1.1, al: 'r' }); campos.push(function (p) { return p.stock == null ? '' : p.stock; }); }
+    var dos = $('lpDos').checked, ap = $('lpAp').checked || dos, filas;
+    var fila = function (p) { return campos.map(function (f) { return f(p); }); };
+    var colsF = cols;
+    if (dos) {
+      var mit = Math.ceil(base.length / 2); filas = [];
+      for (var i = 0; i < mit; i++) filas.push(fila(base[i]).concat([''], base[i + mit] ? fila(base[i + mit]) : cols.map(function () { return ''; })));
+      colsF = cols.concat([{ t: '', w: 0.25 }], cols.map(function (c) { return Object.assign({}, c); }));
+    } else filas = base.map(fila);
+    var neg = ($('negocio').value || '').trim(), r = resumenPrecios(base);
+    var sub = [($('lpSub').value || '').trim(), new Date().toLocaleDateString('es-ES')].filter(Boolean).join(' · ');
+    var pie = r ? ('Productos: ' + r.n + '   Mínimo: ' + formatoPrecio(r.min) + '   Máximo: ' + formatoPrecio(r.max) + '   Promedio: ' + formatoPrecio(r.prom)) : '';
+    var d = TTPdf.tabla({ titulo: ($('lpTitulo').value || '').trim() || 'Lista de precios', subtitulo: sub, cols: colsF, filas: filas, pie: pie, apaisado: ap, firma: neg, tam: dos ? 8 : 9.5 });
+    d.guardar('lista-de-precios-' + new Date().toISOString().slice(0, 10) + '.pdf');
+    m.style.color = '#86efac'; m.textContent = 'PDF generado con ' + base.length + ' producto(s).';
+  }
+  var imprimiendoListado = false;
+  async function listadoTermica() {
+    var m = $('msgListado'), base = filasBase();
+    if (!base.length) { m.style.color = '#fca5a5'; m.textContent = 'No hay productos para listar.'; return; }
+    if (imprimiendoListado) return;
+    imprimiendoListado = true;
+    try {
+      leerCfgRaster();
+      var W = +$('lpPapel').value || 384, f = 22, lh = 26, fam = FUENTES.arial, pad = 4, tr = $('lpCTr').checked;
+      var medida = document.createElement('canvas').getContext('2d');
+      var neg = ($('negocio').value || '').trim(), tit = ($('lpTitulo').value || '').trim() || 'Lista de precios';
+      var rows = [];
+      function w(txt, peso, px) { medida.font = peso + ' ' + px + 'px ' + fam; return medida.measureText(txt).width; }
+      function partir(txt, maxW, peso, px) {
+        medida.font = peso + ' ' + px + 'px ' + fam; return partirLineas(medida, txt, maxW);
+      }
+      if (neg) rows.push({ t: neg.toUpperCase(), c: 1, b: 1, px: 26 });
+      rows.push({ t: tit, c: 1, b: 1, px: 24 });
+      rows.push({ t: new Date().toLocaleDateString('es-ES'), c: 1, px: 20 });
+      rows.push({ raya: 1 });
+      base.forEach(function (p) {
+        var pr = formatoPrecio(parsePrecio(p.precio)) + (tr ? ' / ' + formatoPrecio(parsePrecio(p.precio) * 2) : ''), pw = w(pr, 'bold', f) + 8;
+        var lin = partir((p.sku ? p.sku + ' ' : '') + p.nombre, W - 2 * pad - pw, 'normal', f);
+        lin.forEach(function (t, i) { rows.push({ t: t, px: f, der: i === 0 ? pr : '' }); });
+      });
+      rows.push({ raya: 1 });
+      var r = resumenPrecios(base);
+      if (r) {
+        [['Total de productos', String(r.n)], ['Precio mínimo', formatoPrecio(r.min)], ['Precio máximo', formatoPrecio(r.max)], ['Precio promedio', formatoPrecio(r.prom)]].forEach(function (a) { rows.push({ t: a[0], px: f, der: a[1], b: 1 }); });
+      }
+      var H = pad; rows.forEach(function (x) { x.y = H; H += x.raya ? 10 : Math.round((x.px || f) * 1.2); });
+      H += 12; H = Math.ceil(H / 8) * 8;
+      var cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+      var g = cv.getContext('2d', { willReadFrequently: true });
+      g.fillStyle = '#fff'; g.fillRect(0, 0, W, H); g.fillStyle = '#000'; g.textBaseline = 'top';
+      rows.forEach(function (x) {
+        if (x.raya) { g.fillRect(pad, x.y + 4, W - 2 * pad, 2); return; }
+        g.font = (x.b ? 'bold ' : 'normal ') + (x.px || f) + 'px ' + fam;
+        if (x.c) { g.textAlign = 'center'; g.fillText(x.t, W / 2, x.y); }
+        else { g.textAlign = 'left'; g.fillText(x.t, pad, x.y); if (x.der) { g.font = 'bold ' + f + 'px ' + fam; g.textAlign = 'right'; g.fillText(x.der, W - pad, x.y); } }
+      });
+      var bt = bitsDeCanvas(cv, W, H), partes = [Uint8Array.of(0x1b, 0x40)];
+      for (var y = 0; y < H; y += BANDA) {
+        var n = Math.min(BANDA, H - y);
+        partes.push(Uint8Array.of(0x1d, 0x76, 0x30, 0x00, bt.bpr & 255, bt.bpr >> 8, n & 255, n >> 8));
+        partes.push(bt.bits.subarray(y * bt.bpr, (y + n) * bt.bpr));
+      }
+      partes.push(Uint8Array.of(0x1b, 0x4a, 60));
+      if ($('corte').checked) partes.push(Uint8Array.of(0x1d, 0x56, 0x42, 3));
+      var total = partes.reduce(function (s, p) { return s + p.length; }, 0), buf = new Uint8Array(total), o = 0;
+      partes.forEach(function (p) { buf.set(p, o); o += p.length; });
+      var rs = await fetch('/api/etiquetas/raw', { method: 'POST', body: buf, headers: { 'Content-Type': 'application/octet-stream' } });
+      var dj = await rs.json();
+      if (!dj.ok) throw new Error(dj.error || 'La impresora no respondió.');
+      m.style.color = '#86efac'; m.textContent = 'Listado enviado a la térmica (' + base.length + ' productos).';
+    } catch (e) { m.style.color = '#fca5a5'; m.textContent = 'No se pudo imprimir: ' + (e.message || e); }
+    imprimiendoListado = false;
+  }
+  // ---- Revisar codigos de barras ----
+  function revisarCodigos() {
+    var tipo = tipoBarrasSel(), base = Object.keys(sel).length ? catalogo.filter(function (p) { return sel[clave(p)] > 0; }) : catalogo, malos = [];
+    leerCfgRaster();
+    var inner = cfg.ancho - 2 * 3;
+    base.forEach(function (p) {
+      var c = String(p.sku || '').trim(), motivo = '';
+      if (!c) motivo = 'no tiene código';
+      else {
+        var m = barrasDe(c, tipo);
+        if (!m) motivo = tipo === 'ean13' ? 'no es EAN13 válido (12-13 dígitos y dígito de control correcto)' : (tipo === 'code39' ? 'tiene caracteres que Code 39 no admite' : 'tiene caracteres que no se pueden codificar');
+        else if (m.total * 0.19 > inner) motivo = 'es demasiado largo para ' + cfg.ancho + ' mm de ancho';
+      }
+      if (motivo) malos.push('• ' + (c || '(vacío)') + ' — ' + p.nombre + ': ' + motivo);
+    });
+    $('msgCodigos').style.color = malos.length ? '#fbbf24' : '#86efac';
+    $('msgCodigos').textContent = malos.length ? (malos.length + ' de ' + base.length + ' con problema:\n' + malos.slice(0, 40).join('\n') + (malos.length > 40 ? '\n…y ' + (malos.length - 40) + ' más' : '')) : ('Los ' + base.length + ' códigos se pueden imprimir con el tipo elegido.');
+  }
+  // ---- Datos guardados en la PC (plantillas + precios de referencia) ----
+  var datosSrv = { plantillas: [], predeterminada: '', referencia: null, refFecha: '' }, cambiosSet = {}, soloCambios = false;
+  var EXCL = { q: 1, oSinStock: 1, meNombre: 1, meLista: 1, feed: 1, corte: 1, lpPapel: 1 };
+  async function cargarDatosSrv() {
+    var d = null;
+    try { var r = await fetch('/api/etiquetas/datos'); if (r.ok) d = await r.json(); } catch (e) {}
+    if (!d || typeof d !== 'object') { try { d = JSON.parse(localStorage.getItem('etiquetasDatos') || 'null'); } catch (e) {} }
+    if (d && typeof d === 'object') {
+      datosSrv.plantillas = Array.isArray(d.plantillas) ? d.plantillas : (d.plantillas ? [d.plantillas] : []);
+      datosSrv.predeterminada = d.predeterminada || '';
+      datosSrv.referencia = d.referencia && typeof d.referencia === 'object' ? d.referencia : null;
+      datosSrv.refFecha = d.refFecha || '';
+    }
+  }
+  async function guardarDatosSrv() {
+    var txt = JSON.stringify(datosSrv);
+    try { localStorage.setItem('etiquetasDatos', txt); } catch (e) {}
+    try { await fetch('/api/etiquetas/datos', { method: 'POST', body: txt }); } catch (e) {}
+  }
+  function snapshotDiseno() {
+    var o = {};
+    document.querySelectorAll('#ctl input[id], #ctl select[id]').forEach(function (e) { if (!EXCL[e.id]) o[e.id] = e.type === 'checkbox' ? e.checked : e.value; });
+    return o;
+  }
+  function aplicarDiseno(o) {
+    Object.keys(o || {}).forEach(function (id) { var e = $(id); if (!e || EXCL[id]) return; if (e.type === 'checkbox') e.checked = !!o[id]; else e.value = o[id]; });
+    cambio();
+  }
+  function meMsg(t, ok) { var m = $('msgMe'); m.style.color = ok === false ? '#fca5a5' : '#86efac'; m.textContent = t; }
+  function mePintar() {
+    var s = $('meLista'), ant = s.value;
+    s.innerHTML = datosSrv.plantillas.length ? datosSrv.plantillas.map(function (p) { return '<option value="' + esc(p.nombre) + '">' + (p.nombre === datosSrv.predeterminada ? '★ ' : '') + esc(p.nombre) + '</option>'; }).join('') : '<option value="">(aún no hay ninguna)</option>';
+    if (ant) s.value = ant;
+  }
+  function meElegida() { if ($('meLista').value) $('meNombre').value = $('meLista').value; }
+  async function meGuardar() {
+    var n = $('meNombre').value.trim();
+    if (!n) { meMsg('Escribe un nombre.', false); return; }
+    var i = datosSrv.plantillas.findIndex(function (p) { return p.nombre === n; });
+    if (i < 0 && datosSrv.plantillas.length >= 60) { meMsg('Ya hay 60 guardadas: borra alguna.', false); return; }
+    var reg = { nombre: n, datos: snapshotDiseno() };
+    if (i >= 0) datosSrv.plantillas[i] = reg; else datosSrv.plantillas.push(reg);
+    await guardarDatosSrv(); mePintar(); $('meLista').value = n; meMsg('Guardada: ' + n);
+  }
+  function meUsar() {
+    var p = datosSrv.plantillas.find(function (x) { return x.nombre === $('meLista').value; });
+    if (!p) { meMsg('Elige una de la lista.', false); return; }
+    aplicarDiseno(p.datos); meMsg('Puesta: ' + p.nombre);
+  }
+  async function mePred() {
+    var n = $('meLista').value; if (!n) { meMsg('Elige una de la lista.', false); return; }
+    datosSrv.predeterminada = (datosSrv.predeterminada === n) ? '' : n;
+    await guardarDatosSrv(); mePintar(); $('meLista').value = n;
+    meMsg(datosSrv.predeterminada ? 'Predeterminada: ' + n : 'Ya no hay predeterminada.');
+  }
+  async function meBorrar() {
+    var n = $('meLista').value; if (!n) return;
+    if (!confirm('¿Borrar "' + n + '"? No se puede deshacer.')) return;
+    datosSrv.plantillas = datosSrv.plantillas.filter(function (p) { return p.nombre !== n; });
+    if (datosSrv.predeterminada === n) datosSrv.predeterminada = '';
+    await guardarDatosSrv(); mePintar(); meMsg('Borrada.');
+  }
+  // ---- Ajustes extra locales ----
+  function guardarExtra() {
+    try { var o = {}; document.querySelectorAll('.exc').forEach(function (e) { o[e.id] = e.type === 'checkbox' ? e.checked : e.value; }); localStorage.setItem('etiquetasAjustesExtra', JSON.stringify(o)); } catch (e) {}
+  }
+  function restaurarExtra() {
+    try {
+      var o = JSON.parse(localStorage.getItem('etiquetasAjustesExtra') || 'null'); if (!o) return;
+      Object.keys(o).forEach(function (id) { var e = $(id); if (!e || id === 'lbOn') return; if (e.type === 'checkbox') e.checked = !!o[id]; else e.value = o[id]; });
+    } catch (e) {}
+  }
+  // ---- Aviso de precios cambiados ----
+  function precioReferencia(p) {
+    var n = parsePrecio(p.precio); if (isNaN(n)) return String(p.precio);
+    var dec = $('decimales').value; n = $('modoPrecio').value === 'transferencia' ? n * 2 : n;
+    return dec === '0' ? String(Math.round(n)) : String(Math.round(n * 100) / 100);
+  }
+  function evaluarCambios(inicial) {
+    var ref = datosSrv.referencia;
+    if (!ref) {
+      if (!inicial) return;
+      ref = datosSrv.referencia = {}; catalogoTodo.forEach(function (p) { ref[clave(p)] = precioReferencia(p); });
+      datosSrv.refFecha = new Date().toLocaleString('es-ES'); guardarDatosSrv();
+    }
+    cambiosSet = {}; var n = 0;
+    catalogoTodo.forEach(function (p) { var k = clave(p); if (ref[k] !== undefined && ref[k] !== precioReferencia(p)) { cambiosSet[k] = true; n++; } });
+    var b = $('barCambios');
+    if (!n) { b.style.display = 'none'; soloCambios = false; return; }
+    b.style.display = 'block';
+    b.innerHTML = '<b>' + n + ' precio(s) cambiaron</b> desde ' + esc(datosSrv.refFecha || 'la última vez') + ': sus etiquetas quedaron viejas.<br>' +
+      '<button onclick="verSoloCambios()">' + (soloCambios ? 'Ver todo' : 'Ver solo esos') + '</button><button onclick="cambiosListo()">Listo</button>';
+  }
+  function verSoloCambios() {
+    soloCambios = !soloCambios;
+    if (soloCambios) { sel = {}; catalogo.forEach(function (p) { if (cambiosSet[clave(p)]) sel[clave(p)] = 1; }); $('q').value = ''; }
+    evaluarCambios(false); pintarLista(); pintarVista();
+  }
+  async function cambiosListo() {
+    datosSrv.referencia = {}; catalogoTodo.forEach(function (p) { datosSrv.referencia[clave(p)] = precioReferencia(p); });
+    datosSrv.refFecha = new Date().toLocaleString('es-ES'); await guardarDatosSrv();
+    soloCambios = false; evaluarCambios(false); pintarLista();
+  }
+  async function iniciarExtra() {
+    await cargarDatosSrv(); mePintar();
+    var pr = datosSrv.plantillas.find(function (p) { return p.nombre === datosSrv.predeterminada; });
+    if (pr) aplicarDiseno(pr.datos);
+    evaluarCambios(true);
+  }
+
   async function iniciar() {
     cargarAjustes();
+    restaurarExtra();
     document.body.className = ($('modo').value === 'hoja') ? 'modo-hoja' : 'modo-rollo';
     try {
       var r = await fetch('/api/catalogo'); catalogoTodo = await r.json();
@@ -16440,6 +17134,7 @@ function rasterEtiqueta(it) {
       nuevosFecha = d3.fecha || '';
       (d3.skus || []).forEach(function (k) { nuevosSet[k] = true; });
     } catch (e) {}
+    try { await iniciarExtra(); } catch (e) {}
     cambio();
     pintarLista();
   }
@@ -18077,6 +18772,172 @@ $global:extrasHtml = @'
 .ttx-ay-pie small{color:#64748b;margin-right:auto}
 @media(max-width:720px){.ttx-bienv{flex-direction:column}.ttx-bienv .ttx-izq{flex:0 0 auto;padding:16px}.ttx-bienv .ttx-mc,.ttx-bienv .ttx-izq p{display:none}.ttx-ay-c{flex-direction:column}.ttx-ay-toc{flex:0 0 auto;max-height:130px;border-right:none;border-bottom:1px solid #e2e8f0}.ttx-perm{grid-template-columns:1fr}.ttx-op{flex-direction:column}.ttx-2{flex-direction:column;gap:0}}
 </style>
+<script id="ttx-pdf">
+(function(){
+
+  /* ===== TTPdf: generador de PDF sin ventanas emergentes (Helvetica, Latin-1) ===== */
+  var TTPdf = window.TTPdf = (function () {
+    var WR = [278, 278, 355, 556, 556, 889, 667, 191, 333, 333, 389, 584, 278, 333, 278, 278, 556, 556, 556, 556, 556, 556, 556, 556, 556, 556, 278, 278, 584, 584, 584, 556, 1015, 667, 667, 722, 722, 667, 611, 778, 722, 278, 500, 667, 556, 833, 722, 778, 667, 778, 722, 667, 611, 722, 667, 944, 667, 667, 611, 278, 278, 278, 469, 556, 333, 556, 556, 500, 556, 556, 278, 556, 556, 222, 222, 500, 222, 833, 556, 556, 556, 556, 333, 500, 278, 556, 500, 722, 500, 500, 500, 334, 260, 334, 584, 761, 556, 278, 222, 556, 333, 1000, 556, 556, 333, 1000, 667, 333, 1000, 278, 611, 278, 278, 222, 222, 333, 333, 350, 556, 1000, 333, 1000, 500, 333, 944, 278, 500, 667, 278, 333, 556, 556, 556, 556, 260, 556, 333, 737, 370, 556, 584, 333, 737, 333, 400, 584, 333, 333, 333, 556, 537, 278, 333, 333, 365, 556, 834, 834, 834, 611, 667, 667, 667, 667, 667, 667, 1000, 722, 667, 667, 667, 667, 278, 278, 278, 278, 722, 722, 778, 778, 778, 778, 778, 584, 778, 722, 722, 722, 722, 667, 667, 611, 556, 556, 556, 556, 556, 556, 889, 500, 556, 556, 556, 556, 278, 278, 278, 278, 556, 556, 556, 556, 556, 556, 556, 584, 611, 556, 556, 556, 556, 500, 556, 500], WB = [278, 333, 474, 556, 556, 889, 722, 238, 333, 333, 389, 584, 278, 333, 278, 278, 556, 556, 556, 556, 556, 556, 556, 556, 556, 556, 333, 333, 584, 584, 584, 611, 975, 722, 722, 722, 722, 667, 611, 778, 722, 278, 556, 722, 611, 833, 722, 778, 667, 778, 722, 667, 611, 722, 667, 944, 667, 667, 611, 333, 278, 333, 584, 556, 333, 556, 611, 556, 611, 556, 333, 611, 611, 278, 278, 556, 278, 889, 611, 611, 611, 611, 389, 556, 333, 611, 556, 778, 556, 556, 500, 389, 280, 389, 584, 761, 556, 278, 278, 556, 500, 1000, 556, 556, 333, 1000, 667, 333, 1000, 278, 611, 278, 278, 278, 278, 500, 500, 350, 556, 1000, 333, 1000, 556, 333, 944, 278, 500, 667, 278, 333, 556, 556, 556, 556, 280, 556, 333, 737, 370, 556, 584, 333, 737, 333, 400, 584, 333, 333, 333, 611, 556, 278, 333, 333, 365, 556, 834, 834, 834, 611, 722, 722, 722, 722, 722, 722, 1000, 722, 667, 667, 667, 667, 278, 278, 278, 278, 722, 722, 778, 778, 778, 778, 778, 584, 778, 722, 722, 722, 722, 667, 667, 611, 556, 556, 556, 556, 556, 556, 889, 556, 556, 556, 556, 556, 278, 278, 278, 278, 611, 611, 611, 611, 611, 611, 611, 584, 611, 611, 611, 611, 611, 556, 611, 556];
+    var MM = 72 / 25.4;
+    function code(ch) {
+      var c = ch.charCodeAt(0);
+      if (c >= 32 && c < 256) return c;
+      if (c === 8211 || c === 8212) return 45;
+      if (c === 8216 || c === 8217) return 39;
+      if (c === 8220 || c === 8221) return 34;
+      if (c === 8226) return 183;
+      return 63;
+    }
+    function ancho(txt, size, bold) {
+      var t = bold ? WB : WR, s = 0, str = String(txt == null ? '' : txt);
+      for (var i = 0; i < str.length; i++) { var c = code(str[i]) - 32; s += (t[c] == null ? 556 : t[c]); }
+      return s * size / 1000 / MM; // mm
+    }
+    function esc(txt) {
+      var o = '', str = String(txt == null ? '' : txt);
+      for (var i = 0; i < str.length; i++) {
+        var c = code(str[i]);
+        if (c === 40 || c === 41 || c === 92) o += '\\' + String.fromCharCode(c);
+        else if (c < 32) o += ' ';
+        else if (c > 126) o += '\\' + ('00' + c.toString(8)).slice(-3);
+        else o += String.fromCharCode(c);
+      }
+      return o;
+    }
+    function n(v) { return (Math.round(v * 100) / 100).toString(); }
+    function recortar(txt, maxMm, size, bold) {
+      txt = String(txt == null ? '' : txt);
+      if (!txt || maxMm <= 0) return '';
+      if (ancho(txt, size, bold) <= maxMm) return txt;
+      while (txt.length > 1 && ancho(txt + '...', size, bold) > maxMm) txt = txt.slice(0, -1);
+      return txt + '...';
+    }
+    function partir(txt, maxMm, size, bold) {
+      var pal = String(txt == null ? '' : txt).split(/\s+/).filter(Boolean), lin = [], act = '';
+      pal.forEach(function (p) {
+        var prueba = act ? act + ' ' + p : p;
+        if (ancho(prueba, size, bold) <= maxMm) { act = prueba; return; }
+        if (act) lin.push(act);
+        while (ancho(p, size, bold) > maxMm && p.length > 1) {
+          var k = p.length - 1;
+          while (k > 1 && ancho(p.slice(0, k), size, bold) > maxMm) k--;
+          lin.push(p.slice(0, k)); p = p.slice(k);
+        }
+        act = p;
+      });
+      if (act) lin.push(act);
+      return lin;
+    }
+    function Doc(w, h) {
+      this.w = w; this.h = h; this.paginas = []; this.cur = null;
+      this.nueva();
+    }
+    Doc.prototype.nueva = function () { this.cur = []; this.paginas.push(this.cur); this.fill = '0 g'; return this; };
+    Doc.prototype.color = function (gris) { this.cur.push(n(gris) + ' g ' + n(gris) + ' G'); return this; };
+    Doc.prototype.grosor = function (mm) { this.cur.push(n(mm * MM) + ' w'); return this; };
+    Doc.prototype.linea = function (x1, y1, x2, y2, grosor, dash) {
+      var H = this.h;
+      this.cur.push('q ' + n(grosor * MM || 0.5) + ' w ' + (dash ? '[' + n(dash[0] * MM) + ' ' + n(dash[1] * MM) + '] 0 d ' : '') +
+        n(x1 * MM) + ' ' + n((H - y1) * MM) + ' m ' + n(x2 * MM) + ' ' + n((H - y2) * MM) + ' l S Q');
+      return this;
+    };
+    Doc.prototype.rect = function (x, y, w, h, modo, grosor, dash, gris) {
+      var H = this.h, op = modo === 'f' ? 'f' : (modo === 'fs' ? 'B' : 'S');
+      this.cur.push('q ' + (gris != null ? n(gris) + ' g ' + n(gris) + ' G ' : '') + n((grosor || 0.2) * MM) + ' w ' + (dash ? '[' + n(dash[0] * MM) + ' ' + n(dash[1] * MM) + '] 0 d ' : '') +
+        n(x * MM) + ' ' + n((H - y - h) * MM) + ' ' + n(w * MM) + ' ' + n(h * MM) + ' re ' + op + ' Q');
+      return this;
+    };
+    // y = linea base (mm desde arriba); al: 'l' | 'c' | 'r'
+    Doc.prototype.texto = function (txt, x, y, size, bold, al, gris) {
+      var w = ancho(txt, size, bold), px = x;
+      if (al === 'c') px = x - w / 2; else if (al === 'r') px = x - w;
+      this.cur.push('q ' + (gris != null ? n(gris) + ' g ' : '') + 'BT /' + (bold ? 'F2' : 'F1') + ' ' + n(size) + ' Tf ' + n(px * MM) + ' ' + n((this.h - y) * MM) + ' Td (' + esc(txt) + ') Tj ET Q');
+      return this;
+    };
+    Doc.prototype.bytes = function () {
+      var objs = [], self = this;
+      function add(s) { objs.push(s); return objs.length; }
+      add('<< /Type /Catalog /Pages 2 0 R >>');
+      add(''); // pages placeholder
+      var f1 = add('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>');
+      var f2 = add('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>');
+      var kids = [];
+      this.paginas.forEach(function (p) {
+        var cont = p.join('\n');
+        var c = add('<< /Length ' + cont.length + ' >>\nstream\n' + cont + '\nendstream');
+        var pg = add('<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ' + n(self.w * MM) + ' ' + n(self.h * MM) + '] /Resources << /Font << /F1 ' + f1 + ' 0 R /F2 ' + f2 + ' 0 R >> >> /Contents ' + c + ' 0 R >>');
+        kids.push(pg + ' 0 R');
+      });
+      objs[1] = '<< /Type /Pages /Kids [' + kids.join(' ') + '] /Count ' + kids.length + ' >>';
+      var out = '%PDF-1.4\n', offs = [];
+      objs.forEach(function (o, i) { offs.push(out.length); out += (i + 1) + ' 0 obj\n' + o + '\nendobj\n'; });
+      var xr = out.length;
+      out += 'xref\n0 ' + (objs.length + 1) + '\n0000000000 65535 f \n';
+      offs.forEach(function (o) { out += ('0000000000' + o).slice(-10) + ' 00000 n \n'; });
+      out += 'trailer\n<< /Size ' + (objs.length + 1) + ' /Root 1 0 R >>\nstartxref\n' + xr + '\n%%EOF';
+      var u = new Uint8Array(out.length);
+      for (var i = 0; i < out.length; i++) u[i] = out.charCodeAt(i) & 255;
+      return u;
+    };
+    Doc.prototype.guardar = function (nombre) {
+      var blob = new Blob([this.bytes()], { type: 'application/pdf' });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url; a.download = nombre || 'documento.pdf';
+      document.body.appendChild(a); a.click();
+      setTimeout(function () { document.body.removeChild(a); URL.revokeObjectURL(url); }, 4000);
+    };
+    // Tabla paginada. opt: {titulo, subtitulo, cols:[{t,w(relativo),al:'l'|'r'|'c'}], filas:[[...]], pie, apaisado, check}
+    function tabla(opt) {
+      var ap = !!opt.apaisado, W = ap ? 279.4 : 215.9, H = ap ? 215.9 : 279.4, M = 14;
+      var d = new Doc(W, H), cols = opt.cols, tw = W - 2 * M, sum = 0, fs = opt.tam || 9.5, rh = fs * 0.42 + 2.6;
+      cols.forEach(function (c) { sum += c.w; });
+      var xs = [], x = M;
+      cols.forEach(function (c) { c.mm = tw * c.w / sum; xs.push(x); x += c.mm; });
+      var y, pag = 0;
+      function cabecera() {
+        pag++;
+        y = M + 5;
+        if (pag === 1) {
+          d.texto(opt.titulo || '', M, y, 15, true, 'l');
+          y += 6;
+          if (opt.subtitulo) { d.texto(opt.subtitulo, M, y, 9, false, 'l', 0.35); y += 5; }
+          y += 2;
+        } else { d.texto(opt.titulo || '', M, y, 10, true, 'l'); y += 6; }
+        d.rect(M, y - rh + 1.6, tw, rh, 'f', 0.1, null, 0.9);
+        d.color(0);
+        cols.forEach(function (c, i) {
+          var px = c.al === 'r' ? xs[i] + c.mm - 1.5 : (c.al === 'c' ? xs[i] + c.mm / 2 : xs[i] + 1.5);
+          d.texto(c.t, px, y, fs - 0.5, true, c.al || 'l');
+        });
+        y += rh;
+      }
+      cabecera();
+      opt.filas.forEach(function (f, idx) {
+        if (y > H - M - 8) { piePag(); d.nueva(); cabecera(); }
+        cols.forEach(function (c, i) {
+          var txt = f[i] == null ? '' : String(f[i]), bold = !!(c.b);
+          var px = c.al === 'r' ? xs[i] + c.mm - 1.5 : (c.al === 'c' ? xs[i] + c.mm / 2 : xs[i] + 1.5);
+          if (c.caja) { d.rect(xs[i] + c.mm / 2 - 1.6, y - 2.6, 3.2, 3.2, 's', 0.25); return; }
+          var f2 = fs; while (f2 > 6 && ancho(txt, f2, bold) > c.mm - 3) f2 -= 0.25;
+          d.texto(recortar(txt, c.mm - 3, f2, bold), px, y, f2, bold, c.al || 'l');
+        });
+        d.linea(M, y + 1.6, W - M, y + 1.6, 0.1);
+        y += rh;
+      });
+      if (opt.pie) {
+        if (y > H - M - 14) { piePag(); d.nueva(); y = M + 5; }
+        y += 3; d.texto(opt.pie, M, y, fs + 1, true, 'l');
+      }
+      piePag();
+      function piePag() { d.texto('Página ' + pag, W - M, H - 8, 8, false, 'r', 0.5); if (opt.firma) d.texto(opt.firma, M, H - 8, 8, false, 'l', 0.5); }
+      return d;
+    }
+    return { Doc: Doc, ancho: ancho, partir: partir, recortar: recortar, tabla: tabla };
+  })();
+
+})();
+</script>
 <script id="ttx-extras">
 (function () {
 'use strict';
@@ -19607,6 +20468,30 @@ while ($listener.IsListening) {
                 if ($dInC -and $dInC.PSObject.Properties.Name -contains 'bienvenida') { $global:instalacion.bienvenidaVista = [bool]$dInC.bienvenida }
                 Guardar-Instalacion
                 Enviar-Json $context @{ ok = $true }
+            }
+
+        } elseif ($path -eq "/api/etiquetas/datos" -and ($method -eq "GET" -or $method -eq "POST")) {
+            # Plantillas "Mis etiquetas" y precios de referencia (aviso de precios cambiados): se guardan en esta PC.
+            $rutaEtqDatos = Join-Path $scriptDir "etiquetas_datos.json"
+            if (-not (Es-PeticionPC $request)) {
+                Enviar-Json $context @{ ok = $false; error = "Solo desde la PC." } 403
+            } elseif ($method -eq "GET") {
+                $txtEtqD = "{}"
+                if (Test-Path $rutaEtqDatos) { try { $tEd = Get-Content $rutaEtqDatos -Raw -Encoding UTF8; if ($tEd -and $tEd.Trim().Length -gt 1) { $txtEtqD = $tEd } } catch {} }
+                Enviar-Respuesta -Context $context -Body $txtEtqD -ContentType "application/json; charset=utf-8" -StatusCode 200
+            } else {
+                $txtEtqIn = Leer-CuerpoTexto $request
+                if (-not $txtEtqIn -or $txtEtqIn.Length -gt 3000000) {
+                    Enviar-Json $context @{ ok = $false; error = "Datos vacios o demasiado grandes." } 400
+                } else {
+                    try {
+                        $null = ($txtEtqIn | ConvertFrom-Json)
+                        Escribir-ArchivoConReintento -ruta $rutaEtqDatos -contenido $txtEtqIn | Out-Null
+                        Enviar-Json $context @{ ok = $true }
+                    } catch {
+                        Enviar-Json $context @{ ok = $false; error = "No se pudo guardar: $($_.Exception.Message)" } 400
+                    }
+                }
             }
 
         } elseif ($method -eq "GET" -and $path -eq "/api/config") {
