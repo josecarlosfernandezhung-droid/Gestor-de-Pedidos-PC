@@ -4429,6 +4429,247 @@ function Pin-Valido([string]$vendedor, $pinEnviado) {
 Cargar-ConfigApp
 Cargar-ReciboCfg
 
+
+# ------------------------------------------------------------------
+# INSTALACION, PRUEBA DE 7 DIAS Y LICENCIA
+#  - instalacion.json: si ya se hizo la configuracion inicial, si se vio la bienvenida, la impresora elegida y el rol de cada vendedor.
+#  - Prueba de 7 dias y licencia: las lleva ServidorPedidos.exe (Launcher.cs); aqui solo se muestran y se activan desde la pagina /licencia.
+# ------------------------------------------------------------------
+$global:appVersion = "1.0"
+$global:diasPrueba = 7
+$instalacionPath = Join-Path $scriptDir "instalacion.json"
+$global:instalacion = [pscustomobject]@{ configurado = $false; bienvenidaVista = $false; impresora = ""; roles = @{} }
+$global:licCache = $null
+$global:licCacheHora = [datetime]::MinValue
+
+function Guardar-Instalacion {
+    $o = [pscustomobject]@{ configurado = [bool]$global:instalacion.configurado; bienvenidaVista = [bool]$global:instalacion.bienvenidaVista; impresora = [string]$global:instalacion.impresora; roles = $global:instalacion.roles }
+    Escribir-ArchivoConReintento -ruta $instalacionPath -contenido ($o | ConvertTo-Json -Depth 4) | Out-Null
+}
+function Cargar-Instalacion {
+    if (Test-Path -LiteralPath $instalacionPath) {
+        try {
+            $raw = Get-Content -LiteralPath $instalacionPath -Raw -Encoding UTF8
+            if ($raw -and $raw.Trim().Length -gt 0) {
+                $d = $raw | ConvertFrom-Json
+                if ($null -ne $d.configurado) { $global:instalacion.configurado = [bool]$d.configurado }
+                if ($null -ne $d.bienvenidaVista) { $global:instalacion.bienvenidaVista = [bool]$d.bienvenidaVista }
+                if ($d.impresora) { $global:instalacion.impresora = [string]$d.impresora }
+                $h = @{}
+                if ($d.roles) { foreach ($p in $d.roles.PSObject.Properties) { $h[[string]$p.Name] = [string]$p.Value } }
+                $global:instalacion.roles = $h
+            }
+        } catch { Write-Host "Aviso: no se pudo leer instalacion.json." }
+    } else {
+        # Una instalacion que ya venia funcionando (tiene comprobante o vendedores) no pasa por el asistente.
+        if ((Test-Path -LiteralPath $reciboCfgPath) -or (Test-Path -LiteralPath $pinesPath)) { $global:instalacion.configurado = $true }
+        try { Guardar-Instalacion } catch {}
+    }
+}
+Cargar-Instalacion
+if ($global:instalacion.impresora) { $nombreImpresora = [string]$global:instalacion.impresora }
+
+# ---- Licencia y prueba: las lleva ServidorPedidos.exe (TotoLic.Gate). Aqui solo se leen y se pide activar. ----
+function Estado-Licencia {
+    $ahora = Get-Date
+    if ($global:licCache -and (($ahora - $global:licCacheHora).TotalSeconds -lt 5)) { return $global:licCache }
+    $e = @{ abierta = $false; modo = "vencida"; dias = 0; vence = ""; idEquipo = ""; motivo = ""; diasPrueba = [int]$global:diasPrueba }
+    try { $e.abierta = [bool][TotoLic.Gate]::IsOpen() } catch {}
+    try { $e.idEquipo = [string][TotoLic.Gate]::MachineCode() } catch {}
+    try { $e.dias = [int][TotoLic.Gate]::Dias(); $e.vence = [string][TotoLic.Gate]::VenceTexto() } catch {}
+    if ($e.abierta) { $e.modo = "licencia" }
+    # .exe nuevo: sabe distinguir prueba, licencia y el motivo del bloqueo
+    try {
+        $m = [string][TotoLic.Gate]::Modo()
+        if ($m) { $e.modo = $m }
+        $e.motivo = [string][TotoLic.Gate]::Motivo()
+        $e.diasPrueba = [int][TotoLic.Gate]::TrialDays
+    } catch {}
+    if (-not $e.abierta) { $e.dias = 0 }
+    $global:licCache = $e
+    $global:licCacheHora = $ahora
+    return $e
+}
+function Activar-Licencia([string]$clave) {
+    $c = ([string]$clave).Trim()
+    if (-not $c) { return @{ ok = $false; error = "Pega tu clave de licencia." } }
+    $err = ""
+    try { $err = [string][TotoLic.Gate]::Activar($c) }
+    catch { return @{ ok = $false; error = "Este programa (.exe) es una version anterior y no permite activar desde aqui. Pide el .exe nuevo." } }
+    $global:licCache = $null
+    if ($err) { return @{ ok = $false; error = $err } }
+    try { Registrar-Auditoria "PC" "licencia" "Se activo una licencia" $null $null $false "PC" } catch {}
+    return @{ ok = $true }
+}
+function Json-Licencia {
+    $e = Estado-Licencia
+    return @{ ok = $true; abierta = [bool]$e.abierta; modo = [string]$e.modo; dias = [int]$e.dias; vence = [string]$e.vence; idEquipo = [string]$e.idEquipo; motivo = [string]$e.motivo; diasPrueba = [int]$e.diasPrueba; version = [string]$global:appVersion; negocio = [string]$global:reciboCfg.nombre }
+}
+
+# ---- Roles (conjuntos de permisos ya hechos) ----
+function Roles-Predefinidos {
+    $todos = @($global:catalogoPermisos | ForEach-Object { [string]$_.k })
+    $vendedor = @($todos | Where-Object { @('ajustes', 'descuentos', 'venderBajoCosto') -notcontains $_ })
+    return @(
+        @{ id = 'encargado'; nombre = 'Encargado'; desc = 'Puede todo: precios, descuentos y Ajustes.'; permisos = $todos },
+        @{ id = 'vendedor'; nombre = 'Vendedor'; desc = 'Toma pedidos, cobra e imprime. No cambia precios ni entra a Ajustes.'; permisos = $vendedor },
+        @{ id = 'ayudante'; nombre = 'Ayudante'; desc = 'Arma pedidos y los manda a caja. No cobra ni edita el metodo de pago.'; permisos = @('crearPedidos', 'cancelar', 'imprimir', 'verStock', 'misPedidos', 'asignados', 'notificaciones', 'mensajes') },
+        @{ id = 'consulta'; nombre = 'Solo consulta'; desc = 'Ve productos y stock; no crea pedidos.'; permisos = @('verStock', 'modoCliente', 'notificaciones', 'mensajes') }
+    )
+}
+function Permisos-DeRol([string]$rolId) {
+    $h = @{}
+    foreach ($c in $global:catalogoPermisos) { $h[[string]$c.k] = $false }
+    foreach ($r in (Roles-Predefinidos)) {
+        if ($r.id -eq $rolId) { foreach ($k in $r.permisos) { $h[[string]$k] = $true } }
+    }
+    return $h
+}
+# Pone los permisos de un vendedor (hashtable clave->bool) y le avisa al movil si cambiaron.
+function Aplicar-PermisosVendedor([string]$nombre, $nuevos) {
+    $clave = $nombre.Trim().ToLowerInvariant()
+    $actual = Obtener-Permisos $nombre
+    $cambios = New-Object System.Collections.ArrayList
+    $guardar = @{}
+    foreach ($c in $global:catalogoPermisos) {
+        $k = [string]$c.k
+        $nv = [bool]$actual[$k]
+        if ($nuevos.ContainsKey($k)) { $nv = [bool]$nuevos[$k] }
+        if ($nv -ne [bool]$actual[$k]) { [void]$cambios.Add($c.t + $(if ($nv) { ": SI" } else { ": NO" })) }
+        $guardar[$k] = $nv
+    }
+    $global:permisosVendedores[$clave] = $guardar
+    Guardar-Permisos
+    if ($cambios.Count -gt 0) { try { Agregar-AlertaVendedor $nombre ("La caja cambio tus permisos: " + (Resumir-Lista $cambios 4)) $null "permisos" } catch {} }
+}
+
+# ---- Datos para el asistente ----
+function Listar-Impresoras {
+    $lista = New-Object System.Collections.ArrayList
+    try {
+        Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue
+        foreach ($n in [System.Drawing.Printing.PrinterSettings]::InstalledPrinters) { [void]$lista.Add([string]$n) }
+    } catch {}
+    if ($lista.Count -eq 0) {
+        try { foreach ($p in @(Get-CimInstance -ClassName Win32_Printer -ErrorAction Stop)) { [void]$lista.Add([string]$p.Name) } } catch {}
+    }
+    return @($lista | Sort-Object -Unique)
+}
+function Estado-Instalacion {
+    $vend = @()
+    foreach ($k in @($global:pinesVendedores.Keys | Sort-Object)) {
+        $nom = [string]$global:pinesVendedores[$k].nombre
+        $rol = ""
+        if ($global:instalacion.roles.ContainsKey([string]$k)) { $rol = [string]$global:instalacion.roles[[string]$k] }
+        $vend += [pscustomobject]@{ nombre = $nom; rol = $rol; permisos = (Obtener-Permisos $nom) }
+    }
+    $rc = $global:reciboCfg
+    return @{
+        ok = $true
+        configurado = [bool]$global:instalacion.configurado
+        bienvenidaVista = [bool]$global:instalacion.bienvenidaVista
+        negocio = @{ nombre = [string]$rc.nombre; nit = [string]$rc.nit; direccion = [string]$rc.direccion; telefono = [string]$rc.telefono }
+        impresora = [string]$nombreImpresora
+        ancho = [int]$rc.ancho
+        origenDatos = $(if ([bool]$global:configAxis.activo) { "axispos" } else { "excel" })
+        axis = @{ activo = [bool]$global:configAxis.activo; servidor = [string]$global:configAxis.servidor; puerto = [int]$global:configAxis.puerto; usuario = [string]$global:configAxis.usuario; base = [string]$global:configAxis.base }
+        excelRuta = [string]$global:configExcel.ruta
+        vendedores = @($vend)
+        roles = @(Roles-Predefinidos)
+        claves = @($global:catalogoPermisos | ForEach-Object { [pscustomobject]@{ k = $_.k; t = $_.t; d = $_.d } })
+        adminClaveDefinida = (-not [string]::IsNullOrEmpty($global:posClaveHash))
+        licencia = (Json-Licencia)
+    }
+}
+function Guardar-NegocioInstalacion($d) {
+    $o = [pscustomobject]@{}
+    foreach ($k in @('nombre', 'nit', 'direccion', 'telefono', 'ancho')) {
+        if ($d.PSObject.Properties.Name -contains $k) { $o | Add-Member -NotePropertyName $k -NotePropertyValue $d.$k -Force }
+    }
+    if ($o.PSObject.Properties.Name -contains 'nombre' -and ([string]$o.nombre).Trim().Length -lt 2) { throw "Escribe el nombre del negocio." }
+    Aplicar-ReciboCfg $o
+    Guardar-ReciboCfg
+}
+# Crea o actualiza vendedores. Cada uno: nombre, pin (obligatorio si es nuevo), rol, permisos (opcional, hashtable-like).
+function Guardar-VendedoresInstalacion($lista) {
+    $res = New-Object System.Collections.ArrayList
+    foreach ($v in @($lista)) {
+        $nom = ([string]$v.nombre).Trim()
+        if (-not $nom) { continue }
+        if ($nom.Length -gt 40) { [void]$res.Add(@{ nombre = $nom; ok = $false; error = "El nombre es muy largo (maximo 40)." }); continue }
+        $clave = $nom.ToLowerInvariant()
+        $pin = ([string]$v.pin).Trim()
+        $existe = $global:pinesVendedores.ContainsKey($clave)
+        if ((-not $existe) -and ($pin -notmatch '^\d{4,6}$')) { [void]$res.Add(@{ nombre = $nom; ok = $false; error = "El PIN debe tener de 4 a 6 numeros." }); continue }
+        if ($pin -and ($pin -notmatch '^\d{4,6}$')) { [void]$res.Add(@{ nombre = $nom; ok = $false; error = "El PIN debe tener de 4 a 6 numeros." }); continue }
+        if ($pin) { $global:pinesVendedores[$clave] = @{ nombre = $(if ($existe) { [string]$global:pinesVendedores[$clave].nombre } else { $nom }); pin = $pin }; Guardar-Pines }
+        $rol = [string]$v.rol
+        $perm = $null
+        if ($v.permisos) {
+            $perm = @{}
+            foreach ($p in $v.permisos.PSObject.Properties) { $perm[[string]$p.Name] = [bool]$p.Value }
+        } elseif ($rol) { $perm = Permisos-DeRol $rol }
+        $nomReal = [string]$global:pinesVendedores[$clave].nombre
+        if ($perm) { Aplicar-PermisosVendedor $nomReal $perm }
+        if ($rol) { $global:instalacion.roles[$clave] = $rol }
+        [void]$res.Add(@{ nombre = $nomReal; ok = $true; nuevo = (-not $existe) })
+    }
+    Guardar-Instalacion
+    return @($res)
+}
+# Prueba (y, si se pide, guarda) la conexion con AxisPOS.
+function Probar-Guardar-Axis($d, [bool]$guardar) {
+    $srv = ([string]$d.servidor).Trim(); $usr = ([string]$d.usuario).Trim(); $bas = ([string]$d.base).Trim(); $cla = [string]$d.clave
+    $pto = 0; try { $pto = [int]$d.puerto } catch {}
+    if (-not $srv) { $srv = "localhost" }
+    if ($pto -le 0) { $pto = 3306 }
+    foreach ($t in @($srv, $usr, $bas, $cla)) { if ($t -match '["\r\n]') { throw "Hay caracteres no validos en los datos de AxisPOS." } }
+    if (-not $usr -or -not $bas) { throw "Falta el usuario o el nombre de la base de datos." }
+    $copia = $global:configAxis | Select-Object *
+    $viejo = @{ s = $global:configAxis.servidor; p = $global:configAxis.puerto; u = $global:configAxis.usuario; c = $global:configAxis.clave; b = $global:configAxis.base; a = $global:configAxis.activo }
+    $global:configAxis.servidor = $srv; $global:configAxis.puerto = $pto; $global:configAxis.usuario = $usr; $global:configAxis.clave = $cla; $global:configAxis.base = $bas
+    try {
+        $txt = Ejecutar-ConsultaAxis "SELECT COUNT(*) FROM goods WHERE Deleted=0"
+        $n = 0
+        [void][int]::TryParse((([string]$txt) -split "`n" | Where-Object { $_.Trim() -match '^\d+$' } | Select-Object -Last 1), [ref]$n)
+        if ($guardar) {
+            $global:configAxis.activo = $true
+            $global:axisConfigurado = $true
+            $global:configApp.origenDatos = "axispos"
+            Escribir-ArchivoConReintento -ruta $configAxisPath -contenido ($global:configAxis | ConvertTo-Json -Depth 5) | Out-Null
+            Guardar-ConfigApp
+            try { Aplicar-OrigenDatos } catch {}
+        } else {
+            $global:configAxis.servidor = $viejo.s; $global:configAxis.puerto = $viejo.p; $global:configAxis.usuario = $viejo.u; $global:configAxis.clave = $viejo.c; $global:configAxis.base = $viejo.b; $global:configAxis.activo = $viejo.a
+        }
+        return @{ ok = $true; productos = $n }
+    } catch {
+        $global:configAxis.servidor = $viejo.s; $global:configAxis.puerto = $viejo.p; $global:configAxis.usuario = $viejo.u; $global:configAxis.clave = $viejo.c; $global:configAxis.base = $viejo.b; $global:configAxis.activo = $viejo.a
+        throw
+    }
+}
+
+# Rutas de licencia que se atienden siempre (con licencia, en prueba o vencida): estado, activar y la pagina para escribir la clave.
+function Responder-Licencia($context, $request, [string]$method, [string]$path) {
+    if ($method -eq "GET" -and $path -eq "/api/licencia") {
+        $j = Json-Licencia
+        if ($j.abierta) { Enviar-Json $context $j 200 4 } else { Enviar-Json $context $j 402 4 }
+        return $true
+    }
+    if ($method -eq "POST" -and $path -eq "/api/licencia/activar") {
+        $d = Leer-CuerpoJson $request
+        $v = Activar-Licencia ([string]$d.clave)
+        if ($v.ok) { Enviar-Json $context (Json-Licencia) 200 4 } else { Enviar-Json $context @{ ok = $false; error = [string]$v.error } 400 }
+        return $true
+    }
+    if ($method -eq "GET" -and $path -eq "/licencia") {
+        Enviar-Respuesta -Context $context -Body $global:htmlSinLicencia
+        return $true
+    }
+    return $false
+}
+
+
 function Revisar-CambioCatalogo {
     try {
         if ($global:configAxis.activo) { return }
@@ -6307,6 +6548,8 @@ TT.iniciar('pc');
       <button class="btn-toggle" style="width:100%; margin-bottom:10px; text-align:left;" onclick="cerrarMenuPC(); abrirConsulta();">Consultar precio y stock (Alt+C)</button>
 
       <button class="btn-toggle" style="width:100%; margin-bottom:10px; text-align:left;" onclick="cerrarMenuPC(); abrirRepos();">Que bajar del almacen (Alt+B)</button>
+
+      <button class="btn-toggle" style="width:100%; margin-bottom:10px; text-align:left;" onclick="cerrarMenuPC(); if (window.TTAyuda) TTAyuda.abrir();" title="Guia de uso, atajos, licencia y asistente de configuracion">Ayuda (F1)</button>
 
       <button class="btn-toggle" style="width:100%; margin-bottom:10px; text-align:left;" onclick="abrirColores()" title="Elige el color de cada cosa del Panel de la PC y de la app del vendedor">Colores de la interfaz...</button>
 
@@ -8492,7 +8735,7 @@ TT.iniciar('pc');
         else if (pedSelId !== null) { pedSelId = null; aplicarVistaPedidos(); }
         else hecho = false;
       } else if (k === 'F1') {
-        mostrarBanner(ATAJOS_PC_AYUDA, 14000);
+        if (window.TTAyuda) TTAyuda.abrir('atajos'); else mostrarBanner(ATAJOS_PC_AYUDA, 14000);
       } else if (e.altKey && !e.ctrlKey && !e.metaKey && k === 'Enter') {
         // Alt+Enter: envia el pedido que se esta armando (solo con el dialogo de Nuevo pedido abierto)
         if (npAbierto) { npConfirmarCantidadEscrita(); var bEnv2 = document.getElementById('npBtnEnviar'); if (bEnv2) bEnv2.click(); }
@@ -11391,6 +11634,11 @@ TT.iniciar('vendedor');
         <button class="btn btn-secundario" onclick="document.getElementById('zipFotosMovil').click()">Cargar fotos en este telefono</button>
         <input type="file" id="zipFotosMovil" accept=".zip" style="display:none">
         <div id="estadoSubidaFotos" style="font-size:12px; color:#64748b; margin-top:6px;"></div>
+      </div>
+
+      <div class="section">
+        <h2>Ayuda</h2>
+        <button class="btn btn-secundario" onclick="cerrarMenu(); if (window.TTAyuda) TTAyuda.abrir();">Como se usa la app</button>
       </div>
 
       <div class="section">
@@ -17598,15 +17846,53 @@ $htmlMetricas = @'
 # LICENCIA: pagina de bloqueo y script guardian para las pantallas
 # ------------------------------------------------------------------
 $global:htmlSinLicencia = @'
-<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Licencia</title></head>
-<body style="margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#111;color:#fff;font-family:Arial,sans-serif;text-align:center;padding:24px;box-sizing:border-box">
-<div><div style="font-size:56px">&#128274;</div><h2>Licencia vencida o no v&aacute;lida</h2>
-<p style="color:#bbb">El sistema est&aacute; bloqueado. Contacta al proveedor para renovar la licencia.</p></div></body></html>
+<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Licencia</title>
+<style>
+*{box-sizing:border-box}body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#0f172a;color:#e2e8f0;font-family:'Segoe UI',Arial,sans-serif;padding:20px}
+.c{background:#1e293b;border-radius:16px;padding:28px;max-width:480px;width:100%;text-align:center;box-shadow:0 10px 40px rgba(0,0,0,.4)}
+.ic{font-size:48px}h1{font-size:22px;margin:6px 0 4px;color:#fff}#s{color:#cbd5e1;font-size:14px;margin:0 0 14px}
+.id{background:#0f172a;border:1px solid #334155;border-radius:10px;padding:10px;font-size:14px;margin:10px 0 4px}.id b{font-size:18px;letter-spacing:1px;color:#7dd3fc}
+.n{font-size:12px;color:#94a3b8;margin:4px 0 14px}textarea{width:100%;padding:10px;border-radius:8px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;font-size:13px;font-family:Consolas,monospace;resize:vertical}
+button{background:#2563eb;color:#fff;border:none;border-radius:8px;padding:11px 16px;font-size:14px;font-weight:700;cursor:pointer;width:100%;margin-top:10px}button.g{background:#334155;width:auto;padding:5px 10px;font-size:12px;margin:0 0 0 8px}
+#m{min-height:20px;font-size:13px;margin-top:10px}.ok{color:#86efac}.er{color:#fca5a5}a{color:#7dd3fc;font-size:13px;display:inline-block;margin-top:14px}
+</style></head><body>
+<div class="c"><div class="ic" id="ic">&#128274;</div><h1 id="t">Licencia</h1><p id="s">Comprobando...</p>
+<div class="id">C&oacute;digo de esta PC: <b id="idq">...</b><button class="g" id="cp" type="button">Copiar</button></div>
+<p class="n">Env&iacute;a este c&oacute;digo a tu proveedor para recibir tu licencia.</p>
+<textarea id="k" rows="3" placeholder="Pega aqu&iacute; tu licencia" spellcheck="false"></textarea>
+<button id="go" type="button">Activar licencia</button><div id="m"></div><a id="vol" href="/" style="display:none">Volver al panel</a></div>
+<script>
+(function(){
+function $(i){return document.getElementById(i);}
+var datos=null;
+function pintar(j){
+  datos=j;$('idq').textContent=j.idEquipo||'';
+  if(j.modo==='licencia'){$('ic').innerHTML='&#9989;';$('t').textContent='Licencia activa';$('s').textContent=(j.vence&&j.vence!=='sin vencimiento')?('Vence el '+j.vence+'.'):'Sin fecha de vencimiento.';$('vol').style.display='inline-block';}
+  else if(j.modo==='prueba'){$('ic').innerHTML='&#9203;';$('t').textContent='Versión de prueba';$('s').textContent='Quedan '+j.dias+(j.dias===1?' día':' días')+' de prueba (hasta el '+j.vence+'). Cuando quieras, activa tu licencia aquí.';$('vol').style.display='inline-block';}
+  else{$('ic').innerHTML='&#128274;';$('t').textContent='Licencia requerida';
+    var s='La prueba gratis terminó. Escribe tu licencia para seguir usando el programa.';
+    if(j.motivo)s=j.motivo+' Escribe tu licencia para seguir.';
+    $('s').textContent=s;}
+}
+fetch('/api/licencia',{cache:'no-store'}).then(function(r){return r.json();}).then(pintar).catch(function(){$('s').textContent='No se pudo leer el estado de la licencia.';});
+$('cp').onclick=function(){var t=$('idq').textContent;try{navigator.clipboard.writeText(t);}catch(e){var a=document.createElement('textarea');a.value=t;document.body.appendChild(a);a.select();try{document.execCommand('copy');}catch(e2){}a.remove();}$('cp').textContent='Copiado';setTimeout(function(){$('cp').textContent='Copiar';},1500);};
+$('go').onclick=function(){
+  var k=$('k').value.trim();var m=$('m');
+  if(!k){m.className='er';m.textContent='Pega tu licencia.';return;}
+  $('go').disabled=true;m.className='';m.textContent='Comprobando...';
+  fetch('/api/licencia/activar',{method:'POST',body:JSON.stringify({clave:k})}).then(function(r){return r.json();}).then(function(j){
+    $('go').disabled=false;
+    if(j&&j.ok){try{localStorage.removeItem('tt_lic_bloq');}catch(e){}m.className='ok';m.textContent='Licencia activada. Abriendo el programa...';pintar(j);setTimeout(function(){location.href='/';},1400);}
+    else{m.className='er';m.textContent=(j&&j.error)||'No se pudo activar.';}
+  }).catch(function(){$('go').disabled=false;m.className='er';m.textContent='No se pudo contactar con el programa.';});
+};
+})();
+</script></body></html>
 '@
 $global:licGuardJs = @'
-<script>(function(){var of=window.fetch;function bloquear(){try{localStorage.setItem('tt_lic_bloq','1')}catch(e){}if(document.getElementById('tt-lic-block'))return;var d=document.createElement('div');d.id='tt-lic-block';d.style.cssText='position:fixed;left:0;top:0;right:0;bottom:0;z-index:2147483647;background:#111;color:#fff;font-family:Arial,sans-serif;text-align:center;display:flex;align-items:center;justify-content:center;padding:24px';d.innerHTML='<div><div style="font-size:56px">&#128274;</div><h2>Licencia vencida</h2><p style="color:#bbb">Contacta al proveedor para renovarla.</p></div>';(document.body||document.documentElement).appendChild(d);}
+<script>(function(){var of=window.fetch;function bloquear(){try{localStorage.setItem('tt_lic_bloq','1')}catch(e){}if(document.getElementById('tt-lic-block'))return;var d=document.createElement('div');d.id='tt-lic-block';d.style.cssText='position:fixed;left:0;top:0;right:0;bottom:0;z-index:2147483647;background:#111;color:#fff;font-family:Arial,sans-serif;text-align:center;display:flex;align-items:center;justify-content:center;padding:24px';d.innerHTML='<div><div style="font-size:56px">&#128274;</div><h2>Licencia vencida</h2><p style="color:#bbb">Contacta al proveedor para renovarla.</p><p><a href="/licencia" style="color:#7dd3fc">Introducir clave de licencia</a></p></div>';(document.body||document.documentElement).appendChild(d);}
 window.fetch=function(){return of.apply(this,arguments).then(function(r){if(r&&r.status===402)bloquear();return r;});};
-function aviso(){of('/api/licencia',{cache:'no-store'}).then(function(r){if(r.status===402){bloquear();return null;}return r.json();}).then(function(j){if(!j||!j.ok)return;try{localStorage.removeItem('tt_lic_bloq')}catch(e){}var x=document.getElementById('tt-lic-block');if(x)x.remove();var b=document.getElementById('tt-lic-warn');if(j.dias<=5){if(!b){b=document.createElement('div');b.id='tt-lic-warn';b.style.cssText='position:fixed;left:0;right:0;bottom:0;z-index:2147483000;background:#b45309;color:#fff;font:13px Arial;text-align:center;padding:6px';(document.body||document.documentElement).appendChild(b);}b.textContent='La licencia vence el '+j.vence+' (quedan '+j.dias+' dias)';}else if(b){b.remove();}}).catch(function(){});}
+function aviso(){of('/api/licencia',{cache:'no-store'}).then(function(r){if(r.status===402){bloquear();return null;}return r.json();}).then(function(j){if(!j||!j.ok)return;try{localStorage.removeItem('tt_lic_bloq')}catch(e){}var x=document.getElementById('tt-lic-block');if(x)x.remove();var b=document.getElementById('tt-lic-warn');if(j.modo==='prueba'){if(!b){b=document.createElement('div');b.id='tt-lic-warn';(document.body||document.documentElement).appendChild(b);}b.style.cssText='position:fixed;left:8px;bottom:8px;z-index:2147480000;background:#1e3a8a;color:#fff;font:12px Arial;padding:5px 10px;border-radius:14px;opacity:.92;'+(location.pathname==='/vendedor'?'':'cursor:pointer');b.textContent='Prueba: quedan '+j.dias+(j.dias===1?' d\u00eda':' d\u00edas')+(location.pathname==='/vendedor'?'':' \u00b7 activar licencia');b.onclick=location.pathname==='/vendedor'?null:function(){window.open('/licencia','_blank');};}else if(j.dias<=5){if(!b){b=document.createElement('div');b.id='tt-lic-warn';(document.body||document.documentElement).appendChild(b);}b.onclick=null;b.style.cssText='position:fixed;left:0;right:0;bottom:0;z-index:2147483000;background:#b45309;color:#fff;font:13px Arial;text-align:center;padding:6px';b.textContent='La licencia vence el '+j.vence+' (quedan '+j.dias+' dias)';}else if(b){b.remove();}}).catch(function(){});}
 try{if(localStorage.getItem('tt_lic_bloq')==='1')window.addEventListener('DOMContentLoaded',bloquear)}catch(e){}
 setInterval(aviso,300000);window.addEventListener('load',aviso);})();</script>
 '@
@@ -17615,6 +17901,730 @@ function Inyectar-Guardian([string]$html) {
     $i = $html.IndexOf("<head>")
     if ($i -lt 0) { return $html }
     return $html.Insert($i + 6, $global:licGuardJs)
+}
+$global:extrasHtml = @'
+<style id="ttx-estilos">
+.ttx-back{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;padding:14px;font-family:'Segoe UI',system-ui,Tahoma,Arial,sans-serif;box-sizing:border-box;color:#e2e8f0}
+.ttx-back *{box-sizing:border-box;font-family:inherit}
+.ttx-splash{z-index:2147482000;background:radial-gradient(ellipse at 30% 20%,#1e3a8a 0%,#0f172a 60%);transition:opacity .45s}
+.ttx-splash.ttx-off{opacity:0;pointer-events:none}
+.ttx-sp-card{background:#fff;color:#0f172a;border-radius:6px;width:min(640px,96vw);box-shadow:0 20px 70px rgba(0,0,0,.55);overflow:hidden}
+.ttx-sp-top{padding:34px 20px 22px;text-align:center;background:linear-gradient(180deg,#f8fafc,#e2e8f0)}
+.ttx-logo{width:92px;height:92px;border-radius:22px;margin:0 auto 14px;background:linear-gradient(135deg,#1d4ed8,#16a34a);display:flex;align-items:center;justify-content:center;color:#fff;font-size:56px;font-weight:800;box-shadow:0 8px 24px rgba(29,78,216,.45)}
+.ttx-sp-top h1{margin:0;font-size:26px;color:#1e40af;font-weight:700}
+.ttx-sp-top .ttx-sub{margin:6px 0 0;color:#475569;font-size:15px}
+.ttx-sp-top .ttx-neg{margin:10px 0 0;font-size:13px;color:#64748b;letter-spacing:.5px;text-transform:uppercase}
+.ttx-sp-bot{display:flex;align-items:center;gap:12px;padding:12px 18px;background:#f1f5f9;border-top:1px solid #e2e8f0}
+.ttx-sp-bot .ttx-mini{width:26px;height:26px;border-radius:7px;background:linear-gradient(135deg,#1d4ed8,#16a34a);color:#fff;font-weight:800;display:flex;align-items:center;justify-content:center;font-size:16px}
+.ttx-barra{flex:0 0 120px;height:5px;border-radius:3px;background:#cbd5e1;overflow:hidden}
+.ttx-barra i{display:block;height:100%;width:30%;background:#16a34a;border-radius:3px;animation:ttxcorre 1.1s ease-in-out infinite}
+@keyframes ttxcorre{0%{margin-left:-30%}100%{margin-left:100%}}
+.ttx-sp-bot span.ttx-est{margin-left:auto;font-size:12px;color:#64748b}
+.ttx-dlg{z-index:2147481000;background:rgba(2,6,23,.72)}
+.ttx-card{background:#fff;color:#0f172a;border-radius:14px;max-height:94vh;overflow:auto;box-shadow:0 20px 70px rgba(0,0,0,.55)}
+.ttx-bienv{display:flex;width:min(900px,100%)}
+.ttx-bienv .ttx-izq{flex:0 0 42%;background:linear-gradient(160deg,#1d4ed8,#0f766e);color:#fff;padding:28px 22px;display:flex;flex-direction:column;gap:12px;justify-content:center}
+.ttx-bienv .ttx-izq .ttx-logo{margin:0 0 6px;background:rgba(255,255,255,.18);box-shadow:none}
+.ttx-bienv .ttx-izq h3{margin:0;font-size:20px;font-weight:700}
+.ttx-bienv .ttx-izq p{margin:0;font-size:13px;opacity:.9;line-height:1.5}
+.ttx-bienv .ttx-mc{background:rgba(255,255,255,.14);border-radius:10px;padding:9px 12px;font-size:13px;display:flex;justify-content:space-between;gap:8px}
+.ttx-bienv .ttx-mc b{font-weight:700}
+.ttx-bienv .ttx-der{flex:1;padding:26px 28px;display:flex;flex-direction:column;min-width:0}
+.ttx-mini-t{font-size:11px;letter-spacing:3px;color:#64748b;text-transform:uppercase;margin-bottom:6px}
+.ttx-der h2{margin:0 0 4px;font-size:25px;color:#1d4ed8;font-weight:600}
+.ttx-der .ttx-gr{margin:0 0 14px;color:#64748b;font-size:14px}
+.ttx-lista{list-style:none;margin:0 0 14px;padding:0;display:flex;flex-direction:column;gap:7px}
+.ttx-lista li{background:#f1f5f9;border:1px solid #e2e8f0;border-radius:6px;padding:8px 12px 8px 34px;font-size:13px;position:relative;color:#334155}
+.ttx-lista li:before{content:"\2713";position:absolute;left:12px;top:7px;color:#16a34a;font-weight:800}
+.ttx-pill{background:#2563eb;color:#fff;border-radius:6px;padding:11px 14px;font-weight:800;font-size:14px;letter-spacing:.3px;margin-bottom:8px}
+.ttx-pill.ttx-ver{background:#15803d}.ttx-pill.ttx-roj{background:#b91c1c}
+.ttx-peq{font-size:12px;color:#64748b;line-height:1.5;margin:0 0 14px}
+.ttx-bots{display:flex;gap:10px;margin-top:auto;justify-content:flex-end;flex-wrap:wrap;align-items:center}
+.ttx-b{border:none;border-radius:8px;padding:10px 16px;font-size:14px;font-weight:700;cursor:pointer;background:#2563eb;color:#fff}
+.ttx-b:hover{filter:brightness(1.1)}.ttx-b.ttx-g{background:#e2e8f0;color:#334155}.ttx-b.ttx-v{background:#15803d}.ttx-b[disabled]{opacity:.5;cursor:default}
+.ttx-b.ttx-link{background:none;color:#64748b;font-weight:600;padding:10px 6px;text-decoration:underline}
+.ttx-ver-t{font-size:11px;color:#94a3b8;margin-top:10px;text-align:right}
+.ttx-wiz{z-index:55;background:rgba(2,6,23,.82)}
+.ttx-wiz .ttx-card{width:min(680px,100%);padding:0;display:flex;flex-direction:column}
+.ttx-wh{padding:18px 24px 12px;border-bottom:1px solid #e2e8f0}
+.ttx-wh .ttx-pa{font-size:12px;color:#64748b}.ttx-wh h2{margin:2px 0 8px;font-size:20px;color:#1e3a8a}
+.ttx-pts{display:flex;gap:6px}.ttx-pts i{flex:1;height:5px;border-radius:3px;background:#e2e8f0}.ttx-pts i.ttx-on{background:#2563eb}.ttx-pts i.ttx-ok{background:#16a34a}
+.ttx-wb{padding:16px 24px;overflow:auto;min-height:260px}
+.ttx-wf{padding:12px 24px 16px;border-top:1px solid #e2e8f0;display:flex;gap:10px;align-items:center}
+.ttx-wf .ttx-sp{flex:1}
+.ttx-f{margin-bottom:11px}.ttx-f label{display:block;font-size:12px;font-weight:600;color:#475569;margin-bottom:3px}
+.ttx-f input,.ttx-f select,.ttx-f textarea{width:100%;padding:9px 10px;border:1px solid #cbd5e1;border-radius:8px;font-size:14px;color:#0f172a;background:#fff}
+.ttx-f input:focus,.ttx-f select:focus{outline:2px solid #93c5fd;border-color:#3b82f6}
+.ttx-f small{display:block;color:#64748b;font-size:12px;margin-top:3px;line-height:1.4}
+.ttx-2{display:flex;gap:10px}.ttx-2>*{flex:1;min-width:0}
+.ttx-nota{background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:9px 12px;font-size:13px;color:#1e3a8a;margin-bottom:12px;line-height:1.45}
+.ttx-aviso{background:#fef3c7;border:1px solid #fde68a;color:#92400e;border-radius:8px;padding:9px 12px;font-size:13px;margin-bottom:12px}
+.ttx-err{color:#b91c1c;font-size:13px;margin-top:8px;min-height:18px}.ttx-okm{color:#15803d;font-size:13px;margin-top:8px}
+.ttx-op{display:flex;gap:10px;margin-bottom:12px}.ttx-op label{flex:1;border:2px solid #e2e8f0;border-radius:10px;padding:10px 12px;cursor:pointer;font-size:14px;font-weight:700;color:#334155;display:block}
+.ttx-op label small{display:block;font-weight:400;color:#64748b;font-size:12px;margin-top:2px}.ttx-op input{display:none}.ttx-op input:checked+span{color:#1d4ed8}.ttx-op label.ttx-sel{border-color:#2563eb;background:#eff6ff}
+.ttx-vrow{border:1px solid #e2e8f0;border-radius:10px;padding:10px;margin-bottom:10px;background:#f8fafc}
+.ttx-vrow .ttx-2{align-items:flex-end}.ttx-vrow .ttx-quita{flex:0 0 auto;background:none;border:none;color:#b91c1c;font-size:20px;cursor:pointer;padding:6px}
+.ttx-vrow details{margin-top:6px;font-size:13px}.ttx-vrow summary{cursor:pointer;color:#1d4ed8;font-weight:600}
+.ttx-perm{display:grid;grid-template-columns:1fr 1fr;gap:4px 14px;margin-top:6px}.ttx-perm label{display:flex;gap:6px;align-items:flex-start;font-size:12px;color:#334155;font-weight:400}
+.ttx-rd{font-size:12px;color:#64748b;margin-top:3px}
+.ttx-res li{margin:5px 0;font-size:14px;color:#334155}
+.ttx-ayu{z-index:2147481500;background:rgba(2,6,23,.72)}
+.ttx-ayu .ttx-card{width:min(1000px,100%);height:min(88vh,760px);display:flex;flex-direction:column;overflow:hidden}
+.ttx-ay-h{display:flex;gap:10px;align-items:center;padding:12px 16px;border-bottom:1px solid #e2e8f0;background:#f8fafc}
+.ttx-ay-h h2{margin:0;font-size:18px;color:#1e3a8a;white-space:nowrap}.ttx-ay-h input{flex:1;min-width:80px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;font-size:14px}
+.ttx-ay-c{display:flex;flex:1;min-height:0}
+.ttx-ay-toc{flex:0 0 230px;overflow:auto;border-right:1px solid #e2e8f0;padding:8px;background:#f8fafc}
+.ttx-ay-toc button{display:block;width:100%;text-align:left;background:none;border:none;padding:9px 10px;border-radius:8px;font-size:14px;color:#334155;cursor:pointer}
+.ttx-ay-toc button:hover{background:#e2e8f0}.ttx-ay-toc button.ttx-act{background:#dbeafe;color:#1e40af;font-weight:700}
+.ttx-ay-cu{flex:1;overflow:auto;padding:16px 22px;font-size:14px;line-height:1.6;color:#1e293b}
+.ttx-ay-cu h3{margin:0 0 8px;font-size:20px;color:#1e3a8a}.ttx-ay-cu h4{margin:16px 0 4px;font-size:15px;color:#1d4ed8}
+.ttx-ay-cu ul,.ttx-ay-cu ol{padding-left:20px;margin:6px 0}.ttx-ay-cu li{margin:3px 0}
+.ttx-ay-cu kbd{background:#e2e8f0;border:1px solid #cbd5e1;border-bottom-width:2px;border-radius:5px;padding:0 6px;font-family:Consolas,monospace;font-size:12px;color:#0f172a;white-space:nowrap}
+.ttx-ay-cu code{background:#f1f5f9;border-radius:4px;padding:1px 5px;font-family:Consolas,monospace;font-size:13px}
+.ttx-ay-cu table{border-collapse:collapse;width:100%;margin:8px 0}.ttx-ay-cu td{border-bottom:1px solid #e2e8f0;padding:5px 8px;font-size:13px;vertical-align:top}.ttx-ay-cu td:first-child{white-space:nowrap;width:1%}
+.ttx-ay-cu .ttx-tip{background:#ecfdf5;border:1px solid #a7f3d0;border-radius:8px;padding:8px 12px;margin:10px 0;color:#065f46;font-size:13px}
+.ttx-ay-cu .ttx-adv{background:#fef3c7;border:1px solid #fde68a;border-radius:8px;padding:8px 12px;margin:10px 0;color:#92400e;font-size:13px}
+.ttx-ay-cu mark{background:#fde68a;border-radius:3px}
+.ttx-ay-pie{padding:8px 16px;border-top:1px solid #e2e8f0;display:flex;gap:8px;flex-wrap:wrap;background:#f8fafc;align-items:center}
+.ttx-ay-pie small{color:#64748b;margin-right:auto}
+@media(max-width:720px){.ttx-bienv{flex-direction:column}.ttx-bienv .ttx-izq{flex:0 0 auto;padding:16px}.ttx-bienv .ttx-mc,.ttx-bienv .ttx-izq p{display:none}.ttx-ay-c{flex-direction:column}.ttx-ay-toc{flex:0 0 auto;max-height:130px;border-right:none;border-bottom:1px solid #e2e8f0}.ttx-perm{grid-template-columns:1fr}.ttx-op{flex-direction:column}.ttx-2{flex-direction:column;gap:0}}
+</style><style id="ttx-estilos">
+.ttx-back{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;padding:14px;font-family:'Segoe UI',system-ui,Tahoma,Arial,sans-serif;box-sizing:border-box;color:#e2e8f0}
+.ttx-back *{box-sizing:border-box;font-family:inherit}
+.ttx-splash{z-index:2147482000;background:radial-gradient(ellipse at 30% 20%,#1e3a8a 0%,#0f172a 60%);transition:opacity .45s}
+.ttx-splash.ttx-off{opacity:0;pointer-events:none}
+.ttx-sp-card{background:#fff;color:#0f172a;border-radius:6px;width:min(640px,96vw);box-shadow:0 20px 70px rgba(0,0,0,.55);overflow:hidden}
+.ttx-sp-top{padding:34px 20px 22px;text-align:center;background:linear-gradient(180deg,#f8fafc,#e2e8f0)}
+.ttx-logo{width:92px;height:92px;border-radius:22px;margin:0 auto 14px;background:linear-gradient(135deg,#1d4ed8,#16a34a);display:flex;align-items:center;justify-content:center;color:#fff;font-size:56px;font-weight:800;box-shadow:0 8px 24px rgba(29,78,216,.45)}
+.ttx-sp-top h1{margin:0;font-size:26px;color:#1e40af;font-weight:700}
+.ttx-sp-top .ttx-sub{margin:6px 0 0;color:#475569;font-size:15px}
+.ttx-sp-top .ttx-neg{margin:10px 0 0;font-size:13px;color:#64748b;letter-spacing:.5px;text-transform:uppercase}
+.ttx-sp-bot{display:flex;align-items:center;gap:12px;padding:12px 18px;background:#f1f5f9;border-top:1px solid #e2e8f0}
+.ttx-sp-bot .ttx-mini{width:26px;height:26px;border-radius:7px;background:linear-gradient(135deg,#1d4ed8,#16a34a);color:#fff;font-weight:800;display:flex;align-items:center;justify-content:center;font-size:16px}
+.ttx-barra{flex:0 0 120px;height:5px;border-radius:3px;background:#cbd5e1;overflow:hidden}
+.ttx-barra i{display:block;height:100%;width:30%;background:#16a34a;border-radius:3px;animation:ttxcorre 1.1s ease-in-out infinite}
+@keyframes ttxcorre{0%{margin-left:-30%}100%{margin-left:100%}}
+.ttx-sp-bot span.ttx-est{margin-left:auto;font-size:12px;color:#64748b}
+.ttx-dlg{z-index:2147481000;background:rgba(2,6,23,.72)}
+.ttx-card{background:#fff;color:#0f172a;border-radius:14px;max-height:94vh;overflow:auto;box-shadow:0 20px 70px rgba(0,0,0,.55)}
+.ttx-bienv{display:flex;width:min(900px,100%)}
+.ttx-bienv .ttx-izq{flex:0 0 42%;background:linear-gradient(160deg,#1d4ed8,#0f766e);color:#fff;padding:28px 22px;display:flex;flex-direction:column;gap:12px;justify-content:center}
+.ttx-bienv .ttx-izq .ttx-logo{margin:0 0 6px;background:rgba(255,255,255,.18);box-shadow:none}
+.ttx-bienv .ttx-izq h3{margin:0;font-size:20px;font-weight:700}
+.ttx-bienv .ttx-izq p{margin:0;font-size:13px;opacity:.9;line-height:1.5}
+.ttx-bienv .ttx-mc{background:rgba(255,255,255,.14);border-radius:10px;padding:9px 12px;font-size:13px;display:flex;justify-content:space-between;gap:8px}
+.ttx-bienv .ttx-mc b{font-weight:700}
+.ttx-bienv .ttx-der{flex:1;padding:26px 28px;display:flex;flex-direction:column;min-width:0}
+.ttx-mini-t{font-size:11px;letter-spacing:3px;color:#64748b;text-transform:uppercase;margin-bottom:6px}
+.ttx-der h2{margin:0 0 4px;font-size:25px;color:#1d4ed8;font-weight:600}
+.ttx-der .ttx-gr{margin:0 0 14px;color:#64748b;font-size:14px}
+.ttx-lista{list-style:none;margin:0 0 14px;padding:0;display:flex;flex-direction:column;gap:7px}
+.ttx-lista li{background:#f1f5f9;border:1px solid #e2e8f0;border-radius:6px;padding:8px 12px 8px 34px;font-size:13px;position:relative;color:#334155}
+.ttx-lista li:before{content:"\2713";position:absolute;left:12px;top:7px;color:#16a34a;font-weight:800}
+.ttx-pill{background:#2563eb;color:#fff;border-radius:6px;padding:11px 14px;font-weight:800;font-size:14px;letter-spacing:.3px;margin-bottom:8px}
+.ttx-pill.ttx-ver{background:#15803d}.ttx-pill.ttx-roj{background:#b91c1c}
+.ttx-peq{font-size:12px;color:#64748b;line-height:1.5;margin:0 0 14px}
+.ttx-bots{display:flex;gap:10px;margin-top:auto;justify-content:flex-end;flex-wrap:wrap;align-items:center}
+.ttx-b{border:none;border-radius:8px;padding:10px 16px;font-size:14px;font-weight:700;cursor:pointer;background:#2563eb;color:#fff}
+.ttx-b:hover{filter:brightness(1.1)}.ttx-b.ttx-g{background:#e2e8f0;color:#334155}.ttx-b.ttx-v{background:#15803d}.ttx-b[disabled]{opacity:.5;cursor:default}
+.ttx-b.ttx-link{background:none;color:#64748b;font-weight:600;padding:10px 6px;text-decoration:underline}
+.ttx-ver-t{font-size:11px;color:#94a3b8;margin-top:10px;text-align:right}
+.ttx-wiz{z-index:55;background:rgba(2,6,23,.82)}
+.ttx-wiz .ttx-card{width:min(680px,100%);padding:0;display:flex;flex-direction:column}
+.ttx-wh{padding:18px 24px 12px;border-bottom:1px solid #e2e8f0}
+.ttx-wh .ttx-pa{font-size:12px;color:#64748b}.ttx-wh h2{margin:2px 0 8px;font-size:20px;color:#1e3a8a}
+.ttx-pts{display:flex;gap:6px}.ttx-pts i{flex:1;height:5px;border-radius:3px;background:#e2e8f0}.ttx-pts i.ttx-on{background:#2563eb}.ttx-pts i.ttx-ok{background:#16a34a}
+.ttx-wb{padding:16px 24px;overflow:auto;min-height:260px}
+.ttx-wf{padding:12px 24px 16px;border-top:1px solid #e2e8f0;display:flex;gap:10px;align-items:center}
+.ttx-wf .ttx-sp{flex:1}
+.ttx-f{margin-bottom:11px}.ttx-f label{display:block;font-size:12px;font-weight:600;color:#475569;margin-bottom:3px}
+.ttx-f input,.ttx-f select,.ttx-f textarea{width:100%;padding:9px 10px;border:1px solid #cbd5e1;border-radius:8px;font-size:14px;color:#0f172a;background:#fff}
+.ttx-f input:focus,.ttx-f select:focus{outline:2px solid #93c5fd;border-color:#3b82f6}
+.ttx-f small{display:block;color:#64748b;font-size:12px;margin-top:3px;line-height:1.4}
+.ttx-2{display:flex;gap:10px}.ttx-2>*{flex:1;min-width:0}
+.ttx-nota{background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:9px 12px;font-size:13px;color:#1e3a8a;margin-bottom:12px;line-height:1.45}
+.ttx-aviso{background:#fef3c7;border:1px solid #fde68a;color:#92400e;border-radius:8px;padding:9px 12px;font-size:13px;margin-bottom:12px}
+.ttx-err{color:#b91c1c;font-size:13px;margin-top:8px;min-height:18px}.ttx-okm{color:#15803d;font-size:13px;margin-top:8px}
+.ttx-op{display:flex;gap:10px;margin-bottom:12px}.ttx-op label{flex:1;border:2px solid #e2e8f0;border-radius:10px;padding:10px 12px;cursor:pointer;font-size:14px;font-weight:700;color:#334155;display:block}
+.ttx-op label small{display:block;font-weight:400;color:#64748b;font-size:12px;margin-top:2px}.ttx-op input{display:none}.ttx-op input:checked+span{color:#1d4ed8}.ttx-op label.ttx-sel{border-color:#2563eb;background:#eff6ff}
+.ttx-vrow{border:1px solid #e2e8f0;border-radius:10px;padding:10px;margin-bottom:10px;background:#f8fafc}
+.ttx-vrow .ttx-2{align-items:flex-end}.ttx-vrow .ttx-quita{flex:0 0 auto;background:none;border:none;color:#b91c1c;font-size:20px;cursor:pointer;padding:6px}
+.ttx-vrow details{margin-top:6px;font-size:13px}.ttx-vrow summary{cursor:pointer;color:#1d4ed8;font-weight:600}
+.ttx-perm{display:grid;grid-template-columns:1fr 1fr;gap:4px 14px;margin-top:6px}.ttx-perm label{display:flex;gap:6px;align-items:flex-start;font-size:12px;color:#334155;font-weight:400}
+.ttx-rd{font-size:12px;color:#64748b;margin-top:3px}
+.ttx-res li{margin:5px 0;font-size:14px;color:#334155}
+.ttx-ayu{z-index:2147481500;background:rgba(2,6,23,.72)}
+.ttx-ayu .ttx-card{width:min(1000px,100%);height:min(88vh,760px);display:flex;flex-direction:column;overflow:hidden}
+.ttx-ay-h{display:flex;gap:10px;align-items:center;padding:12px 16px;border-bottom:1px solid #e2e8f0;background:#f8fafc}
+.ttx-ay-h h2{margin:0;font-size:18px;color:#1e3a8a;white-space:nowrap}.ttx-ay-h input{flex:1;min-width:80px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;font-size:14px}
+.ttx-ay-c{display:flex;flex:1;min-height:0}
+.ttx-ay-toc{flex:0 0 230px;overflow:auto;border-right:1px solid #e2e8f0;padding:8px;background:#f8fafc}
+.ttx-ay-toc button{display:block;width:100%;text-align:left;background:none;border:none;padding:9px 10px;border-radius:8px;font-size:14px;color:#334155;cursor:pointer}
+.ttx-ay-toc button:hover{background:#e2e8f0}.ttx-ay-toc button.ttx-act{background:#dbeafe;color:#1e40af;font-weight:700}
+.ttx-ay-cu{flex:1;overflow:auto;padding:16px 22px;font-size:14px;line-height:1.6;color:#1e293b}
+.ttx-ay-cu h3{margin:0 0 8px;font-size:20px;color:#1e3a8a}.ttx-ay-cu h4{margin:16px 0 4px;font-size:15px;color:#1d4ed8}
+.ttx-ay-cu ul,.ttx-ay-cu ol{padding-left:20px;margin:6px 0}.ttx-ay-cu li{margin:3px 0}
+.ttx-ay-cu kbd{background:#e2e8f0;border:1px solid #cbd5e1;border-bottom-width:2px;border-radius:5px;padding:0 6px;font-family:Consolas,monospace;font-size:12px;color:#0f172a;white-space:nowrap}
+.ttx-ay-cu code{background:#f1f5f9;border-radius:4px;padding:1px 5px;font-family:Consolas,monospace;font-size:13px}
+.ttx-ay-cu table{border-collapse:collapse;width:100%;margin:8px 0}.ttx-ay-cu td{border-bottom:1px solid #e2e8f0;padding:5px 8px;font-size:13px;vertical-align:top}.ttx-ay-cu td:first-child{white-space:nowrap;width:1%}
+.ttx-ay-cu .ttx-tip{background:#ecfdf5;border:1px solid #a7f3d0;border-radius:8px;padding:8px 12px;margin:10px 0;color:#065f46;font-size:13px}
+.ttx-ay-cu .ttx-adv{background:#fef3c7;border:1px solid #fde68a;border-radius:8px;padding:8px 12px;margin:10px 0;color:#92400e;font-size:13px}
+.ttx-ay-cu mark{background:#fde68a;border-radius:3px}
+.ttx-ay-pie{padding:8px 16px;border-top:1px solid #e2e8f0;display:flex;gap:8px;flex-wrap:wrap;background:#f8fafc;align-items:center}
+.ttx-ay-pie small{color:#64748b;margin-right:auto}
+@media(max-width:720px){.ttx-bienv{flex-direction:column}.ttx-bienv .ttx-izq{flex:0 0 auto;padding:16px}.ttx-bienv .ttx-mc,.ttx-bienv .ttx-izq p{display:none}.ttx-ay-c{flex-direction:column}.ttx-ay-toc{flex:0 0 auto;max-height:130px;border-right:none;border-bottom:1px solid #e2e8f0}.ttx-perm{grid-template-columns:1fr}.ttx-op{flex-direction:column}.ttx-2{flex-direction:column;gap:0}}
+</style>
+<script id="ttx-extras">
+(function () {
+'use strict';
+var MODO = window.TT_MODO || 'pc';
+var NEGOCIO = window.TT_NEGOCIO || '';
+var APP = 'Gestor de Pedidos';
+// ===================== AYUDA =====================
+var AYUDA_PC = [
+ { id: 'inicio', t: 'Primeros pasos', h:
+  '<h3>Primeros pasos</h3><p>Para empezar a trabajar solo hacen falta cuatro cosas:</p><ol>' +
+  '<li><b>Datos del negocio e impresora.</b> Salen en el recibo. Se piden en el asistente de configuración.</li>' +
+  '<li><b>Productos.</b> Salen del Excel del catálogo o directo de la base de datos de AxisPOS (Ajustes &rarr; <i>Datos de productos y stock</i>).</li>' +
+  '<li><b>Vendedores.</b> Cada uno tiene su nombre y su PIN (4 a 6 números) y un rol que decide lo que puede hacer.</li>' +
+  '<li><b>Enlazar los móviles.</b> En Ajustes toca <i>Ver QR para vendedores</i> (<kbd>Alt+Q</kbd>) y que escaneen el código con la cámara: así no hace falta escribir la dirección IP.</li></ol>' +
+  '<div class="ttx-tip">Si saltaste algo del asistente, puedes volver a abrirlo cuando quieras con el botón de abajo. No borra lo que ya tienes: solo te deja cambiarlo.</div>' +
+  '<p>Todos los móviles y la PC tienen que estar en la misma red WiFi (por ejemplo, el punto de acceso de un teléfono).</p>' },
+ { id: 'pedidos', t: 'Pedidos que llegan', h:
+  '<h3>Pedidos que llegan</h3><p>Cuando un vendedor manda un pedido, en el Panel suena un aviso y aparece una tarjeta.</p><ul>' +
+  '<li><b>Verde</b> = ya cobrado por el vendedor (la caja todavía lo revisa). <b>Amarillo</b> = pendiente de pago.</li>' +
+  '<li><b>Cobrar en Caja</b> marca el pedido como cobrado. Con el pedido elegido también sirve <kbd>Ctrl+Enter</kbd>.</li>' +
+  '<li><kbd>Alt+I</kbd> imprime el recibo del pedido elegido.</li>' +
+  '<li>Las flechas eligen un pedido; <kbd>/</kbd> filtra por folio, vendedor o producto; <kbd>F9</kbd> alterna &ldquo;Solo pendientes y por revisar&rdquo;.</li>' +
+  '<li>En un pedido cobrado por el vendedor puedes reportar un problema si no se entregó lo que era.</li>' +
+  '<li><kbd>Alt+M</kbd> abre los mensajes y avisos (recientes y anteriores).</li>' +
+  '<li>Al terminar el día, Ajustes &rarr; <i>Cerrar el día (archivar cobrados)</i>.</li></ul>' },
+ { id: 'nuevo', t: 'Armar un pedido para un vendedor', h:
+  '<h3>Armar un pedido para un vendedor (<kbd>F2</kbd>)</h3><p>Se hace entero con el teclado:</p><ol>' +
+  '<li>Elige el vendedor (o <i>todos</i>) y escribe el nombre o el SKU del producto.</li>' +
+  '<li><kbd>&darr;</kbd>/<kbd>&uarr;</kbd> eligen en la lista y <kbd>Enter</kbd> selecciona; el cursor pasa solo a la cantidad.</li>' +
+  '<li>Escribe la cantidad y <kbd>Enter</kbd>: vuelve al buscador para el siguiente producto.</li>' +
+  '<li><kbd>Alt+Enter</kbd> envía el pedido.</li></ol>' +
+  '<p>También puedes escribir comandos en el buscador, por ejemplo <code>+326 5</code> agrega 5 del SKU 326; <code>-326</code> lo quita; <code>/enviar</code> lo manda; <code>/limpiar</code> lo vacía; <code>/nota texto</code> pone una nota; <code>/para nombre</code> elige el vendedor.</p>' +
+  '<div class="ttx-tip"><b>Borrador:</b> si cierras a medias (Esc o Cerrar) el pedido queda guardado. El botón cambia a &ldquo;Continuar borrador&rdquo; hasta que lo envíes o escribas <code>/limpiar</code>.</div>' },
+ { id: 'vendedores', t: 'Vendedores, PIN, roles y permisos', h:
+  '<h3>Vendedores, PIN, roles y permisos</h3><ul>' +
+  '<li><b>Crear vendedores:</b> Ajustes &rarr; <i>PIN de vendedores</i> (<kbd>Alt+V</kbd>) o el asistente de configuración. El nombre no se puede repetir y el PIN es obligatorio (4 a 6 números). Solo se crean desde la PC.</li>' +
+  '<li><b>Roles:</b> son conjuntos de permisos ya hechos. <i>Encargado</i> puede todo; <i>Vendedor</i> toma pedidos, cobra e imprime, pero no cambia precios ni entra a Ajustes; <i>Ayudante</i> arma pedidos y los manda a caja sin cobrar; <i>Solo consulta</i> ve productos y stock.</li>' +
+  '<li><b>Permisos uno por uno:</b> Ajustes &rarr; <i>Permisos de vendedores</i> (<kbd>Alt+P</kbd>). Cuando cambias algo, el móvil del vendedor se entera.</li>' +
+  '<li><b>Clave de administrador:</b> se pone en <i>PIN de vendedores</i>. Sirve para activar el modo punto de venta en un móvil y para abrir el Panel de la PC desde el móvil como administrador.</li>' +
+  '<li>El vendedor puede cambiar su propio PIN desde Ajustes de su móvil si sabe el actual.</li></ul>' },
+ { id: 'movil', t: 'La app del vendedor (móvil)', h:
+  '<h3>La app del vendedor</h3><ul>' +
+  '<li><b>Entrar:</b> escanea el QR del Panel (<kbd>Alt+Q</kbd>), elige tu nombre en la lista y escribe tu PIN.</li>' +
+  '<li><b>Buscar y agregar:</b> escribe el nombre o el SKU. Con comandos es más rápido: <code>+326 5</code>, <code>-326</code>, <code>/enviar</code>.</li>' +
+  '<li><b>Enviar:</b> el pedido llega a la caja al instante, pendiente o ya cobrado (con el método de pago).</li>' +
+  '<li><b>Mis pedidos de hoy:</b> mira, reimprime o cobra tus pedidos; si se cae el WiFi se muestra lo último visto.</li>' +
+  '<li>Si se pierde la conexión, el pedido queda en el teléfono y se envía solo al volver. Hay un botón para reconectar manualmente.</li>' +
+  '<li><b>Modo cliente:</b> le pasas el teléfono al cliente para que vea nombres y precios, sin stock ni cobros; para salir se pide tu PIN.</li></ul>' },
+ { id: 'productos', t: 'Productos, stock y mínimos', h:
+  '<h3>Productos, stock y mínimos</h3><ul>' +
+  '<li><b>De dónde salen los datos:</b> Ajustes &rarr; <i>Datos de productos y stock</i>. Con AxisPOS el catálogo y las existencias se leen en tiempo real (solo lectura); con Excel se usa <i>Cargar / cambiar el Excel del catálogo</i> (<kbd>Alt+E</kbd>) y se eligen las columnas SKU, nombre y precio.</li>' +
+  '<li><b>Consultar precio y stock:</b> <kbd>Alt+C</kbd>, sin armar ningún pedido.</li>' +
+  '<li><b>Stock bajo:</b> Ajustes tiene el número a partir del cual avisa. La campanita lista los avisos (<kbd>Alt+S</kbd>) y se pueden borrar.</li>' +
+  '<li><b>Mínimo por producto:</b> se toma de AxisPOS o se fija a mano en <i>Lista de compras</i> (0 = sin alerta para ese producto).</li>' +
+  '<li><b>Costos, stock estático y fotos:</b> Ajustes &rarr; <i>Costos de reposición</i>, <i>Stock estático (baja rotación)</i> y <i>Fotos del catálogo</i>.</li></ul>' },
+ { id: 'compras', t: 'Compras y qué bajar del almacén', h:
+  '<h3>Compras y qué bajar del almacén</h3><ul>' +
+  '<li><b>Lista de compras</b> (<kbd>F6</kbd>): lo que llegó a su mínimo. Ajusta cuánto comprar, desmarca lo que no quieras y envía a imprimir, copia el texto o abre la hoja.</li>' +
+  '<li><b>Compras a proveedores:</b> calcula qué comprar según ventas. &ldquo;Alcanzar para ___ días&rdquo;.</li>' +
+  '<li><b>Qué bajar del almacén</b> (<kbd>Alt+B</kbd>): dice cuánto bajar del almacén al piso. &ldquo;Cubrir ___ días de venta&rdquo;.</li></ul>' +
+  '<div class="ttx-tip"><b>Con 0 días a cubrir</b> las dos listas salen como el reporte <i>Sugerencias de compras</i> de AxisPOS: solo los productos con existencia por debajo del mínimo, y se sugiere comprar (o bajar) hasta la cantidad normal. Columnas: Nombre, Actual, Mínimo, Normal, Sugerencia (normal &minus; actual) y Total ($). Tienen casillas para marcar o desmarcar todo, total e Imprimir.</div>' +
+  '<p>Para que funcionen, cada producto necesita su mínimo y su cantidad normal puestos en AxisPOS.</p>' },
+ { id: 'etiquetas', t: 'Etiquetas y códigos de barra', h:
+  '<h3>Etiquetas y códigos de barra (<kbd>F4</kbd>)</h3><ol>' +
+  '<li>Busca los productos por nombre o SKU y marca cuántas etiquetas quieres de cada uno.</li>' +
+  '<li>Atajos de selección: <i>Marcar visibles</i>, <i>Stock bajo</i> y <i>Nuevos del Excel</i> (los que aparecieron por primera vez en el último Excel).</li>' +
+  '<li>Elige qué lleva la etiqueta (negocio, nombre, precio, código de barras, SKU), el precio que se imprime (efectivo, transferencia o ambos), el estilo, la letra y el tamaño.</li>' +
+  '<li>Mira la vista previa y pulsa <b>Imprimir</b>.</li></ol><p>La configuración se queda guardada.</p>' },
+ { id: 'recibo', t: 'Recibo e impresora', h:
+  '<h3>Recibo e impresora</h3><ul>' +
+  '<li><b>Datos del recibo:</b> Ajustes &rarr; <i>Personalizar comprobante y QR</i>: nombre, NIT, dirección, teléfono, mensaje final, logo y los QR de pago.</li>' +
+  '<li><b>Impresora:</b> se elige en el asistente de configuración. Debe ser una impresora instalada en Windows. Hay un botón para imprimir una prueba.</li>' +
+  '<li><b>Papel:</b> 58 mm = 32 columnas; 80 mm = 42 o 48 columnas.</li>' +
+  '<li>Devoluciones y garantías tienen su propio comprobante (<kbd>F7</kbd>).</li></ul>' },
+ { id: 'atajos', t: 'Atajos de teclado', h:
+  '<h3>Atajos de teclado del Panel</h3><table>' +
+  '<tr><td><kbd>F1</kbd></td><td>Esta ayuda</td></tr><tr><td><kbd>F2</kbd></td><td>Nuevo pedido para vendedor</td></tr><tr><td><kbd>F3</kbd></td><td>Buscar producto</td></tr>' +
+  '<tr><td><kbd>F4</kbd></td><td>Etiquetas y códigos de barra</td></tr><tr><td><kbd>F6</kbd></td><td>Lista de compras</td></tr><tr><td><kbd>F7</kbd></td><td>Devolución / garantía</td></tr>' +
+  '<tr><td><kbd>F8</kbd></td><td>Métricas</td></tr><tr><td><kbd>F9</kbd></td><td>Solo pendientes y por revisar</td></tr><tr><td><kbd>F10</kbd></td><td>Ajustes</td></tr>' +
+  '<tr><td><kbd>Alt+S</kbd></td><td>Stock bajo</td></tr><tr><td><kbd>Alt+E</kbd></td><td>Excel del catálogo</td></tr><tr><td><kbd>Alt+P</kbd></td><td>Permisos</td></tr>' +
+  '<tr><td><kbd>Alt+V</kbd></td><td>PIN de vendedores</td></tr><tr><td><kbd>Alt+R</kbd></td><td>Red</td></tr><tr><td><kbd>Alt+Q</kbd></td><td>QR para vendedores</td></tr>' +
+  '<tr><td><kbd>Alt+M</kbd></td><td>Mensajes y avisos</td></tr><tr><td><kbd>Alt+I</kbd></td><td>Imprimir el pedido elegido</td></tr><tr><td><kbd>Alt+C</kbd></td><td>Consultar precio y stock</td></tr>' +
+  '<tr><td><kbd>Alt+B</kbd></td><td>Qué bajar del almacén</td></tr><tr><td><kbd>&uarr; &darr;</kbd></td><td>Elegir pedido</td></tr><tr><td><kbd>Ctrl+Enter</kbd></td><td>Cobrar el elegido (o guardar la devolución)</td></tr>' +
+  '<tr><td><kbd>/</kbd></td><td>Filtrar pedidos</td></tr><tr><td><kbd>Esc</kbd></td><td>Cerrar lo que esté abierto</td></tr></table>' +
+  '<h4>Dentro de &ldquo;Nuevo pedido&rdquo;</h4><p>Escribe, flechas + <kbd>Enter</kbd> eligen, cantidad + <kbd>Enter</kbd> y sigues con el otro producto, <kbd>Alt+Enter</kbd> envía.</p>' },
+ { id: 'colores', t: 'Colores de la interfaz', h:
+  '<h3>Colores de la interfaz</h3><p>Ajustes &rarr; <i>Colores de la interfaz...</i> Eliges el color de cada cosa, por separado para el Panel de la PC y para la app del vendedor. Ves el cambio al momento y se aplica al guardar. Con Esc sin guardar todo vuelve a como estaba.</p>' },
+ { id: 'licencia', t: 'Licencia y prueba', dinamica: true, h: '' },
+ { id: 'problemas', t: 'Si algo no funciona', h:
+  '<h3>Si algo no funciona</h3><ul>' +
+  '<li><b>El móvil no conecta:</b> comprueba que esté en la misma red WiFi que la PC y que el Panel esté abierto. Si la IP de la PC cambió (por ejemplo al cambiar de teléfono que da el punto de acceso), la app la busca sola; también puedes volver a escanear el QR.</li>' +
+  '<li><b>No imprime:</b> revisa que la impresora esté encendida y que el nombre elegido sea exactamente el de Windows. Prueba con el botón de imprimir prueba del asistente.</li>' +
+  '<li><b>No salen las existencias:</b> en Ajustes revisa <i>Datos de productos y stock</i>. Con AxisPOS, la conexión se configura en el asistente (servidor, puerto, usuario, contraseña y base).</li>' +
+  '<li><b>Un vendedor no puede hacer algo:</b> mira sus permisos (<kbd>Alt+P</kbd>).</li>' +
+  '<li><b>Se me olvidó el PIN de un vendedor:</b> en <i>PIN de vendedores</i> escribe uno nuevo.</li></ul>' }
+];
+var AYUDA_VEND = [
+ { id: 'entrar', t: 'Entrar', h: '<h3>Entrar</h3><p>Elige tu nombre en la lista y escribe tu PIN (4 a 6 números). Solo el encargado puede crear vendedores desde la PC; si tu nombre no aparece, pídeselo. Para cambiar tu PIN: Ajustes, escribe primero el actual.</p>' },
+ { id: 'pedido', t: 'Armar un pedido', h: '<h3>Armar un pedido</h3><ul><li>Escribe el nombre o el SKU del producto y toca para agregarlo. Puedes subir o bajar la cantidad.</li><li>Con comandos es más rápido: <code>+326 5</code> agrega 5 del SKU 326; <code>-326</code> lo quita; <code>=8</code> deja la última línea en 8; <code>/nota texto</code> pone una nota; <code>/cliente nombre</code>; <code>/pago transferencia</code>; <code>/enviar</code> manda el pedido; <code>/limpiar</code> lo vacía.</li><li>Escribe <code>/ayuda</code> en el buscador para ver todos los comandos.</li></ul>' },
+ { id: 'enviar', t: 'Enviar y cobrar', h: '<h3>Enviar y cobrar</h3><p>El pedido llega a la caja al instante, pendiente de pago o ya cobrado (eliges el método de pago). Si se cae el WiFi no se pierde: se queda en tu teléfono y se envía solo al reconectar. Tu encargado decide si puedes cobrar, editar o dar descuentos.</p>' },
+ { id: 'mis', t: 'Mis pedidos de hoy', h: '<h3>Mis pedidos de hoy</h3><p>Aquí ves los pedidos que mandaste hoy, puedes reimprimirlos o cobrarlos. Si pierdes la conexión se muestra lo último que se vio, con un aviso.</p>' },
+ { id: 'cliente', t: 'Modo cliente', h: '<h3>Modo cliente</h3><p>En Ajustes, <i>Mostrarle el catálogo al cliente</i>: el cliente solo ve nombres y precios (sin stock ni cobros). Para salir tocas la X y escribes tu PIN.</p>' },
+ { id: 'conexion', t: 'Conexión', h: '<h3>Conexión con la PC</h3><p>Tu teléfono y la PC deben estar en el mismo WiFi. Si te alejas y pierdes la señal, usa el botón de reconectar. Si la dirección de la PC cambió, la app la busca sola; si no la encuentra, pide al encargado que te muestre el QR otra vez.</p>' }
+];
+var AYUDA_ETQ = [
+ { id: 'etiquetas', t: 'Etiquetas', h: AYUDA_PC[7].h },
+ { id: 'recibo', t: 'Impresora', h: AYUDA_PC[8].h }
+];
+// ===================== NUCLEO =====================
+function $(id) { return document.getElementById(id); }
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+function api(url, body) {
+  var o = {};
+  if (body !== undefined) o = { method: 'POST', body: JSON.stringify(body) };
+  return fetch(url, o).then(function (r) { return r.json().catch(function () { return null; }).then(function (d) { return { ok: r.ok && !!d && d.ok !== false, status: r.status, d: d || {} }; }); })
+    .catch(function () { return { ok: false, status: 0, d: { error: 'Sin conexión con el programa.' } }; });
+}
+function nodo(html, clase) { var d = document.createElement('div'); d.className = 'ttx-back ' + clase; d.innerHTML = html; document.body.appendChild(d); return d; }
+function quitar(d) { if (d && d.parentNode) d.parentNode.removeChild(d); }
+function guardarLS(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+function leerLS(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+function leerSS(k) { try { return sessionStorage.getItem(k); } catch (e) { return null; } }
+function guardarSS(k, v) { try { sessionStorage.setItem(k, v); } catch (e) {} }
+var TITULO_MODO = { pc: 'Panel de la caja', etiquetas: 'Generador de etiquetas', vendedor: 'App del vendedor' };
+
+// ---------- Estado de la licencia en texto ----------
+function textoLicencia(l) {
+  if (!l) return { clase: '', t: 'VERSIÓN DE PRUEBA' };
+  if (l.modo === 'licencia') return { clase: 'ttx-ver', t: 'LICENCIA ACTIVA' + ((l.vence && l.vence !== 'sin vencimiento') ? ' · hasta el ' + l.vence : '') };
+  if (l.modo === 'prueba') return { clase: '', t: 'VERSIÓN DE PRUEBA · ' + (l.dias >= (l.diasPrueba || 7) ? (l.diasPrueba || 7) + ' DÍAS GRATIS' : 'QUEDAN ' + l.dias + (l.dias === 1 ? ' DÍA' : ' DÍAS')) };
+  return { clase: 'ttx-roj', t: 'LICENCIA REQUERIDA' };
+}
+
+// ---------- Pantalla de inicio (splash) ----------
+function splash(cb) {
+  var clave = 'ttx_splash_' + MODO;
+  if (leerSS(clave)) { cb(); return; }
+  guardarSS(clave, '1');
+  var d = nodo('<div class="ttx-sp-card"><div class="ttx-sp-top"><div class="ttx-logo">P</div><h1>' + esc(APP) + '</h1><p class="ttx-sub">' + esc(TITULO_MODO[MODO] || '') + '</p>' +
+    (NEGOCIO ? '<p class="ttx-neg">' + esc(NEGOCIO) + '</p>' : '') + '</div><div class="ttx-sp-bot"><div class="ttx-mini">P</div><div class="ttx-barra"><i></i></div><span class="ttx-est" id="ttxSpEst">Verificando la licencia...</span></div></div>', 'ttx-splash');
+  var t0 = Date.now(), listo = false;
+  api('/api/licencia').then(function (r) {
+    var l = r.d || {};
+    var e = $('ttxSpEst'); if (!e) return;
+    if (l.modo === 'licencia') e.textContent = 'Licencia verificada';
+    else if (l.modo === 'prueba') e.textContent = 'Versión de prueba: ' + l.dias + (l.dias === 1 ? ' día' : ' días');
+    else e.textContent = 'Licencia requerida';
+  });
+  setTimeout(function () { d.classList.add('ttx-off'); setTimeout(function () { quitar(d); if (!listo) { listo = true; cb(); } }, 460); }, 1500);
+}
+
+// ---------- Acerca de ----------
+function acercaDe() {
+  api('/api/licencia').then(function (r) {
+    var l = r.d || {}; var tl = textoLicencia(l);
+    var d = nodo('<div class="ttx-card" style="width:min(460px,100%);padding:24px;text-align:center"><div class="ttx-logo" style="width:70px;height:70px;font-size:42px;border-radius:18px">P</div>' +
+      '<h2 style="margin:0;color:#1e3a8a">' + esc(APP) + '</h2><p style="margin:2px 0 10px;color:#64748b;font-size:13px">Versión ' + esc(l.version || '') + (NEGOCIO ? ' · ' + esc(NEGOCIO) : '') + '</p>' +
+      '<div class="ttx-pill ' + tl.clase + '">' + esc(tl.t) + '</div>' +
+      '<p class="ttx-peq">ID de este equipo: <b style="font-size:15px;color:#1d4ed8">' + esc(l.idEquipo || '') + '</b><br>Para activar la licencia envía este código a tu proveedor y escribe la clave que te dé.</p>' +
+      '<div class="ttx-bots" style="justify-content:center"><button class="ttx-b ttx-g" data-a="lic">Activar licencia</button><button class="ttx-b" data-a="ok">Cerrar</button></div></div>', 'ttx-dlg');
+    d.onclick = function (e) {
+      var a = e.target && e.target.getAttribute && e.target.getAttribute('data-a');
+      if (a === 'ok' || e.target === d) quitar(d);
+      if (a === 'lic') window.open('/licencia', '_blank');
+    };
+  });
+}
+
+// ---------- Bienvenida ----------
+function bienvenida(info, alAceptar) {
+  var l = (info && info.licencia) || null; var tl = textoLicencia(l);
+  var fin = l && l.modo === 'prueba' ? l.vence : '';
+  var lista = MODO === 'etiquetas'
+    ? ['Etiquetas con nombre, precio y código de barras', 'Imprime en la térmica o en una hoja A4', 'Estilos, tamaños y letras a tu gusto']
+    : ['Pedidos de tus vendedores en tiempo real', 'Cobro, recibos y etiquetas desde la caja', 'Stock y compras conectados a AxisPOS o a tu Excel'];
+  var d = nodo('<div class="ttx-card ttx-bienv"><div class="ttx-izq"><div class="ttx-logo">P</div><h3>' + esc(NEGOCIO || APP) + '</h3>' +
+    '<p>' + (MODO === 'etiquetas' ? 'Prepara e imprime tus etiquetas de precios.' : 'Todo lo del mostrador en un solo lugar.') + '</p>' +
+    (MODO === 'etiquetas' ? '' : '<div class="ttx-mc"><span>Pedido #12</span><b>Cobrado</b></div><div class="ttx-mc"><span>Pedido #13</span><b>Pendiente</b></div>') + '</div>' +
+    '<div class="ttx-der"><div class="ttx-mini-t">' + esc(MODO === 'etiquetas' ? 'Generador de etiquetas' : APP) + '</div>' +
+    '<h2>¡Bienvenido!</h2><p class="ttx-gr">Gracias por usarlo.</p><ul class="ttx-lista">' + lista.map(function (x) { return '<li>' + esc(x) + '</li>'; }).join('') + '</ul>' +
+    '<div class="ttx-pill ' + tl.clase + '">' + esc(tl.t) + '</div>' +
+    '<p class="ttx-peq">' + (l && l.modo === 'prueba' ? 'Cuando quieras activar la licencia, entra a <b>Acerca de</b> o a la Ayuda. La prueba sigue disponible hasta el ' + esc(fin) + '.' : (l && l.modo === 'licencia' ? 'Tu licencia está al día.' : '')) + '</p>' +
+    '<div class="ttx-bots"><button class="ttx-b ttx-g" data-a="acerca">Acerca de</button><button class="ttx-b ttx-g" data-a="ayuda">Ayuda</button><button class="ttx-b" data-a="ok" id="ttxBienOk">Aceptar y continuar</button></div>' +
+    '<div class="ttx-ver-t">Versión ' + esc((l && l.version) || '') + '</div></div></div>', 'ttx-dlg');
+  d.onclick = function (e) {
+    var a = e.target && e.target.getAttribute && e.target.getAttribute('data-a');
+    if (a === 'acerca') acercaDe();
+    else if (a === 'ayuda') TTAyuda.abrir();
+    else if (a === 'ok') { quitar(d); if (alAceptar) alAceptar(); }
+  };
+  setTimeout(function () { var b = $('ttxBienOk'); if (b) b.focus(); }, 60);
+}
+
+// ---------- Ayuda ----------
+var TTAyuda = (function () {
+  var raiz = null, secs = [], actual = '', infoLic = null;
+  function lista() { return MODO === 'vendedor' ? AYUDA_VEND : (MODO === 'etiquetas' ? AYUDA_ETQ : AYUDA_PC); }
+  function textoPlano(h) { var t = document.createElement('div'); t.innerHTML = h; return (t.textContent || '').toLowerCase(); }
+  function cuerpo(s) {
+    if (s.dinamica) {
+      var l = infoLic || {}; var tl = textoLicencia(l);
+      return '<h3>Licencia y prueba</h3><div class="ttx-pill ' + tl.clase + '">' + esc(tl.t) + '</div>' +
+        '<ul><li>La primera vez se puede probar <b>' + esc(l.diasPrueba || 7) + ' días gratis</b>, con todo incluido.</li>' +
+        '<li>Al terminar la prueba el programa pide la licencia. Los datos no se pierden: al activarla todo sigue como estaba.</li>' +
+        '<li>Para activarla necesitas una clave. Pídela a tu proveedor enviándole el <b>ID de este equipo</b>: <b style="color:#1d4ed8">' + esc(l.idEquipo || '...') + '</b>.</li>' +
+        '<li>La clave sirve solo para este equipo' + ((l.vence && l.vence !== 'sin vencimiento' && l.modo === 'licencia') ? ' y vence el ' + esc(l.vence) : '') + '.</li></ul>' +
+        '<p><button class="ttx-b" data-ay="licencia">Introducir clave de licencia</button></p>';
+    }
+    return s.h;
+  }
+  function pintarToc(filtro) {
+    var f = (filtro || '').toLowerCase().trim();
+    var html = '';
+    secs.forEach(function (s) {
+      var ok = !f || s.t.toLowerCase().indexOf(f) >= 0 || textoPlano(cuerpo(s)).indexOf(f) >= 0;
+      s._ok = ok;
+      if (ok) html += '<button data-sec="' + s.id + '" class="' + (s.id === actual ? 'ttx-act' : '') + '">' + esc(s.t) + '</button>';
+    });
+    $('ttxAyToc').innerHTML = html || '<div style="padding:10px;color:#64748b;font-size:13px">Sin resultados.</div>';
+    if (f) { var primero = secs.filter(function (s) { return s._ok; })[0]; if (primero && !secs.filter(function (s) { return s._ok && s.id === actual; }).length) mostrar(primero.id, f); }
+  }
+  function mostrar(id, resaltar) {
+    actual = id;
+    var s = secs.filter(function (x) { return x.id === id; })[0] || secs[0];
+    if (!s) return;
+    var h = cuerpo(s);
+    if (resaltar) {
+      try { h = h.replace(new RegExp('(>[^<]*?)(' + resaltar.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')', 'ig'), '$1<mark>$2</mark>'); } catch (e) {}
+    }
+    $('ttxAyCu').innerHTML = h;
+    $('ttxAyCu').scrollTop = 0;
+    var bs = $('ttxAyToc').querySelectorAll('button'); for (var i = 0; i < bs.length; i++) bs[i].className = (bs[i].getAttribute('data-sec') === s.id) ? 'ttx-act' : '';
+    var pie = $('ttxAyAcc');
+    if (pie) pie.innerHTML = (MODO === 'pc' && s.id === 'inicio') ? '<button class="ttx-b" data-ay="asistente">Abrir el asistente de configuración</button>' : '';
+  }
+  function abrir(seccion) {
+    if (raiz) { cerrar(); }
+    secs = lista();
+    actual = seccion || secs[0].id;
+    raiz = nodo('<div class="ttx-card"><div class="ttx-ay-h"><h2>Ayuda</h2><input type="text" id="ttxAyBus" placeholder="Buscar en la ayuda (por ejemplo: PIN, etiquetas, licencia)" autocomplete="off"><button class="ttx-b ttx-g" data-ay="cerrar">Cerrar</button></div>' +
+      '<div class="ttx-ay-c"><div class="ttx-ay-toc" id="ttxAyToc"></div><div class="ttx-ay-cu" id="ttxAyCu"></div></div>' +
+      '<div class="ttx-ay-pie"><small>F1 abre la ayuda · Esc la cierra</small><span id="ttxAyAcc"></span><button class="ttx-b ttx-g" data-ay="acerca">Acerca de</button></div></div>', 'ttx-ayu');
+    raiz.onclick = function (e) {
+      var t = e.target;
+      if (t === raiz) { cerrar(); return; }
+      var sec = t.getAttribute && t.getAttribute('data-sec'); if (sec) { mostrar(sec); return; }
+      var a = t.getAttribute && t.getAttribute('data-ay');
+      if (a === 'cerrar') cerrar();
+      else if (a === 'acerca') acercaDe();
+      else if (a === 'licencia') window.open('/licencia', '_blank');
+      else if (a === 'asistente') { cerrar(); if (window.TTAsistente) TTAsistente.abrir(); }
+    };
+    $('ttxAyBus').oninput = function () { pintarToc(this.value); if (!this.value) mostrar(actual); };
+    pintarToc('');
+    mostrar(actual);
+    if (secs.some(function (s) { return s.dinamica; })) api('/api/licencia').then(function (r) { infoLic = r.d || null; if (actual === 'licencia' && raiz) mostrar('licencia'); });
+  }
+  function cerrar() { quitar(raiz); raiz = null; }
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && raiz) { cerrar(); e.stopPropagation(); e.preventDefault(); }
+  }, true);
+  return { abrir: abrir, cerrar: cerrar, abierta: function () { return !!raiz; } };
+})();
+window.TTAyuda = TTAyuda;
+// ===================== ASISTENTE DE CONFIGURACION (solo PC) =====================
+var TTAsistente = (function () {
+  var raiz = null, info = null, paso = 0, W = null;
+  var PASOS = ['Tu negocio', 'Impresora y papel', 'Productos', 'Vendedores y roles', 'Clave de administrador', 'Listo'];
+  function rolDesc(id) { var r = (info.roles || []).filter(function (x) { return x.id === id; })[0]; return r ? r.desc : ''; }
+  function permisosDe(id) { var r = (info.roles || []).filter(function (x) { return x.id === id; })[0]; var h = {}; (info.claves || []).forEach(function (c) { h[c.k] = !!(r && r.permisos.indexOf(c.k) >= 0); }); return h; }
+  function iniciarEstado() {
+    var n = info.negocio || {};
+    W = {
+      nombre: n.nombre || '', nit: n.nit || '', direccion: n.direccion || '', telefono: n.telefono || '',
+      impresora: info.impresora || '', ancho: info.ancho || 32, impresoras: [],
+      origen: info.axis && info.axis.activo ? 'axispos' : 'excel',
+      axis: { servidor: (info.axis && info.axis.servidor) || 'localhost', puerto: (info.axis && info.axis.puerto) || 3306, usuario: (info.axis && info.axis.usuario) || '', clave: '', base: (info.axis && info.axis.base) || 'axispos' },
+      axisOk: !!(info.axis && info.axis.activo),
+      vend: (info.vendedores || []).map(function (v) { return { nombre: v.nombre, pin: '', rol: v.rol || '', nuevo: false, permisos: v.permisos || null, personal: !v.rol }; }),
+      clave: '', clave2: '', resumen: []
+    };
+    if (!W.vend.length) W.vend.push(vNuevo());
+  }
+  function vNuevo() { return { nombre: '', pin: '', rol: 'vendedor', nuevo: true, permisos: null, personal: false }; }
+  function campo(id, etiqueta, valor, extra) {
+    return '<div class="ttx-f"><label for="' + id + '">' + etiqueta + '</label><input id="' + id + '" value="' + esc(valor) + '" ' + (extra || '') + '></div>';
+  }
+  function pintar() {
+    var h = '';
+    var errHTML = '<div class="ttx-err" id="ttxWErr"></div>';
+    if (paso === 0) {
+      h = '<div class="ttx-nota">Estos datos salen en el encabezado de los recibos y en las etiquetas. Solo el nombre es obligatorio.</div>' +
+        campo('wNombre', 'Nombre del negocio *', W.nombre, 'maxlength="60" autocomplete="off"') +
+        '<div class="ttx-2">' + campo('wNit', 'NIT (opcional)', W.nit, 'maxlength="40"') + campo('wTel', 'Teléfono (opcional)', W.telefono, 'maxlength="60"') + '</div>' +
+        campo('wDir', 'Dirección (opcional)', W.direccion, 'maxlength="200"') + errHTML;
+    } else if (paso === 1) {
+      var ops = '<option value="">(No usar impresora por ahora)</option>' + W.impresoras.map(function (p) { return '<option value="' + esc(p) + '"' + (p === W.impresora ? ' selected' : '') + '>' + esc(p) + '</option>'; }).join('');
+      if (W.impresora && W.impresoras.indexOf(W.impresora) < 0) ops += '<option value="' + esc(W.impresora) + '" selected>' + esc(W.impresora) + ' (actual)</option>';
+      h = '<div class="ttx-nota">Elige la impresora de tickets instalada en Windows. Si no sale en la lista, escribe su nombre exacto abajo.</div>' +
+        '<div class="ttx-f"><label for="wImp">Impresora</label><select id="wImp">' + ops + '</select></div>' +
+        campo('wImpOtra', 'O escribe el nombre exacto', '', 'placeholder="Ej: CAJA"') +
+        '<div class="ttx-f"><label for="wAncho">Papel</label><select id="wAncho"><option value="32"' + (W.ancho === 32 ? ' selected' : '') + '>58 mm (32 columnas)</option><option value="42"' + (W.ancho === 42 ? ' selected' : '') + '>80 mm (42 columnas)</option><option value="48"' + (W.ancho === 48 ? ' selected' : '') + '>80 mm (48 columnas)</option></select></div>' +
+        '<button class="ttx-b ttx-g" data-w="prueba">Imprimir una prueba</button>' + errHTML;
+    } else if (paso === 2) {
+      var a = W.axis;
+      h = '<div class="ttx-nota">¿De dónde salen tus productos, precios y existencias?</div><div class="ttx-op">' +
+        '<label class="' + (W.origen === 'excel' ? 'ttx-sel' : '') + '"><input type="radio" name="wOr" value="excel"><span>Un Excel</span><small>Eliges el archivo y qué columna es el SKU, el nombre y el precio.</small></label>' +
+        '<label class="' + (W.origen === 'axispos' ? 'ttx-sel' : '') + '"><input type="radio" name="wOr" value="axispos"><span>AxisPOS</span><small>Se leen directo de su base de datos (solo lectura).</small></label></div>';
+      if (W.origen === 'excel') {
+        h += '<p style="font-size:13px;color:#334155;margin:0 0 10px">' + (info.excelRuta ? 'Excel actual: <b>' + esc(info.excelRuta) + '</b>' : 'Todavía no hay un Excel elegido.') + '</p>' +
+          '<button class="ttx-b ttx-g" data-w="excel">Elegir / cambiar el Excel ahora</button><p class="ttx-peq" style="margin-top:8px">Se abre la ventana del catálogo encima de este asistente. Al terminar, vuelve aquí.</p>';
+      } else {
+        h += '<div class="ttx-2">' + campo('wAxS', 'Servidor', a.servidor) + campo('wAxP', 'Puerto', a.puerto, 'inputmode="numeric"') + '</div>' +
+          '<div class="ttx-2">' + campo('wAxU', 'Usuario', a.usuario, 'autocomplete="off"') + '<div class="ttx-f"><label for="wAxC">Contraseña</label><input id="wAxC" type="password" value="' + esc(a.clave) + '" autocomplete="new-password" placeholder="' + (W.axisOk ? '(sin cambios)' : '') + '"></div></div>' +
+          campo('wAxB', 'Base de datos', a.base) +
+          '<button class="ttx-b ttx-g" data-w="axisprobar">Probar conexión</button><div id="ttxAxMsg"></div>' +
+          '<p class="ttx-peq" style="margin-top:8px">Se recomienda un usuario de solo lectura. El programa nunca escribe en AxisPOS.</p>';
+      }
+      h += errHTML;
+    } else if (paso === 3) {
+      h = '<div class="ttx-nota">Cada vendedor entra con su nombre y su PIN (4 a 6 números). El <b>rol</b> decide lo que puede hacer en su móvil. Puedes dejarlo para después.</div>';
+      W.vend.forEach(function (v, i) {
+        var ops = (info.roles || []).map(function (r) { return '<option value="' + r.id + '"' + (v.rol === r.id ? ' selected' : '') + '>' + esc(r.nombre) + '</option>'; }).join('') + '<option value=""' + (v.personal ? ' selected' : '') + '>Personalizado</option>';
+        var ps = v.permisos || permisosDe(v.rol);
+        h += '<div class="ttx-vrow"><div class="ttx-2"><div class="ttx-f" style="margin:0"><label>Nombre</label><input data-v="' + i + '" data-c="nombre" value="' + esc(v.nombre) + '" maxlength="40"' + (v.nuevo ? '' : ' readonly') + '></div>' +
+          '<div class="ttx-f" style="margin:0"><label>PIN' + (v.nuevo ? '' : ' (vacío = no cambia)') + '</label><input data-v="' + i + '" data-c="pin" value="' + esc(v.pin) + '" maxlength="6" inputmode="numeric" autocomplete="off"></div>' +
+          '<div class="ttx-f" style="margin:0"><label>Rol</label><select data-v="' + i + '" data-c="rol">' + ops + '</select></div>' +
+          (v.nuevo ? '<button class="ttx-quita" data-w="quitav" data-i="' + i + '" title="Quitar">&times;</button>' : '') + '</div>' +
+          '<div class="ttx-rd">' + esc(v.personal ? 'Permisos personalizados.' : rolDesc(v.rol)) + '</div>' +
+          '<details><summary>Ver / cambiar permisos</summary><div class="ttx-perm">' + (info.claves || []).map(function (c) {
+            return '<label title="' + esc(c.d) + '"><input type="checkbox" data-v="' + i + '" data-p="' + c.k + '"' + (ps[c.k] ? ' checked' : '') + '> ' + esc(c.t) + '</label>';
+          }).join('') + '</div></details></div>';
+      });
+      h += '<button class="ttx-b ttx-g" data-w="addv">+ Agregar otro vendedor</button>' + errHTML;
+    } else if (paso === 4) {
+      h = '<div class="ttx-nota">La clave de administrador sirve para activar el modo punto de venta en un móvil y para abrir este Panel desde el móvil como administrador. ' +
+        (info.adminClaveDefinida ? '<b>Ya hay una clave puesta.</b> Escribe una nueva solo si quieres cambiarla (los móviles tendrán que volver a activar el modo).' : 'Es opcional, pero recomendada.') + '</div>' +
+        campo('wCl', 'Clave (4 a 20 caracteres)', W.clave, 'type="password" autocomplete="new-password"') + campo('wCl2', 'Repite la clave', W.clave2, 'type="password" autocomplete="new-password"') + errHTML;
+    } else {
+      var l = info.licencia || {}; var tl = textoLicencia(l);
+      h = '<div style="text-align:center;margin-bottom:10px"><div style="font-size:44px">&#127881;</div><h3 style="margin:0;color:#15803d">¡Todo listo!</h3></div><ul class="ttx-res">' +
+        (W.resumen.length ? W.resumen.map(function (x) { return '<li>' + esc(x) + '</li>'; }).join('') : '<li>No se cambió nada.</li>') + '</ul>' +
+        '<div class="ttx-pill ' + tl.clase + '">' + esc(tl.t) + '</div>' +
+        '<p class="ttx-peq">Ahora enlaza los móviles: en Ajustes toca <b>Ver QR para vendedores</b> y que lo escaneen con la cámara. Si algo no está claro, la <b>Ayuda</b> (F1) lo explica.</p>' +
+        '<div style="display:flex;gap:8px;flex-wrap:wrap"><button class="ttx-b ttx-g" data-w="qr">Ver QR para vendedores</button><button class="ttx-b ttx-g" data-w="ayuda">Abrir la Ayuda</button></div>';
+    }
+    var pts = PASOS.map(function (p, i) { return '<i class="' + (i < paso ? 'ttx-ok' : (i === paso ? 'ttx-on' : '')) + '"></i>'; }).join('');
+    var ult = (paso === PASOS.length - 1);
+    var cont = '<div class="ttx-card"><div class="ttx-wh"><div class="ttx-pa">Configuración inicial · Paso ' + (paso + 1) + ' de ' + PASOS.length + '</div><h2>' + esc(PASOS[paso]) + '</h2><div class="ttx-pts">' + pts + '</div></div>' +
+      '<div class="ttx-wb" id="ttxWb">' + h + '</div><div class="ttx-wf">' +
+      (paso > 0 && !ult ? '<button class="ttx-b ttx-g" data-w="atras">Atrás</button>' : '') +
+      (!ult ? '<button class="ttx-b ttx-link" data-w="omitir">Omitir este paso</button>' : '') + '<span class="ttx-sp"></span>' +
+      '<button class="ttx-b ' + (ult ? 'ttx-v' : '') + '" id="ttxWSig" data-w="' + (ult ? 'fin' : 'sig') + '">' + (ult ? 'Terminar' : 'Siguiente') + '</button></div></div>';
+    if (!raiz) raiz = nodo(cont, 'ttx-wiz'); else raiz.innerHTML = cont;
+    var pri = raiz.querySelector('.ttx-wb input:not([readonly]), .ttx-wb select'); if (pri && paso !== 3) setTimeout(function () { try { pri.focus(); } catch (e) {} }, 30);
+  }
+  function err(t) { var e = $('ttxWErr'); if (e) { e.className = 'ttx-err'; e.textContent = t || ''; } }
+  function ok(t) { var e = $('ttxWErr'); if (e) { e.className = 'ttx-okm'; e.textContent = t || ''; } }
+  function v(id) { var e = $(id); return e ? e.value : ''; }
+  function leerCampos() {
+    if (paso === 0) { W.nombre = v('wNombre').trim(); W.nit = v('wNit').trim(); W.telefono = v('wTel').trim(); W.direccion = v('wDir').trim(); }
+    else if (paso === 1) { var o = v('wImpOtra').trim(); W.impresora = o || v('wImp'); W.ancho = parseInt(v('wAncho'), 10) || 32; }
+    else if (paso === 2 && W.origen === 'axispos') { W.axis = { servidor: v('wAxS').trim(), puerto: parseInt(v('wAxP'), 10) || 3306, usuario: v('wAxU').trim(), clave: v('wAxC'), base: v('wAxB').trim() }; }
+    else if (paso === 4) { W.clave = v('wCl'); W.clave2 = v('wCl2'); }
+  }
+  function guardarPaso(omitir) {
+    if (omitir) return Promise.resolve(true);
+    leerCampos();
+    if (paso === 0) {
+      if (W.nombre.length < 2) { err('Escribe el nombre del negocio.'); return Promise.resolve(false); }
+      return api('/api/instalacion/guardar', { negocio: { nombre: W.nombre, nit: W.nit, direccion: W.direccion, telefono: W.telefono } }).then(function (r) {
+        if (!r.ok) { err(r.d.error || 'No se pudo guardar.'); return false; }
+        NEGOCIO = W.nombre; W.resumen.push('Negocio: ' + W.nombre); return true;
+      });
+    }
+    if (paso === 1) {
+      var c = { negocio: { ancho: W.ancho } }; if (W.impresora) c.impresora = W.impresora;
+      return api('/api/instalacion/guardar', c).then(function (r) {
+        if (!r.ok) { err(r.d.error || 'No se pudo guardar.'); return false; }
+        W.resumen.push(W.impresora ? 'Impresora: ' + W.impresora + ' (' + (W.ancho === 32 ? '58' : '80') + ' mm)' : 'Impresora: sin elegir todavía'); return true;
+      });
+    }
+    if (paso === 2) {
+      if (W.origen === 'axispos' && (!W.axisOk || W.axis.clave || !info.axis.activo)) {
+        if (!W.axis.usuario || !W.axis.base) { err('Escribe el usuario y la base de datos de AxisPOS, o elige otra opción.'); return Promise.resolve(false); }
+        if (W.axisOk && !W.axis.clave && info.axis.activo) return Promise.resolve(true);
+        return api('/api/instalacion/axis', Object.assign({ guardar: true }, W.axis)).then(function (r) {
+          if (!r.ok) { err(r.d.error || 'No se pudo conectar.'); return false; }
+          W.axisOk = true; info.axis.activo = true; W.resumen.push('Productos: AxisPOS (' + (r.d.productos || 0) + ' productos)'); return true;
+        });
+      }
+      W.resumen.push(W.origen === 'axispos' ? 'Productos: AxisPOS' : 'Productos: Excel' + (info.excelRuta ? '' : ' (falta elegir el archivo)'));
+      return Promise.resolve(true);
+    }
+    if (paso === 3) {
+      var lista = []; var vistos = {};
+      for (var i = 0; i < W.vend.length; i++) {
+        var x = W.vend[i]; var n = (x.nombre || '').trim();
+        if (!n && !x.pin) continue;
+        if (!n) { err('Falta el nombre de un vendedor.'); return Promise.resolve(false); }
+        if (vistos[n.toLowerCase()]) { err('El nombre "' + n + '" está repetido.'); return Promise.resolve(false); }
+        vistos[n.toLowerCase()] = 1;
+        if (x.nuevo && !/^\d{4,6}$/.test(x.pin)) { err('El PIN de ' + n + ' debe tener de 4 a 6 números.'); return Promise.resolve(false); }
+        if (!x.nuevo && x.pin && !/^\d{4,6}$/.test(x.pin)) { err('El PIN de ' + n + ' debe tener de 4 a 6 números.'); return Promise.resolve(false); }
+        var o = { nombre: n, pin: x.pin, rol: x.personal ? '' : x.rol };
+        if (x.personal || x.permisos) o.permisos = x.permisos || permisosDe(x.rol);
+        lista.push(o);
+      }
+      if (!lista.length) return Promise.resolve(true);
+      return api('/api/instalacion/vendedores', { vendedores: lista }).then(function (r) {
+        if (!r.ok) { err(r.d.error || 'No se pudieron guardar los vendedores.'); return false; }
+        var malos = (r.d.resultados || []).filter(function (z) { return !z.ok; });
+        if (malos.length) { err(malos[0].nombre + ': ' + malos[0].error); return false; }
+        W.resumen.push('Vendedores guardados: ' + (r.d.resultados || []).length);
+        return true;
+      });
+    }
+    if (paso === 4) {
+      if (!W.clave && !W.clave2) return Promise.resolve(true);
+      if (W.clave.length < 4 || W.clave.length > 20) { err('La clave debe tener de 4 a 20 caracteres.'); return Promise.resolve(false); }
+      if (W.clave !== W.clave2) { err('Las dos claves no son iguales.'); return Promise.resolve(false); }
+      return api('/api/pos/clave', { clave: W.clave }).then(function (r) {
+        if (!r.ok) { err(r.d.error || 'No se pudo guardar la clave.'); return false; }
+        info.adminClaveDefinida = true; W.resumen.push('Clave de administrador puesta'); return true;
+      });
+    }
+    return Promise.resolve(true);
+  }
+  function siguiente(omitir) {
+    var b = $('ttxWSig'); if (b) b.disabled = true;
+    guardarPaso(omitir).then(function (bien) {
+      if (b) b.disabled = false;
+      if (!bien) return;
+      paso++; pintar();
+    });
+  }
+  function cerrar() { quitar(raiz); raiz = null; }
+  // Los dialogos propios del programa (Excel, QR) se abren encima: el asistente se esconde mientras estan abiertos.
+  function externo(idOverlay, fn) {
+    if (raiz) raiz.style.display = 'none';
+    try { fn(); } catch (e) {}
+    var n = 0;
+    var t = setInterval(function () {
+      n++;
+      var o = document.getElementById(idOverlay);
+      var abierto = o && o.style.display === 'flex';
+      if (!abierto && n > 2) { clearInterval(t); if (raiz) { raiz.style.display = ''; if (paso === 2 || paso === 5) { leerCampos(); } api('/api/instalacion').then(function (r) { if (r.ok && raiz) { info.excelRuta = r.d.excelRuta; info.axis = r.d.axis; pintar(); } }); } }
+    }, 350);
+  }
+  function abrir() {
+    api('/api/instalacion').then(function (r) {
+      if (!r.ok) return;
+      info = r.d; iniciarEstado(); paso = 0;
+      var co = document.getElementById('configOverlay'); if (co && co.style.display === 'flex') co.style.display = 'none';
+      api('/api/instalacion/impresoras').then(function (ri) { W.impresoras = (ri.d && ri.d.impresoras) || []; if (!W.impresora && ri.d && ri.d.actual) W.impresora = ri.d.actual; if (raiz && paso === 1) pintar(); });
+      pintar();
+    });
+  }
+  document.addEventListener('click', function (e) {
+    if (!raiz || !raiz.contains(e.target)) return;
+    var t = e.target; var w = t.getAttribute && t.getAttribute('data-w');
+    if (!w) return;
+    if (w === 'sig') siguiente(false);
+    else if (w === 'omitir') { leerCampos(); paso++; pintar(); }
+    else if (w === 'atras') { leerCampos(); paso--; pintar(); }
+    else if (w === 'addv') { leerCampos(); W.vend.push(vNuevo()); pintar(); var f = raiz.querySelectorAll('.ttx-vrow'); if (f.length) f[f.length - 1].scrollIntoView(); }
+    else if (w === 'quitav') { W.vend.splice(parseInt(t.getAttribute('data-i'), 10), 1); if (!W.vend.length) W.vend.push(vNuevo()); pintar(); }
+    else if (w === 'prueba') {
+      leerCampos();
+      var c = { negocio: { ancho: W.ancho } }; if (W.impresora) c.impresora = W.impresora;
+      api('/api/instalacion/guardar', c).then(function (r) {
+        if (!r.ok) { err(r.d.error || 'No se pudo guardar.'); return; }
+        api('/api/recibo/prueba', {}).then(function (r2) { if (r2.ok) ok('Se mandó una prueba a la impresora.'); else err(r2.d.error || 'No se pudo imprimir.'); });
+      });
+    }
+    else if (w === 'excel') { if (typeof window.abrirConfig === 'function') externo('configOverlay', window.abrirConfig); }
+    else if (w === 'axisprobar') {
+      leerCampos(); var m = $('ttxAxMsg'); m.className = 'ttx-peq'; m.textContent = 'Probando...';
+      api('/api/instalacion/axis', Object.assign({ probar: true }, W.axis)).then(function (r) {
+        if (r.ok) { m.className = 'ttx-okm'; m.textContent = 'Conexión correcta: ' + (r.d.productos || 0) + ' productos.'; } else { m.className = 'ttx-err'; m.textContent = r.d.error || 'No se pudo conectar.'; }
+      });
+    }
+    else if (w === 'qr') { if (typeof window.mostrarQRVendedor === 'function') externo('qrOverlay', window.mostrarQRVendedor); }
+    else if (w === 'ayuda') { TTAyuda.abrir('inicio'); }
+    else if (w === 'fin') { api('/api/instalacion/completar', { configurado: true, bienvenida: true }).then(function () { cerrar(); }); }
+  });
+  document.addEventListener('input', function (e) {
+    if (!raiz || !raiz.contains(e.target)) return;
+    var t = e.target; var i = t.getAttribute && t.getAttribute('data-v');
+    if (i === null || i === undefined) return;
+    var x = W.vend[parseInt(i, 10)]; if (!x) return;
+    var c = t.getAttribute('data-c'), p = t.getAttribute('data-p');
+    if (c === 'nombre') x.nombre = t.value; else if (c === 'pin') x.pin = t.value.replace(/\D/g, '');
+    if (c === 'pin' && t.value !== x.pin) t.value = x.pin;
+    if (p) { if (!x.permisos) x.permisos = permisosDe(x.rol); x.permisos[p] = t.checked; x.personal = true; var rd = t.closest('.ttx-vrow').querySelector('.ttx-rd'); if (rd) rd.textContent = 'Permisos personalizados.'; var sel = t.closest('.ttx-vrow').querySelector('select[data-c="rol"]'); if (sel) sel.value = ''; }
+  });
+  document.addEventListener('change', function (e) {
+    if (!raiz || !raiz.contains(e.target)) return;
+    var t = e.target;
+    if (t.name === 'wOr') { leerCampos(); W.origen = t.value; pintar(); return; }
+    var i = t.getAttribute && t.getAttribute('data-v'); var c = t.getAttribute && t.getAttribute('data-c');
+    if (i !== null && i !== undefined && c === 'rol') {
+      var x = W.vend[parseInt(i, 10)]; x.rol = t.value; x.personal = !t.value; x.permisos = t.value ? permisosDe(t.value) : (x.permisos || permisosDe('vendedor'));
+      leerCampos(); pintar();
+    }
+  });
+  return { abrir: abrir };
+})();
+window.TTAsistente = TTAsistente;
+
+// ===================== ARRANQUE =====================
+// F1 se registra al cargar (antes que los atajos de la pagina) para que mande la Ayuda.
+if (MODO !== 'vendedor') {
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'F1' && !e.ctrlKey && !e.altKey) { e.preventDefault(); e.stopImmediatePropagation(); if (TTAyuda.abierta()) TTAyuda.cerrar(); else TTAyuda.abrir(MODO === 'pc' ? 'atajos' : undefined); }
+  }, true);
+}
+function arrancar() {
+  if (MODO === 'vendedor') return;
+  if (MODO === 'pc') {
+    api('/api/instalacion').then(function (r) {
+      if (!r.ok) { splash(function () {}); return; }
+      var info = r.d; if (info.negocio && info.negocio.nombre) NEGOCIO = info.negocio.nombre;
+      splash(function () {
+        if (info.bienvenidaVista && info.configurado) return;
+        bienvenida(info, function () {
+          api('/api/instalacion/completar', { bienvenida: true });
+          if (!info.configurado) TTAsistente.abrir();
+        });
+      });
+    });
+  } else if (MODO === 'etiquetas') {
+    var fab = document.createElement('button'); fab.className = 'ttx-fab'; fab.type = 'button'; fab.textContent = '? Ayuda (F1)'; fab.onclick = function () { TTAyuda.abrir(); }; document.body.appendChild(fab);
+    api('/api/licencia').then(function (r) {
+      splash(function () {
+        if (leerLS('ttx_bienv_etq') === '1') return;
+        bienvenida({ licencia: r.d }, function () { guardarLS('ttx_bienv_etq', '1'); });
+      });
+    });
+  }
+}
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', arrancar); else arrancar();
+})();
+</script>
+'@
+function Inyectar-Extras([string]$html, [string]$modo) {
+    $i = $html.IndexOf("<head>")
+    if ($i -lt 0) { return $html }
+    $neg = (ConvertTo-Json -InputObject ([string]$global:reciboCfg.nombre) -Compress).Replace('<', '\u003c')
+    $pre = "<script>window.TT_MODO='" + $modo + "';window.TT_NEGOCIO=" + $neg + ";</script>"
+    return $html.Insert($i + 6, $pre + $global:extrasHtml)
 }
 
 # ------------------------------------------------------------------
@@ -18270,7 +19280,14 @@ while ($listener.IsListening) {
         try { $context.Response.StatusCode = 204; $context.Response.ContentLength64 = 0; $context.Response.OutputStream.Close() } catch {}
         continue
     }
-    if (-not [TotoLic.Gate]::IsOpen()) {
+    # Estado de la licencia y pagina para activarla: se atienden siempre.
+    $licAtendida = $false
+    try { $licAtendida = [bool](Responder-Licencia $context $request $method $path) } catch { $licAtendida = $false }
+    if ($licAtendida) { continue }
+    # Sin licencia ni prueba vigente NO se sirve nada (ni vendedores, ni clientes, ni la PC).
+    $licAbierta = $true
+    try { $licAbierta = [bool](Estado-Licencia).abierta } catch { $licAbierta = $false }
+    if (-not $licAbierta) {
         try {
             if ($method -ne "GET" -or $path.StartsWith("/api/")) {
                 Enviar-Respuesta -Context $context -Body '{"ok":false,"licencia":false,"error":"Licencia vencida o no valida. Contacta al proveedor."}' -ContentType "application/json; charset=utf-8" -StatusCode 402
@@ -18278,10 +19295,6 @@ while ($listener.IsListening) {
                 Enviar-Respuesta -Context $context -Body $global:htmlSinLicencia -StatusCode 402
             }
         } catch {}
-        continue
-    }
-    if ($method -eq "GET" -and $path -eq "/api/licencia") {
-        try { Enviar-Respuesta -Context $context -Body (@{ ok = $true; dias = [int][TotoLic.Gate]::Dias(); vence = [TotoLic.Gate]::VenceTexto() } | ConvertTo-Json) -ContentType "application/json; charset=utf-8" } catch {}
         continue
     }
 
@@ -18307,10 +19320,10 @@ while ($listener.IsListening) {
             Enviar-Json $context @{ ok = $false; error = "Tu usuario no tiene permiso para hacer esto. Pidele al encargado que lo active desde la PC."; sinPermiso = $true; permiso = $permReq } 403
 
         } elseif ($method -eq "GET" -and ($path -eq "/" -or $path -eq "/pc")) {
-            Enviar-Respuesta -Context $context -Body (Inyectar-Admin (Inyectar-Guardian $htmlPC))
+            Enviar-Respuesta -Context $context -Body (Inyectar-Extras (Inyectar-Admin (Inyectar-Guardian $htmlPC)) 'pc')
 
         } elseif ($method -eq "GET" -and $path -eq "/vendedor") {
-            Enviar-Respuesta -Context $context -Body (Inyectar-Guardian $htmlVendedor)
+            Enviar-Respuesta -Context $context -Body (Inyectar-Extras (Inyectar-Guardian $htmlVendedor) 'vendedor')
 
         } elseif ($method -eq "GET" -and $path -eq "/api/ping") {
             # Para que las apps encuentren solas al servidor cuando cambia el punto de acceso (y con el, la IP).
@@ -18528,6 +19541,69 @@ while ($listener.IsListening) {
                 else { Enviar-Json $context @{ ok = $false; error = "Windows no confirmo la impresion." } 500 }
             } catch {
                 Enviar-Json $context @{ ok = $false; error = "$($_.Exception.Message)" } 500
+            }
+
+        } elseif ($method -eq "GET" -and $path -eq "/api/instalacion") {
+            if (-not (Es-PeticionPC $request)) { Enviar-Json $context @{ ok = $false; error = "Solo desde la PC." } 403 }
+            else { Enviar-Json $context (Estado-Instalacion) 200 8 }
+
+        } elseif ($method -eq "GET" -and $path -eq "/api/instalacion/impresoras") {
+            if (-not (Es-PeticionPC $request)) { Enviar-Json $context @{ ok = $false; error = "Solo desde la PC." } 403 }
+            else { Enviar-Json $context @{ ok = $true; impresoras = @(Listar-Impresoras); actual = [string]$nombreImpresora } 200 4 }
+
+        } elseif ($method -eq "POST" -and $path -eq "/api/instalacion/guardar") {
+            $dIn = Leer-CuerpoJson $request
+            if (-not (Es-PeticionPC $request)) {
+                Enviar-Json $context @{ ok = $false; error = "Solo desde la PC." } 403
+            } else {
+                try {
+                    if ($dIn.negocio) { Guardar-NegocioInstalacion $dIn.negocio }
+                    if ($dIn.PSObject.Properties.Name -contains 'impresora') {
+                        $impN = ([string]$dIn.impresora).Trim()
+                        if ($impN.Length -gt 120 -or $impN -match '[\x00-\x1F]') { throw "El nombre de la impresora no es valido." }
+                        if ($impN) { $nombreImpresora = $impN; $global:instalacion.impresora = $impN; Guardar-Instalacion }
+                    }
+                    Enviar-Json $context @{ ok = $true; impresora = [string]$nombreImpresora }
+                } catch {
+                    Enviar-Json $context @{ ok = $false; error = "$($_.Exception.Message)" } 400
+                }
+            }
+
+        } elseif ($method -eq "POST" -and $path -eq "/api/instalacion/vendedores") {
+            $dInV = Leer-CuerpoJson $request
+            if (-not (Es-PeticionPC $request)) {
+                Enviar-Json $context @{ ok = $false; error = "Solo desde la PC." } 403
+            } else {
+                try {
+                    $resV = Guardar-VendedoresInstalacion $dInV.vendedores
+                    Enviar-Json $context @{ ok = $true; resultados = @($resV) } 200 5
+                } catch {
+                    Enviar-Json $context @{ ok = $false; error = "$($_.Exception.Message)" } 400
+                }
+            }
+
+        } elseif ($method -eq "POST" -and $path -eq "/api/instalacion/axis") {
+            $dInA = Leer-CuerpoJson $request
+            if (-not (Es-PeticionPC $request)) {
+                Enviar-Json $context @{ ok = $false; error = "Solo desde la PC." } 403
+            } else {
+                try {
+                    $resA = Probar-Guardar-Axis $dInA ([bool]$dInA.guardar)
+                    Enviar-Json $context $resA
+                } catch {
+                    Enviar-Json $context @{ ok = $false; error = "No se pudo conectar con AxisPOS: $($_.Exception.Message)" } 400
+                }
+            }
+
+        } elseif ($method -eq "POST" -and $path -eq "/api/instalacion/completar") {
+            $dInC = Leer-CuerpoJson $request
+            if (-not (Es-PeticionPC $request)) {
+                Enviar-Json $context @{ ok = $false; error = "Solo desde la PC." } 403
+            } else {
+                if ($dInC -and $dInC.PSObject.Properties.Name -contains 'configurado') { $global:instalacion.configurado = [bool]$dInC.configurado }
+                if ($dInC -and $dInC.PSObject.Properties.Name -contains 'bienvenida') { $global:instalacion.bienvenidaVista = [bool]$dInC.bienvenida }
+                Guardar-Instalacion
+                Enviar-Json $context @{ ok = $true }
             }
 
         } elseif ($method -eq "GET" -and $path -eq "/api/config") {
@@ -20218,7 +21294,7 @@ while ($listener.IsListening) {
                 }
             }
         } elseif ($method -eq "GET" -and $path -eq "/etiquetas") {
-            Enviar-Respuesta -Context $context -Body (Inyectar-Admin (Inyectar-Guardian $htmlEtiquetas))
+            Enviar-Respuesta -Context $context -Body (Inyectar-Extras (Inyectar-Admin (Inyectar-Guardian $htmlEtiquetas)) 'etiquetas')
 
         } elseif ($method -eq "GET" -and $path -eq "/api/catalogo/nuevos") {
             # Productos que aparecieron por primera vez en el ultimo Excel cargado (para sus etiquetas).
