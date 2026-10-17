@@ -8851,20 +8851,46 @@ TT.iniciar('pc');
       try {
         const r = await fetch('/api/reabastecer');
         const d = await r.json();
+        comprasDias = d.dias || 30;
+        comprasOrden = 'ventas';   // el servidor ya manda primero lo mas vendido
         comprasItems = (d.items || []).map(i => Object.assign({}, i, { comprar: i.sugerido, incluir: true }));
       } catch (e) { comprasItems = []; }
       renderCompras();
     }
 
+    // ---- Lista de compras (F6): primero lo que mas se vende, y marcar / quitar todos ----
+    let comprasOrden = 'ventas';
+    let comprasDias = 30;
+    function comprasReordenar(clave) {
+      comprasOrden = clave;
+      const f = {
+        ventas: function (a, b) { return (Number(b.vendido) || 0) - (Number(a.vendido) || 0) || (Number(a.stock) || 0) - (Number(b.stock) || 0); },
+        stock: function (a, b) { return (Number(a.stock) || 0) - (Number(b.stock) || 0); },
+        nombre: function (a, b) { return String(a.nombre).localeCompare(String(b.nombre)); }
+      }[clave];
+      if (f) comprasItems.sort(f);
+      renderCompras();
+    }
+    function comprasMarcar(modo) {
+      comprasItems.forEach(function (i) { i.incluir = (modo === 'todos') ? true : (modo === 'ninguno' ? false : !!i.agotado); });
+      renderCompras();
+    }
     function renderCompras() {
       const c = pcById('comprasLista');
       if (comprasItems.length === 0) {
-        c.innerHTML = '<div style="color:var(--tt-94a3b8,#94a3b8); font-size:13px; padding:10px;">Nada por reabastecer: ningún producto está en su mínimo.</div>';
+        c.innerHTML = '<div style="color:var(--tt-94a3b8,#94a3b8); font-size:13px; padding:10px;">Nada por reabastecer: ningún producto está en su mínimo, agotado o por acabarse.</div>';
       } else {
-        c.innerHTML = comprasItems.map((i, idx) =>
+        const barra = '<div style="display:flex; gap:6px; flex-wrap:wrap; align-items:center; margin-bottom:8px; font-size:12px;">' +
+          '<button class="btn-toggle" style="padding:5px 10px; font-size:12px;" onclick="comprasMarcar(\'todos\')">Marcar todos</button>' +
+          '<button class="btn-toggle" style="padding:5px 10px; font-size:12px;" onclick="comprasMarcar(\'ninguno\')">Quitar todos</button>' +
+          '<button class="btn-toggle" style="padding:5px 10px; font-size:12px;" onclick="comprasMarcar(\'agotados\')">Solo agotados</button>' +
+          '<span style="margin-left:auto;">Orden: <select class="np-select" style="width:auto; margin:0; padding:3px;" onchange="comprasReordenar(this.value)">' +
+          [['ventas', 'Más vendidos primero'], ['stock', 'Menos stock primero'], ['nombre', 'Nombre']].map(function (o) { return '<option value="' + o[0] + '"' + (o[0] === comprasOrden ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('') +
+          '</select></span></div>';
+        c.innerHTML = barra + comprasItems.map((i, idx) =>
           '<div class="np-resultado"><label style="display:flex; gap:8px; align-items:center; flex:1; min-width:0;">' +
           '<input type="checkbox" ' + (i.incluir ? 'checked' : '') + ' onchange="comprasItems[' + idx + '].incluir = this.checked; resumenCompras()">' +
-          '<span style="min-width:0;">' + escaparHtml(i.nombre) + '<br><small style="color:var(--tt-94a3b8,#94a3b8);">' + escaparHtml(i.sku || 'sin SKU') + ' · hay ' + i.stock + ' · mín. ' + i.minimo + (i.personalizado ? ' (propio)' : (i.origenMin === 'axis' ? ' (AxisPOS)' : '')) + '</small></span></label>' +
+          '<span style="min-width:0;">' + escaparHtml(i.nombre) + (i.agotado ? ' <b style="color:var(--tt-fca5a5,#fca5a5); font-size:11px;">AGOTADO</b>' : '') + '<br><small style="color:var(--tt-94a3b8,#94a3b8);">' + escaparHtml(i.sku || 'sin SKU') + ' · hay ' + i.stock + ' · mín. ' + i.minimo + (i.personalizado ? ' (propio)' : (i.origenMin === 'axis' ? ' (AxisPOS)' : '')) + (i.vendido > 0 ? ' · vendió ' + i.vendido + ' en ' + comprasDias + ' d' : '') + '</small></span></label>' +
           '<input type="number" min="1" value="' + i.comprar + '" style="width:72px; padding:6px; border-radius:6px; border:1px solid var(--tt-334155,#334155); background:var(--tt-0f172a,#0f172a); color:var(--tt-e2e8f0,#e2e8f0);" onchange="comprasItems[' + idx + '].comprar = Math.max(1, parseFloat(this.value) || 1); resumenCompras()">' +
           '</div>'
         ).join('');
@@ -8872,7 +8898,6 @@ TT.iniciar('pc');
       resumenCompras();
     }
 
-    function comprasSeleccionadas() { return comprasItems.filter(i => i.incluir && i.comprar > 0); }
     function resumenCompras() {
       const s = comprasSeleccionadas();
       let u = 0; s.forEach(i => { u += Number(i.comprar) || 0; });
@@ -9270,7 +9295,7 @@ TT.iniciar('pc');
     function cpCambioCob(noGuardar) {
       const cob = pcById('cpCob').value;
       if (!noGuardar) { try { localStorage.setItem('cpCobV1', cob); } catch (e) {} }
-      const d = pcById('cpDias'); if (d) d.disabled = (cob === '0');
+      const d = pcById('cpDias'); if (d) d.disabled = false;
     }
     async function calcularCompras() {
       pcById('cpLista').innerHTML = '<div class="np-vacio">Calculando...</div>';
@@ -9280,8 +9305,45 @@ TT.iniciar('pc');
       (comprasDatos.items || []).forEach((it, i) => { comprasQty[i] = it.sugerido; comprasSel[i] = true; });
       const ta = pcById('cpProv');
       if (ta && !ta.value) ta.value = (comprasDatos.proveedores || []).map(p => p.nombre + ', ' + (p.telefono || '')).join('\n');
-      pcById('cpInfo').textContent = (comprasDatos.modo === 'nominal') ? 'Sin mirar ventas: actual contra el mínimo y la cantidad normal de AxisPOS. Sugerencia = normal − actual (editable).' :
+      pcById('cpInfo').textContent = (comprasDatos.modo === 'nominal') ? 'Primero lo más vendido en los últimos ' + pcById('cpDias').value + ' días (AxisPOS). Actual contra el mínimo y la cantidad normal; sugerencia = normal − actual (editable).' :
         'Ventas tomadas de ' + (comprasDatos.fuente === 'axispos' ? 'AxisPOS' : 'los pedidos de la app (no incluye ventas hechas solo en AxisPOS)') + '. Cantidades editables.';
+      if (cpOrden !== 'ventas') cpReordenar(); else renderComprasProv();
+    }
+    // ---- Seleccion y orden (mas vendidos primero) para "Compras a proveedores" ----
+    let cpOrden = 'ventas';
+    function cpBarraHtml() {
+      const items = (comprasDatos && comprasDatos.items) || [];
+      const n = items.filter(function (it, i) { return comprasSel[i]; }).length;
+      return '<div style="display:flex; gap:6px; flex-wrap:wrap; align-items:center; margin-bottom:8px; font-size:12px;">' +
+        '<button style="' + PC_BTN + '" onclick="cpMarcar(\'todos\')">Marcar todos</button><button style="' + PC_BTN + '" onclick="cpMarcar(\'ninguno\')">Quitar todos</button><button style="' + PC_BTN + '" onclick="cpMarcar(\'agotados\')">Solo agotados</button>' +
+        '<span id="cpSelInfo" style="color:var(--tt-94a3b8,#94a3b8);">' + n + ' de ' + items.length + ' marcados</span>' +
+        '<span style="margin-left:auto;">Orden: <select class="np-select" style="width:auto; margin:0; padding:3px;" onchange="cpReordenar(this.value)">' +
+        [['ventas', 'Más vendidos primero'], ['dias', 'Se acaban antes'], ['nombre', 'Nombre']].map(function (o) { return '<option value="' + o[0] + '"' + (o[0] === cpOrden ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('') +
+        '</select></span></div>';
+    }
+    function cpActualizarSel() {
+      const items = (comprasDatos && comprasDatos.items) || [];
+      const e = pcById('cpSelInfo');
+      if (e) e.textContent = items.filter(function (it, i) { return comprasSel[i]; }).length + ' de ' + items.length + ' marcados';
+    }
+    function cpMarcar(modo) {
+      const items = (comprasDatos && comprasDatos.items) || [];
+      items.forEach(function (it, i) { comprasSel[i] = (modo === 'todos') ? true : (modo === 'ninguno' ? false : !(Number(it.stock) > 0)); });
+      renderComprasProv();
+    }
+    function cpReordenar(clave) {
+      if (clave) cpOrden = clave;
+      const items = (comprasDatos && comprasDatos.items) || [];
+      const filas = items.map(function (it, i) { return { it: it, q: comprasQty[i], s: comprasSel[i] }; });
+      const f = {
+        ventas: function (a, b) { return (Number(b.it.vendido) || 0) - (Number(a.it.vendido) || 0) || (Number(a.it.stock) || 0) - (Number(b.it.stock) || 0); },
+        dias: function (a, b) { return (a.it.diasRestantes == null ? 99999 : a.it.diasRestantes) - (b.it.diasRestantes == null ? 99999 : b.it.diasRestantes) || (Number(a.it.stock) || 0) - (Number(b.it.stock) || 0); },
+        nombre: function (a, b) { return String(a.it.nombre).localeCompare(String(b.it.nombre)); }
+      }[cpOrden];
+      if (f) filas.sort(f);
+      comprasDatos.items = filas.map(function (x) { return x.it; });
+      comprasQty = {}; comprasSel = {};
+      filas.forEach(function (x, i) { comprasQty[i] = x.q; comprasSel[i] = x.s; });
       renderComprasProv();
     }
     // ---- 0 dias a cubrir: tabla como "Sugerencias de compras" de AxisPOS ----
@@ -9330,14 +9392,14 @@ TT.iniciar('pc');
       const num = 'style="' + CN_TD + '"';
       cont.innerHTML = ayuda +
         '<div style="font-size:20px; font-weight:800; color:var(--tt-ffffff,#fff); margin-bottom:8px;">Total: <span id="cnTotal"></span> <span id="cnInfo" style="font-size:12px; font-weight:400; color:var(--tt-94a3b8,#94a3b8);"></span></div>' +
-        '<div style="margin-bottom:8px;"><button style="' + PC_BTN + '" onclick="imprimirComprasNom()">Imprimir</button><button style="' + PC_BTN + '" onclick="copiarComprasNom()">Copiar</button></div>' +
+        '<div style="margin-bottom:8px;"><button style="' + PC_BTN + '" onclick="imprimirComprasNom()">Imprimir</button><button style="' + PC_BTN + '" onclick="copiarComprasNom()">Copiar</button></div>' + cpBarraHtml() +
         '<table style="width:100%; border-collapse:collapse; color:var(--tt-e2e8f0,#e2e8f0);"><thead><tr>' +
         '<th style="' + CN_TH + '"><input type="checkbox" id="cnTodo" title="Marcar o desmarcar todo" onchange="cnTodos(this.checked)"></th>' +
-        '<th style="' + CN_TH + ' width:100%;">Nombre</th><th style="' + CN_TH + '">Actual</th><th style="' + CN_TH + '">Mínimo</th><th style="' + CN_TH + '">Normal</th><th style="' + CN_TH + '">Sugerencia</th><th style="' + CN_TH + '">Total</th></tr></thead><tbody>' +
+        '<th style="' + CN_TH + ' width:100%;">Nombre</th><th style="' + CN_TH + '">Actual</th><th style="' + CN_TH + '">Mínimo</th><th style="' + CN_TH + '">Normal</th><th style="' + CN_TH + '">Vendió</th><th style="' + CN_TH + '">Sugerencia</th><th style="' + CN_TH + '">Total</th></tr></thead><tbody>' +
         items.map((it, i) =>
           '<tr><td ' + num + '><input type="checkbox" class="cnChk" ' + (comprasSel[i] ? 'checked' : '') + ' onchange="cnMarcar(' + i + ', this.checked)"></td>' +
           '<td ' + num + '>' + escaparHtml(it.nombre) + (it.sku ? '<br><small style="color:var(--tt-94a3b8,#94a3b8);">' + escaparHtml(it.sku) + '</small>' : '') + '</td>' +
-          '<td ' + num + '>' + it.stock + '</td><td ' + num + '>' + it.minimo + '</td><td ' + num + '>' + it.normal + '</td>' +
+          '<td ' + num + '>' + it.stock + '</td><td ' + num + '>' + it.minimo + '</td><td ' + num + '>' + it.normal + '</td><td ' + num + '>' + (it.vendido || 0) + '</td>' +
           '<td ' + num + '><input type="number" min="0" value="' + comprasQty[i] + '" style="width:70px; background:var(--tt-1e293b,#1e293b); color:var(--tt-ffffff,#fff); border:1px solid var(--tt-475569,#475569); border-radius:6px; padding:3px;" onchange="cnCantidad(' + i + ', this.value)"></td>' +
           '<td id="cnT' + i + '" style="' + CN_TD + ' white-space:nowrap;"></td></tr>'
         ).join('') + '</tbody></table>';
@@ -9369,13 +9431,13 @@ TT.iniciar('pc');
       const grupos = {};
       items.forEach((it, i) => { const g = it.proveedor || ''; (grupos[g] = grupos[g] || []).push(i); });
       const orden = Object.keys(grupos).sort((a, b) => (a === '' ? 1 : 0) - (b === '' ? 1 : 0) || a.localeCompare(b));
-      pcById('cpLista').innerHTML = orden.map(g => {
+      pcById('cpLista').innerHTML = cpBarraHtml() + orden.map(g => {
         let total = 0;
         const filas = grupos[g].map(i => {
           const it = items[i];
           total += (Number(it.costo) || 0) * (Number(comprasQty[i]) || 0);
-          return '<div style="' + PC_CAJA + '"><b style="color:var(--tt-ffffff,#fff);">' + escaparHtml(it.nombre) + '</b><br>' +
-            '<span style="color:var(--tt-94a3b8,#94a3b8);">Hay ' + it.stock + ' · mín ' + it.minimo + (it.origenMin === 'axis' ? ' (AxisPOS)' : '') + ' · vende ' + it.velDia + '/día' + (it.diasRestantes != null ? ' · alcanza ' + it.diasRestantes + ' días' : '') + '</span><br>' +
+          return '<div style="' + PC_CAJA + '"><label style="display:flex; gap:8px; align-items:center; margin-bottom:2px;"><input type="checkbox" ' + (comprasSel[i] ? 'checked' : '') + ' onchange="comprasSel[' + i + '] = this.checked; cpActualizarSel()"><b style="color:var(--tt-ffffff,#fff);">' + escaparHtml(it.nombre) + '</b>' + (Number(it.stock) <= 0 ? ' <b style="color:var(--tt-fca5a5,#fca5a5); font-size:11px;">AGOTADO</b>' : '') + '</label>' +
+            '<span style="color:var(--tt-94a3b8,#94a3b8);">Hay ' + it.stock + ' · mín ' + it.minimo + (it.origenMin === 'axis' ? ' (AxisPOS)' : '') + ' · vendió ' + (it.vendido || 0) + ' · vende ' + it.velDia + '/día' + (it.diasRestantes != null ? ' · alcanza ' + it.diasRestantes + ' días' : '') + '</span><br>' +
             'Pedir: <input type="number" min="0" value="' + comprasQty[i] + '" style="width:70px; background:var(--tt-1e293b,#1e293b); color:var(--tt-ffffff,#fff); border:1px solid var(--tt-475569,#475569); border-radius:6px; padding:3px;" onchange="comprasQty[' + i + ']=parseFloat(this.value)||0; renderComprasProv();"> ' +
             (it.costo != null ? ' · costo ' + pcMoney(it.costo) : '') +
             ' &nbsp; Proveedor: <select style="background:var(--tt-1e293b,#1e293b); color:var(--tt-ffffff,#fff); border:1px solid var(--tt-475569,#475569); border-radius:6px; padding:3px;" onchange="asignarProveedor(' + i + ', this.value)"><option value="">(sin proveedor)</option>' +
@@ -9399,7 +9461,7 @@ TT.iniciar('pc');
     function textoPedidoProv(g) {
       const items = comprasDatos.items;
       const lineas = [];
-      items.forEach((it, i) => { if ((it.proveedor || '') === g && (Number(comprasQty[i]) || 0) > 0) lineas.push('- ' + comprasQty[i] + ' x ' + it.nombre); });
+      items.forEach((it, i) => { if ((it.proveedor || '') === g && comprasSel[i] !== false && (Number(comprasQty[i]) || 0) > 0) lineas.push('- ' + comprasQty[i] + ' x ' + it.nombre); });
       return 'Pedido' + (g ? ' para ' + g : '') + ' (' + new Date().toLocaleDateString() + '):\n' + lineas.join('\n');
     }
     function copiarPedidoProv(g) { pcCopiar(textoPedidoProv(g)); }
@@ -18029,12 +18091,14 @@ function Calcular-Reposicion([int]$piso, $origenes, [int]$dias, [int]$cobertura)
 # Lista de compras con 0 dias a cubrir: igual que "Sugerencias de compras" de AxisPOS.
 # Solo productos con stock ACTUAL por debajo de su MINIMO (propio o de AxisPOS) y con cantidad NORMAL puesta;
 # la sugerencia es NORMAL - ACTUAL.
-function Calcular-ComprasNominal {
+function Calcular-ComprasNominal([int]$dias = 30) {
     if (-not $global:configAxis.activo) { throw "AxisPOS no esta activo (config_axis.json)." }
     $pisoN = 0
     try { $pisoN = [int]$global:configApp.reposPiso } catch {}
     if ($pisoN -le 0) { foreach ($aN in @($global:configAxis.almacenes)) { $nN = 0; if ([int]::TryParse([string]$aN, [ref]$nN)) { $pisoN = $nN; break } } }
     $mapaN = Leer-MaximosAxis $pisoN
+    $vN = $null
+    try { $vN = Obtener-VentasProductos $dias } catch { $vN = $null }
     $filasN = New-Object System.Collections.ArrayList
     $sinNormalN = 0
     foreach ($p in $global:catalogo) {
@@ -18052,9 +18116,14 @@ function Calcular-ComprasNominal {
         if ($sugN -lt 1) { continue }
         $provN = ""
         if ($global:proveedores.porSku.ContainsKey($skN)) { $provN = [string]$global:proveedores.porSku[$skN] }
-        [void]$filasN.Add([pscustomobject]@{ sku = $skN; nombre = [string]$p.nombre; stock = $stockN; minimo = $minN; normal = $normN; origenMin = (Origen-Minimo $p); velDia = 0; diasRestantes = $null; sugerido = $sugN; costo = (Obtener-Costo $skN); proveedor = $provN })
+        $vendN = 0.0
+        if ($vN -and $skN -and $vN.mapa.ContainsKey($skN)) { $vendN = [double]$vN.mapa[$skN].qty }
+        $velN = $vendN / $dias
+        $diasRN = $null
+        if ($velN -gt 0) { $diasRN = [math]::Round($stockN / $velN, 1) }
+        [void]$filasN.Add([pscustomobject]@{ sku = $skN; nombre = [string]$p.nombre; stock = $stockN; minimo = $minN; normal = $normN; origenMin = (Origen-Minimo $p); vendido = [math]::Round($vendN, 2); velDia = [math]::Round($velN, 2); diasRestantes = $diasRN; sugerido = $sugN; costo = (Obtener-Costo $skN); proveedor = $provN })
     }
-    $ordN = @($filasN | Sort-Object -Property @{ Expression = { [string]$_.nombre } } | Select-Object -First 600)
+    $ordN = @($filasN | Sort-Object -Property @{ Expression = { [double]$_.vendido }; Descending = $true }, @{ Expression = { [string]$_.nombre } } | Select-Object -First 600)
     return @{ items = $ordN; sinNormal = $sinNormalN }
 }
 
@@ -19234,7 +19303,7 @@ while ($listener.IsListening) {
             if ($cobC -eq 0) {
                 # 0 dias a cubrir = como "Sugerencias de compras" de AxisPOS (solo bajo el minimo, hasta el normal)
                 try {
-                    $resN = Calcular-ComprasNominal
+                    $resN = Calcular-ComprasNominal $diasC
                     Enviar-Json $context @{ ok = $true; modo = "nominal"; fuente = "axispos"; dias = $diasC; cobertura = 0; items = @($resN.items); sinNormal = [int]$resN.sinNormal; proveedores = @($global:proveedores.lista) } 200 5
                 } catch {
                     Enviar-Json $context @{ ok = $false; error = [string]$_.Exception.Message } 400
@@ -19260,9 +19329,9 @@ while ($listener.IsListening) {
                 if ($vel -gt 0) { $diasRest = [math]::Round($stockC / $vel, 1) }
                 $provC = ""
                 if ($skC -and $global:proveedores.porSku.ContainsKey($skC)) { $provC = [string]$global:proveedores.porSku[$skC] }
-                [void]$filasC.Add([pscustomobject]@{ sku = $skC; nombre = [string]$p.nombre; stock = $stockC; minimo = $minC; origenMin = (Origen-Minimo $p); velDia = [math]::Round($vel, 2); diasRestantes = $diasRest; sugerido = $sug; costo = (Obtener-Costo $skC); proveedor = $provC })
+                [void]$filasC.Add([pscustomobject]@{ sku = $skC; nombre = [string]$p.nombre; stock = $stockC; minimo = $minC; origenMin = (Origen-Minimo $p); vendido = [math]::Round($vend, 2); velDia = [math]::Round($vel, 2); diasRestantes = $diasRest; sugerido = $sug; costo = (Obtener-Costo $skC); proveedor = $provC })
             }
-            $ordC = @($filasC | Sort-Object -Property @{ Expression = { if ($null -eq $_.diasRestantes) { 99999 } else { [double]$_.diasRestantes } } }, @{ Expression = { [double]$_.stock } } | Select-Object -First 400)
+            $ordC = @($filasC | Sort-Object -Property @{ Expression = { [double]$_.vendido }; Descending = $true }, @{ Expression = { if ($null -eq $_.diasRestantes) { 99999 } else { [double]$_.diasRestantes } } }, @{ Expression = { [double]$_.stock } } | Select-Object -First 400)
             Enviar-Json $context @{ ok = $true; fuente = [string]$vC.fuente; dias = $diasC; cobertura = $cobC; items = $ordC; proveedores = @($global:proveedores.lista) } 200 5
             }
 
@@ -19297,6 +19366,26 @@ while ($listener.IsListening) {
                 }
                 $ordE = @($filasE | Sort-Object -Property @{ Expression = { [double]$_.capital } } -Descending | Select-Object -First 300)
                 Enviar-Json $context @{ ok = $true; fuente = [string]$vE.fuente; dias = $diasE; total = $filasE.Count; capitalTotal = [math]::Round($capTotal, 2); sinCosto = $sinCosto; items = $ordE } 200 5
+            }
+
+        } elseif ($method -eq "GET" -and $path -eq "/api/minmax-axis") {
+            # Minimo (MinQtty) y cantidad normal (NormalQtty) de cada producto en AxisPOS, para la app del almacen.
+            if (-not $global:configAxis.activo) {
+                Enviar-Json $context @{ ok = $false; error = "AxisPOS no esta activado en el servidor." } 400
+            } else {
+                $errMin = ""; $errNor = ""
+                $ahoraMm = Get-Date
+                $viejoMm = $true
+                if ($global:minAxis.ultima) { try { $viejoMm = ((($ahoraMm - [datetime]$global:minAxis.ultima).TotalMinutes) -gt 10) } catch { $viejoMm = $true } }
+                if ($viejoMm -or ($global:minAxis.datos.Count -eq 0)) {
+                    try { [void](Actualizar-MinimosAxis) } catch { $errMin = "$($_.Exception.Message)" }
+                }
+                $pisoMm = 0
+                try { $pisoMm = [int]$global:configApp.reposPiso } catch { $pisoMm = 0 }
+                if ($pisoMm -le 0) { foreach ($aMm in @($global:configAxis.almacenes)) { $nMm = 0; if ([int]::TryParse([string]$aMm, [ref]$nMm)) { $pisoMm = $nMm; break } } }
+                $normalesMm = @{}
+                try { $normalesMm = Leer-MaximosAxis $pisoMm } catch { $errNor = "$($_.Exception.Message)" }
+                Enviar-Json $context @{ ok = $true; minimos = $global:minAxis.datos; normales = $normalesMm; errorMin = $errMin; errorNormal = $errNor; generado = $ahoraMm.ToString("yyyy-MM-dd HH:mm:ss") } 200 4
             }
 
         } elseif ($method -eq "GET" -and $path -eq "/api/minimos/axis/columnas") {
@@ -20481,22 +20570,41 @@ while ($listener.IsListening) {
             }
 
         } elseif ($method -eq "GET" -and $path -eq "/api/reabastecer") {
-            # Productos por debajo de su minimo de seguridad + cantidad sugerida a comprar.
-            $itemsReab = @($global:catalogo |
-                Where-Object { $mm = Minimo-Efectivo $_; $_.stock -ne $null -and $mm -gt 0 -and [double]$_.stock -le $mm } |
-                Sort-Object -Property @{ Expression = { [double]$_.stock } } |
-                ForEach-Object {
-                    $mm = Minimo-Efectivo $_
-                    $sug = [math]::Ceiling([double](($mm * 2) - [double]$_.stock))
-                    if ($sug -lt 1) { $sug = 1 }
-                    $skuR = [string]$_.sku
-                    [pscustomobject]@{
-                        sku = $skuR; nombre = $_.nombre; stock = $_.stock; minimo = $mm; sugerido = $sug
-                        personalizado = [bool]($skuR -and $global:minimosStock.ContainsKey($skuR))
-                        origenMin = (Origen-Minimo $_)
-                    }
+            # Lista de compras: lo que esta bajo su minimo MAS lo que mas se vende (segun AxisPOS) y esta agotado o por acabarse.
+            # Sale primero lo que mas se vende.
+            $diasRb = 30
+            try { $dr = [int]$request.QueryString["dias"]; if ($dr -ge 7 -and $dr -le 365) { $diasRb = $dr } } catch {}
+            $vRb = $null
+            try { $vRb = Obtener-VentasProductos $diasRb } catch { $vRb = $null }
+            $filasRb = New-Object System.Collections.ArrayList
+            foreach ($p in $global:catalogo) {
+                if ($null -eq $p.stock) { continue }
+                $stockRb = [double]$p.stock
+                $skuR = [string]$p.sku
+                $mm = [double](Minimo-Efectivo $p)
+                $vendRb = 0.0
+                if ($vRb -and $skuR -and $vRb.mapa.ContainsKey($skuR)) { $vendRb = [double]$vRb.mapa[$skuR].qty }
+                $velRb = $vendRb / $diasRb
+                $porMinRb = (($mm -gt 0) -and ($stockRb -le $mm))
+                $agotadoVende = (($vendRb -gt 0) -and ($stockRb -le 0))
+                $pocosDias = (($velRb -gt 0) -and ($stockRb -lt ($velRb * 7)))
+                if ((-not $porMinRb) -and (-not $agotadoVende) -and (-not $pocosDias)) { continue }
+                $sugMin = [math]::Ceiling(($mm * 2) - $stockRb)
+                $sugVen = [math]::Ceiling(($velRb * 15) - $stockRb)
+                $sugRb = [math]::Max($sugMin, $sugVen)
+                if ($sugRb -lt 1) { $sugRb = 1 }
+                $diasRest = $null
+                if ($velRb -gt 0) { $diasRest = [math]::Round($stockRb / $velRb, 1) }
+                [void]$filasRb.Add([pscustomobject]@{
+                    sku = $skuR; nombre = $p.nombre; stock = $p.stock; minimo = $mm; sugerido = $sugRb
+                    personalizado = [bool]($skuR -and $global:minimosStock.ContainsKey($skuR)); origenMin = (Origen-Minimo $p)
+                    vendido = [math]::Round($vendRb, 2); velDia = [math]::Round($velRb, 2); diasRestantes = $diasRest; agotado = ($stockRb -le 0)
                 })
-            Enviar-Json $context @{ ok = $true; umbral = [int]$global:configApp.umbralStockBajo; items = $itemsReab } 200 5
+            }
+            $ordRb = @($filasRb | Sort-Object -Property @{ Expression = { [double]$_.vendido }; Descending = $true }, @{ Expression = { [double]$_.stock } })
+            $fuenteRb = ""
+            if ($vRb) { $fuenteRb = [string]$vRb.fuente }
+            Enviar-Json $context @{ ok = $true; items = $ordRb; dias = $diasRb; fuente = $fuenteRb } 200 4
 
         } elseif ($method -eq "POST" -and $path -eq "/api/minimos") {
             # Fija (o quita) el minimo de seguridad de un producto. Solo desde la PC.
