@@ -4670,6 +4670,67 @@ function Responder-Licencia($context, $request, [string]$method, [string]$path) 
 }
 
 
+# Datos de AxisPOS que solo usa la pagina de etiquetas (PC): unidad de medida, categoria, costo, minimo y normal.
+# No se mezclan con el catalogo de los moviles. Solo lectura; se guarda 60 s en memoria.
+$global:etqExtraCache = @{ t = [datetime]::MinValue; datos = $null }
+function Leer-AuditoriaAxis([string]$tipo, [int]$dias) {
+    if (-not $global:configAxis.activo) { throw "AxisPOS no esta conectado: activalo en config_axis.json." }
+    if ($dias -lt 1) { $dias = 365 }
+    if ($dias -gt 3650) { $dias = 3650 }
+    $colPrecio = [string]$global:configAxis.columnaPrecio
+    if ($colPrecio -notmatch '^PriceOut([1-9]|10)$') { throw "columnaPrecio invalida." }
+    switch ($tipo) {
+        'precios' { $sql = "SELECT a.UserRealTime, IFNULL(u.Name,''), a.Message FROM applicationlog a LEFT JOIN users u ON u.ID=a.UserID WHERE a.Message LIKE 'Se ha modificado la mercanc%precio de venta%' AND a.UserRealTime >= DATE_SUB(NOW(), INTERVAL $dias DAY) ORDER BY a.UserRealTime DESC LIMIT 20000" }
+        'tasas' { $sql = "SELECT a.UserRealTime, IFNULL(u.Name,''), a.Message FROM applicationlog a LEFT JOIN users u ON u.ID=a.UserID WHERE a.Message LIKE 'The currency % was created or edited with exchange rate%' ORDER BY a.UserRealTime DESC LIMIT 20000" }
+        'turnos' { $sql = "SELECT ID, DateTimeOpen, IFNULL(DateTimeClose,''), Status FROM shift WHERE DateTimeOpen >= DATE_SUB(NOW(), INTERVAL $dias DAY) ORDER BY DateTimeOpen" }
+        'grupos' { $sql = "SELECT gg.ID, gg.Name, COUNT(g.ID) FROM goodsgroups gg LEFT JOIN goods g ON g.GroupID=gg.ID AND g.Deleted=0 GROUP BY gg.ID, gg.Name ORDER BY gg.Name" }
+        'reglas' { $sql = "SELECT ID, Name, Formula, Enabled FROM pricerules ORDER BY Priority, ID" }
+        'catalogo' {
+            $ids = New-Object System.Collections.ArrayList
+            foreach ($a in @($global:configAxis.almacenes)) { $n = 0; if ([int]::TryParse([string]$a, [ref]$n)) { [void]$ids.Add($n) } }
+            $lista = if ($ids.Count -gt 0) { $ids -join ',' } else { '0' }
+            $sql = "SELECT g.ID, g.Code, g.Name, g.Measure1, g.Measure2, g.PriceIn, g.$colPrecio, g.GroupID, IFNULL(gg.Name,''), IFNULL((SELECT SUM(s.Qtty) FROM store s WHERE s.GoodID=g.ID AND s.ObjectID IN ($lista)),0) FROM goods g LEFT JOIN goodsgroups gg ON gg.ID=g.GroupID WHERE g.Deleted=0 AND TRIM(g.Name)<>'' ORDER BY g.Name LIMIT 30000"
+        }
+        default { throw "Informe desconocido." }
+    }
+    $texto = Ejecutar-ConsultaAxis $sql
+    $filas = New-Object System.Collections.ArrayList
+    foreach ($linea in ($texto -split "`n")) {
+        $linea = $linea.TrimEnd("`r")
+        if ([string]::IsNullOrWhiteSpace($linea)) { continue }
+        $campos = @(($linea -split "`t") | ForEach-Object { ([string]$_).Replace('\t', ' ').Replace('\n', ' ').Replace('\\', '\') })
+        [void]$filas.Add($campos)
+    }
+    return ,$filas
+}
+
+function Leer-ExtraEtiquetasAxis {
+    if (-not $global:configAxis.activo) { return @{} }
+    if ($global:etqExtraCache.datos -and (((Get-Date) - $global:etqExtraCache.t).TotalSeconds -lt 60)) { return $global:etqExtraCache.datos }
+    $colSku = [string]$global:configAxis.columnaSku
+    if (@('Code','BarCode1','ID') -notcontains $colSku) { throw "columnaSku invalida." }
+    $sql = "SELECT g.$colSku, g.Measure1, IFNULL(gg.Name,''), g.PriceIn, g.MinQtty, g.NormalQtty FROM goods g LEFT JOIN goodsgroups gg ON gg.ID=g.GroupID WHERE g.Deleted=0 AND TRIM(g.Name)<>''"
+    $texto = Ejecutar-ConsultaAxis $sql
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $res = @{}
+    foreach ($linea in ($texto -split "`n")) {
+        $linea = $linea.TrimEnd("`r")
+        if ([string]::IsNullOrWhiteSpace($linea)) { continue }
+        $f = $linea -split "`t"
+        if ($f.Count -lt 6) { continue }
+        $sku = ([string]$f[0]).Trim()
+        if (-not $sku) { continue }
+        $num = { param($v) $d = 0.0; if ([double]::TryParse([string]$v, [System.Globalization.NumberStyles]::Float, $inv, [ref]$d)) { return [math]::Round($d, 2) } else { return 0 } }
+        $res[$sku] = @{
+            um = ([string]$f[1]).Replace('\t', ' ').Replace('\n', ' ').Replace('\\', '\').Trim()
+            grupo = ([string]$f[2]).Replace('\t', ' ').Replace('\n', ' ').Replace('\\', '\').Trim()
+            costo = (& $num $f[3]); min = (& $num $f[4]); normal = (& $num $f[5])
+        }
+    }
+    $global:etqExtraCache = @{ t = (Get-Date); datos = $res }
+    return $res
+}
+
 function Revisar-CambioCatalogo {
     try {
         if ($global:configAxis.activo) { return }
@@ -6587,6 +6648,7 @@ TT.iniciar('pc');
       </div>
 
       <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="window.open('/etiquetas', '_blank')">Etiquetas y códigos de barra (F4)</button>
+      <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="window.open('/auditoria', '_blank')">Auditoría de AxisPOS (precios, tasas, alertas)</button>
       <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="abrirCompras()">Lista de compras (reabastecer) (F6)</button>
       <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="abrirDevolucion()">Ticket de devolución / garantía (F7)</button>
       <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="abrirRecibo()" title="Nombre, NIT, logo, textos del ticket y QR de pago para imprimir">Personalizar comprobante y QR</button>
@@ -15747,6 +15809,269 @@ TT.iniciar('vendedor');
 </html>
 '@
 
+$htmlAuditoria = @'
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Auditoría de AxisPOS - Toto Tools</title>
+<style>
+  * { box-sizing: border-box; font-family: 'Segoe UI', system-ui, Tahoma, Arial, sans-serif; }
+  body { margin:0; background:#0f172a; color:#e2e8f0; }
+  header { display:flex; flex-wrap:wrap; gap:10px; align-items:center; padding:12px 16px; background:#1e293b; border-bottom:1px solid #334155; }
+  h1 { font-size:18px; margin:0 12px 0 0; color:#fff; }
+  select, button, input { background:#0f172a; color:#e2e8f0; border:1px solid #334155; border-radius:8px; padding:8px 10px; font-size:13px; }
+  button { cursor:pointer; font-weight:600; background:#334155; border:none; }
+  button.pri { background:#2563eb; color:#fff; }
+  label.chk { font-size:13px; display:flex; gap:6px; align-items:center; }
+  main { padding:16px; }
+  .nota { font-size:12px; color:#94a3b8; margin:6px 0 12px; }
+  .resumen { font-size:14px; margin-bottom:10px; color:#cbd5e1; }
+  table { border-collapse:collapse; width:100%; font-size:13px; }
+  th { text-align:left; padding:7px 8px; background:#1e293b; color:#cbd5e1; position:sticky; top:0; white-space:nowrap; }
+  td { padding:6px 8px; border-bottom:1px solid #1e293b; }
+  td.r, th.r { text-align:right; }
+  tr.sube td { background:rgba(22,163,74,.18); } tr.baja td { background:rgba(220,38,38,.2); } tr.igual td { color:#94a3b8; } tr.alerta td { background:rgba(245,158,11,.22); }
+  .scroll { overflow:auto; max-height:calc(100vh - 190px); border:1px solid #334155; border-radius:8px; }
+  .card { background:#1e293b; border:1px solid #334155; border-radius:10px; padding:12px; margin-bottom:10px; }
+  .card h3 { margin:0 0 4px; font-size:15px; } .card small { color:#94a3b8; }
+  .g0 { border-left:5px solid #dc2626; } .g1 { border-left:5px solid #f59e0b; } .g2 { border-left:5px solid #3b82f6; }
+  .card ul { margin:6px 0 0; padding-left:18px; font-size:13px; color:#cbd5e1; }
+  .barra { display:flex; align-items:center; gap:8px; margin:3px 0; font-size:13px; }
+  .barra .n { width:34%; min-width:120px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .barra .b { height:16px; border-radius:3px; min-width:2px; }
+  .barra .v { white-space:nowrap; color:#cbd5e1; }
+  .dosc { display:grid; grid-template-columns:1fr 1fr; gap:16px; } @media (max-width:800px){ .dosc{grid-template-columns:1fr;} }
+  .vacio { color:#94a3b8; padding:24px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Auditoría de AxisPOS</h1>
+  <select id="informe" onchange="cargar(false)"></select>
+  <select id="dias" onchange="cargar(false)">
+    <option value="30">30 días</option><option value="60">60 días</option><option value="90">90 días</option><option value="180">180 días</option><option value="365" selected>1 año</option><option value="3650">Todo</option>
+  </select>
+  <button onclick="cargar(true)" title="Vuelve a leer AxisPOS">Recargar de AxisPOS</button>
+  <span style="flex:1"></span>
+  <label class="chk"><input type="checkbox" id="datosNeg" checked> Datos del negocio</label>
+  <button onclick="exportarCSV()">Excel CSV</button>
+  <button class="pri" onclick="exportarPDF()">Exportar PDF</button>
+  <button onclick="location.href='/'">Volver al Panel</button>
+</header>
+<main>
+  <div class="nota">Solo lee la base de AxisPOS: no escribe nada ni cambia ningún precio.</div>
+  <div id="res" class="resumen"></div>
+  <div id="cont"><div class="vacio">Cargando…</div></div>
+</main>
+<script>
+  var NEGOCIO = window.TT_NEGOCIO || '';
+  var $ = function (id) { return document.getElementById(id); };
+  function esc(t) { return String(t == null ? '' : t).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+  var INFORMES = [
+    ['REGISTROS', [['precios', 'Precios modificados'], ['tasas', 'Tasas modificadas'], ['var1', 'Análisis VAR-TM: frecuencia de cambios por moneda'], ['var2', 'Análisis VAR-TM: usuarios que más cambian tasas'], ['var3', 'Análisis VAR-TM: cambios durante turnos abiertos'], ['var4', 'Análisis VAR-TM: cambios revertidos en el mismo día']]],
+    ['CONTROL', [['alertas', 'Alertas inteligentes']]],
+    ['GRÁFICOS', [['g_suben', 'Los que más subieron y los que más bajaron'], ['g_dia', 'Cuánto se movió el precio cada día'], ['g_mas', 'Los productos que más cambiaron de precio']]]
+  ];
+  $('informe').innerHTML = INFORMES.map(function (g) { return '<optgroup label="' + g[0] + '">' + g[1].map(function (i) { return '<option value="' + i[0] + '">' + i[1] + '</option>'; }).join('') + '</optgroup>'; }).join('');
+  var cache = {}, modelo = null;
+  async function datos(tipo, dias, forzar) {
+    var k = tipo + '|' + (dias || '');
+    if (!forzar && cache[k]) return cache[k];
+    var r = await fetch('/api/auditoria/datos?tipo=' + tipo + (dias ? '&dias=' + dias : ''));
+    var d = await r.json();
+    if (!d.ok) throw new Error(d.error || 'No se pudo leer AxisPOS.');
+    cache[k] = d.filas || []; return cache[k];
+  }
+  function num(s) { s = String(s == null ? '' : s).replace(/\s/g, ''); if (s.indexOf(',') > -1 && s.indexOf('.') > -1) s = s.replace(/\./g, '').replace(',', '.'); else s = s.replace(',', '.'); var n = parseFloat(s); return isNaN(n) ? 0 : n; }
+  function fm(n) { if (n == null || isNaN(n)) return ''; return Number(n).toLocaleString('es-ES', { maximumFractionDigits: 2 }); }
+  function fp(n) { return n == null ? '' : (n > 0 ? '+' : '') + fm(n) + ' %'; }
+  function fecha(f) { var m = /^(\d{4})-(\d\d)-(\d\d) (\d\d):(\d\d)/.exec(f || ''); return m ? m[3] + '/' + m[2] + '/' + m[1] + ' ' + m[4] + ':' + m[5] : f; }
+  function norm(t) { return String(t || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/\s+/g, ' ').trim(); }
+  // ---------- Lectura de la bitácora ----------
+  var RE_PRECIO = /Se ha modificado la mercanc[ií]a (.*)\. C[oó]digo de mercanc[ií]a: (.*?), antiguo precio de venta al p[uú]blico ([-\d.,]+), nuevo precio de venta al p[uú]blico: ([-\d.,]+)/;
+  function parsePrecios(filas) {
+    var out = [];
+    filas.forEach(function (f) {
+      var m = RE_PRECIO.exec(f[2] || ''); if (!m) return;
+      var a = num(m[3]), b = num(m[4]);
+      out.push({ fecha: f[0], usuario: f[1], nombre: m[1], codigo: m[2], antes: a, despues: b, dif: b - a, pct: a > 0 ? (b - a) / a * 100 : null });
+    });
+    return out;
+  }
+  var RE_TASA = /The currency (\S+) was created or edited with exchange rate in ([-\d.,]+), exchange rate out ([-\d.,]+)/;
+  function parseTasas(filas) {
+    var out = [];
+    filas.forEach(function (f) { var m = RE_TASA.exec(f[2] || ''); if (m) out.push({ fecha: f[0], usuario: f[1], moneda: m[1], tasa: num(m[2]), salida: num(m[3]) }); });
+    out.sort(function (a, b) { return a.fecha < b.fecha ? -1 : (a.fecha > b.fecha ? 1 : 0); });
+    var ult = {};
+    out.forEach(function (t) {
+      var p = ult[t.moneda];
+      t.ant = p ? p.tasa : null;
+      t.tipo = p ? (t.tasa > p.tasa ? 'Aumento' : (t.tasa < p.tasa ? 'Disminución' : 'Se mantiene')) : 'Primera carga';
+      t.dif = p ? t.tasa - p.tasa : null; t.pct = p && p.tasa ? (t.tasa - p.tasa) / p.tasa * 100 : null;
+      ult[t.moneda] = t;
+    });
+    return out;
+  }
+  function desde(dias) { var d = new Date(Date.now() - dias * 86400000), p = function (n) { return ('0' + n).slice(-2); }; return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes()) + ':00'; }
+  // ---------- Informes: cada uno devuelve un modelo {titulo, resumen, cols, filas, clases, html} ----------
+  async function infPrecios(dias, forzar) {
+    var l = parsePrecios(await datos('precios', dias, forzar)); l.sort(function (a, b) { return a.fecha < b.fecha ? 1 : -1; });
+    var su = 0, ba = 0, ig = 0; l.forEach(function (x) { if (x.dif > 0) su++; else if (x.dif < 0) ba++; else ig++; });
+    return { titulo: 'Precios modificados', resumen: l.length + ' cambio(s): ' + su + ' subieron, ' + ba + ' bajaron, ' + ig + ' quedaron igual', vacio: 'No hay cambios de precio en este período.',
+      cols: [{ t: 'Fecha y hora', w: 2 }, { t: 'Código', w: 1.2 }, { t: 'Producto', w: 5 }, { t: 'Antes', w: 1.2, al: 'r' }, { t: 'Después', w: 1.2, al: 'r' }, { t: 'Diferencia', w: 1.3, al: 'r' }, { t: 'Cambio', w: 1.2, al: 'r' }, { t: 'Usuario', w: 2 }],
+      filas: l.map(function (x) { return [fecha(x.fecha), x.codigo, x.nombre, fm(x.antes), fm(x.despues), (x.dif > 0 ? '+' : '') + fm(x.dif), x.pct == null ? '' : fp(x.pct), x.usuario]; }),
+      clases: l.map(function (x) { return x.dif > 0 ? 'sube' : (x.dif < 0 ? 'baja' : 'igual'); }) };
+  }
+  async function infTasas(dias, forzar) {
+    var l = parseTasas(await datos('tasas', '', forzar)), lim = dias >= 3650 ? '' : desde(dias);
+    l = l.filter(function (t) { return !lim || t.fecha >= lim; }).reverse();
+    var su = 0, ba = 0; l.forEach(function (t) { if (t.tipo === 'Aumento') su++; else if (t.tipo === 'Disminución') ba++; });
+    return { titulo: 'Tasas modificadas', resumen: l.length + ' registro(s): ' + su + ' aumentos, ' + ba + ' disminuciones', vacio: 'No hay cambios de tasa en este período.',
+      cols: [{ t: 'Moneda', w: 1 }, { t: 'Tasa anterior', w: 1.3, al: 'r' }, { t: 'Tasa nueva', w: 1.3, al: 'r' }, { t: 'Tipo de variación', w: 1.6 }, { t: 'Dif. absoluta', w: 1.3, al: 'r' }, { t: 'Dif. porcentual', w: 1.4, al: 'r' }, { t: 'Usuario', w: 2 }, { t: 'Fecha y hora', w: 2 }],
+      filas: l.map(function (t) { return [t.moneda, t.ant == null ? '—' : fm(t.ant), fm(t.tasa), t.tipo, t.dif == null ? '' : (t.dif > 0 ? '+' : '') + fm(t.dif), t.pct == null ? '' : fp(t.pct), t.usuario, fecha(t.fecha)]; }),
+      clases: l.map(function (t) { return t.tipo === 'Aumento' ? 'sube' : (t.tipo === 'Disminución' ? 'baja' : 'igual'); }) };
+  }
+  async function infVar(n, dias, forzar) {
+    var todas = parseTasas(await datos('tasas', '', forzar)), lim = dias >= 3650 ? '' : desde(dias);
+    var l = todas.filter(function (t) { return !lim || t.fecha >= lim; });
+    var reales = l.filter(function (t) { return t.tipo !== 'Primera carga'; });
+    if (n === 1) {
+      var por = {};
+      reales.forEach(function (t) { var o = por[t.moneda] = por[t.moneda] || { n: 0, us: {}, ult: null }; if (t.tipo !== 'Se mantiene') o.n++; o.us[t.usuario] = (o.us[t.usuario] || 0) + 1; o.ult = t; });
+      var filas = Object.keys(por).map(function (m) { var o = por[m], mejor = Object.keys(o.us).sort(function (a, b) { return o.us[b] - o.us[a]; })[0]; return [m, o.n, fm(o.ult.tasa), mejor + ' (' + o.us[mejor] + ')']; }).sort(function (a, b) { return b[1] - a[1]; });
+      return { titulo: 'VAR-TM: frecuencia de cambios por moneda', resumen: filas.length + ' moneda(s) con movimiento', vacio: 'Sin cambios de tasa en este período.',
+        cols: [{ t: 'Moneda', w: 1 }, { t: 'Total de cambios', w: 1.5, al: 'r' }, { t: 'Tasa que quedó', w: 1.5, al: 'r' }, { t: 'Quien más la mueve', w: 3 }], filas: filas, clases: [] };
+    }
+    if (n === 2) {
+      var us = {};
+      reales.forEach(function (t) { var o = us[t.usuario] = us[t.usuario] || { n: 0, mon: {}, ult: '' }; o.n++; o.mon[t.moneda] = 1; if (t.fecha > o.ult) o.ult = t.fecha; });
+      var f2 = Object.keys(us).map(function (u) { return [u || '(sin usuario)', us[u].n, Object.keys(us[u].mon).join(', '), fecha(us[u].ult)]; }).sort(function (a, b) { return b[1] - a[1]; });
+      return { titulo: 'VAR-TM: usuarios que más cambian tasas', resumen: f2.length + ' usuario(s)', vacio: 'Sin cambios de tasa en este período.',
+        cols: [{ t: 'Usuario', w: 2 }, { t: 'Cambios', w: 1, al: 'r' }, { t: 'Monedas que tocó', w: 2 }, { t: 'Última vez', w: 2 }], filas: f2, clases: [] };
+    }
+    if (n === 3) {
+      var tr = await datos('turnos', dias >= 3650 ? 3650 : dias + 30, forzar), ahora = new Date().toISOString();
+      var turnos = tr.map(function (r) { return { id: r[0], ab: r[1], ce: r[2] || '', st: r[3] }; });
+      var f3 = [], cl = [];
+      reales.filter(function (t) { return t.tipo !== 'Se mantiene'; }).forEach(function (t) {
+        var tt = turnos.filter(function (s) { return s.ab <= t.fecha && (!s.ce || t.fecha <= s.ce); })[0];
+        if (tt) { f3.push([t.moneda, fm(t.ant) + ' → ' + fm(t.tasa), t.usuario, fecha(t.fecha), '#' + tt.id, tt.ce ? 'cerrado' : 'ABIERTO']); cl.push(tt.ce ? '' : 'alerta'); }
+      });
+      return { titulo: 'VAR-TM: cambios durante turnos abiertos', resumen: f3.length + ' cambio(s) con la caja abierta', vacio: 'Ningún cambio de tasa se hizo con un turno abierto.',
+        cols: [{ t: 'Moneda', w: 1 }, { t: 'Tasa', w: 2 }, { t: 'Usuario', w: 2 }, { t: 'Fecha y hora', w: 2 }, { t: 'Turno', w: 1 }, { t: 'Estado', w: 1.2 }], filas: f3, clases: cl };
+    }
+    var dia = {};
+    reales.forEach(function (t) { var k = t.moneda + '|' + t.fecha.slice(0, 10); (dia[k] = dia[k] || []).push(t); });
+    var f4 = [];
+    Object.keys(dia).forEach(function (k) {
+      var s = dia[k]; if (s.length < 2) return;
+      var ini = s[0].ant, fin = s[s.length - 1].tasa;
+      if (ini === fin && s.some(function (t) { return t.tasa !== ini; })) f4.push([s[0].moneda, s[0].fecha.slice(0, 10).split('-').reverse().join('/'), fm(ini), s.map(function (t) { return fm(t.tasa); }).join(' → '), s.map(function (t) { return t.usuario; }).filter(function (u, i, a) { return a.indexOf(u) === i; }).join(', ')]);
+    });
+    return { titulo: 'VAR-TM: cambios revertidos en el mismo día', resumen: f4.length + ' día(s) con tasa que volvió a como estaba', vacio: 'No hay tasas que hayan vuelto a su valor en el mismo día.',
+      cols: [{ t: 'Moneda', w: 1 }, { t: 'Día', w: 1.4 }, { t: 'Tasa inicial', w: 1.3, al: 'r' }, { t: 'Recorrido', w: 4 }, { t: 'Usuario', w: 2 }], filas: f4, clases: [] };
+  }
+  // ---------- Alertas inteligentes ----------
+  async function infAlertas(dias, forzar) {
+    var cat = (await datos('catalogo', '', forzar)).map(function (r) { return { id: r[0], codigo: r[1], nombre: r[2], u1: r[3], u2: r[4], costo: num(r[5]), precio: num(r[6]), gid: r[7], grupo: r[8], stock: num(r[9]) }; });
+    var grupos = await datos('grupos', '', forzar), reglas = await datos('reglas', '', forzar);
+    var ej = function (p) { return p.nombre + (p.codigo ? ' (' + p.codigo + ')' : ''); };
+    var A = [];
+    function alerta(g, t, expl, lista) { if (lista.length) A.push({ g: g, t: t, expl: expl, lista: lista }); }
+    alerta(0, 'Reglas de precio apagadas', 'AxisPOS no las aplica: se cobra sin ese descuento o recargo.', reglas.filter(function (r) { return String(r[3]) === '0'; }).map(function (r) { return r[1]; }));
+    alerta(0, 'Productos con existencia en negativo', 'Se vendió más de lo que el inventario dice que había.', cat.filter(function (p) { return p.stock < 0; }).map(function (p) { return ej(p) + ': ' + fm(p.stock); }));
+    alerta(0, 'Productos que se venden por debajo del costo', 'El precio de venta es menor que el precio de compra.', cat.filter(function (p) { return p.costo > 0 && p.precio > 0 && p.precio < p.costo; }).map(function (p) { return ej(p) + ': costo ' + fm(p.costo) + ', precio ' + fm(p.precio); }));
+    var grp = {}; cat.forEach(function (p) { var k = norm(p.nombre) + '|' + p.precio; (grp[k] = grp[k] || []).push(p); });
+    alerta(0, 'Productos repetidos con el mismo nombre y el mismo precio', 'Probablemente se cargó dos veces: la existencia queda partida.', Object.keys(grp).filter(function (k) { return grp[k].length > 1; }).map(function (k) { return grp[k][0].nombre + ' ×' + grp[k].length; }));
+    alerta(1, 'Productos sin precio', 'Se imprimirían con precio cero.', cat.filter(function (p) { return !(p.precio > 0); }).map(ej));
+    alerta(1, 'Descripciones que son solo números', 'Casi siempre es un producto a medio cargar.', cat.filter(function (p) { return /^\d+$/.test(String(p.nombre).trim()); }).map(ej));
+    var gn = {}; cat.forEach(function (p) { (gn[norm(p.nombre)] = gn[norm(p.nombre)] || []).push(p); });
+    alerta(1, 'Productos repetidos (mismo nombre, otro precio)', 'Dos fichas con el mismo nombre y precio distinto: la etiqueta puede salir con el equivocado.', Object.keys(gn).filter(function (k) { return gn[k].length > 1 && gn[k].some(function (p) { return p.precio !== gn[k][0].precio; }); }).map(function (k) { return gn[k][0].nombre + ' ×' + gn[k].length; }));
+    alerta(1, 'Unidad 1 y unidad 2 distintas', 'La etiqueta imprime una unidad y la caja puede estar cobrando por la otra.', cat.filter(function (p) { return p.u2 && norm(p.u1) !== norm(p.u2); }).map(function (p) { return ej(p) + ': ' + p.u1 + ' / ' + p.u2; }));
+    alerta(2, 'Precios con centavos', 'Si la etiqueta no muestra centavos, dirá otro precio que el de la caja.', cat.filter(function (p) { return p.precio > 0 && Math.abs(p.precio - Math.round(p.precio)) > 0.0001; }).map(function (p) { return ej(p) + ': ' + fm(p.precio); }));
+    alerta(2, 'Unidades de medida con números', 'Suele ser un error al escribirla.', cat.filter(function (p) { return /\d/.test(p.u1 || ''); }).map(function (p) { return ej(p) + ': ' + p.u1; }));
+    var numericos = cat.filter(function (p) { return /^\d+$/.test(p.codigo); }).length;
+    if (cat.length && numericos / cat.length > 0.8) alerta(2, 'Códigos distintos al resto del catálogo', 'La mayoría de los códigos son numéricos y estos no.', cat.filter(function (p) { return !/^\d+$/.test(p.codigo); }).map(ej));
+    alerta(2, 'Categorías sin ningún producto', 'Grupos vacíos que se pueden borrar para no confundir.', grupos.filter(function (g) { return +g[2] === 0; }).map(function (g) { return g[1]; }));
+    A.sort(function (a, b) { return a.g - b.g || b.lista.length - a.lista.length; });
+    var NG = ['Urgente', 'Conviene revisar', 'Aviso'];
+    var cuenta = [0, 0, 0]; A.forEach(function (a) { cuenta[a.g]++; });
+    var html = A.map(function (a) {
+      return '<div class="card g' + a.g + '"><h3>' + esc(a.t) + ' <small>· ' + NG[a.g] + ' · ' + a.lista.length + ' producto(s)</small></h3><div class="nota" style="margin:2px 0">' + esc(a.expl) + '</div>' +
+        '<ul>' + a.lista.slice(0, 5).map(function (x) { return '<li>' + esc(x) + '</li>'; }).join('') + '</ul>' +
+        (a.lista.length > 5 ? '<details><summary style="cursor:pointer;color:#7dd3fc;font-size:12px;margin-top:4px">Ver los ' + a.lista.length + '</summary><ul>' + a.lista.slice(5, 400).map(function (x) { return '<li>' + esc(x) + '</li>'; }).join('') + '</ul></details>' : '') + '</div>';
+    }).join('');
+    return { titulo: 'Alertas inteligentes', resumen: A.length ? (cuenta[0] + ' urgente(s), ' + cuenta[1] + ' por revisar, ' + cuenta[2] + ' aviso(s) · ' + cat.length + ' productos revisados') : 'Sin alertas: ' + cat.length + ' productos revisados.', vacio: 'No se encontró nada raro en la base.',
+      html: html, cols: [{ t: 'Gravedad', w: 1.4 }, { t: 'Alerta', w: 4 }, { t: 'Cantidad', w: 1, al: 'r' }, { t: 'Ejemplos', w: 6 }],
+      filas: A.map(function (a) { return [NG[a.g], a.t, a.lista.length, a.lista.slice(0, 5).join('; ')]; }), clases: [] };
+  }
+  // ---------- Gráficos ----------
+  function barras(items, fmtv) {
+    var mx = Math.max.apply(null, items.map(function (i) { return Math.abs(i.v); }).concat([0.0001]));
+    return items.map(function (i) { return '<div class="barra"><div class="n" title="' + esc(i.n) + '">' + esc(i.n) + '</div><div class="b" style="width:' + Math.max(2, Math.abs(i.v) / mx * 45) + '%;background:' + (i.c || '#3b82f6') + '"></div><div class="v">' + esc(fmtv ? fmtv(i.v) : fm(i.v)) + '</div></div>'; }).join('');
+  }
+  async function infGraf(cual, dias, forzar) {
+    var l = parsePrecios(await datos('precios', dias, forzar)), cambios = l.filter(function (x) { return x.dif !== 0 && x.pct != null; });
+    if (cual === 'g_suben') {
+      var mejor = {}; cambios.forEach(function (x) { var k = x.codigo + '|' + x.nombre; if (!mejor[k] || Math.abs(x.pct) > Math.abs(mejor[k].pct)) mejor[k] = x; });
+      var arr = Object.keys(mejor).map(function (k) { return mejor[k]; });
+      var su = arr.filter(function (x) { return x.pct > 0; }).sort(function (a, b) { return b.pct - a.pct; }).slice(0, 5), ba = arr.filter(function (x) { return x.pct < 0; }).sort(function (a, b) { return a.pct - b.pct; }).slice(0, 5);
+      return { titulo: 'Los que más subieron y los que más bajaron', resumen: su.length + ' que subieron y ' + ba.length + ' que bajaron (los 5 mayores cambios en %)', vacio: 'No hay cambios de precio en este período.',
+        html: '<div class="dosc"><div><h3>Subieron</h3>' + barras(su.map(function (x) { return { n: x.nombre, v: x.pct, c: '#16a34a' }; }), fp) + '</div><div><h3>Bajaron</h3>' + barras(ba.map(function (x) { return { n: x.nombre, v: x.pct, c: '#dc2626' }; }), fp) + '</div></div>',
+        cols: [{ t: 'Sentido', w: 1.2 }, { t: 'Producto', w: 5 }, { t: 'Antes', w: 1.2, al: 'r' }, { t: 'Después', w: 1.2, al: 'r' }, { t: 'Cambio', w: 1.2, al: 'r' }],
+        filas: su.map(function (x) { return ['Subió', x.nombre, fm(x.antes), fm(x.despues), fp(x.pct)]; }).concat(ba.map(function (x) { return ['Bajó', x.nombre, fm(x.antes), fm(x.despues), fp(x.pct)]; })), clases: [], vacioSi: !su.length && !ba.length };
+    }
+    if (cual === 'g_dia') {
+      var dd = {}; cambios.forEach(function (x) { (dd[x.fecha.slice(0, 10)] = dd[x.fecha.slice(0, 10)] || []).push(x.pct); });
+      var dias2 = Object.keys(dd).sort().slice(-40).map(function (k) { var v = dd[k].slice().sort(function (a, b) { return a - b; }), m = v.length % 2 ? v[(v.length - 1) / 2] : (v[v.length / 2 - 1] + v[v.length / 2]) / 2; return { d: k, med: m, n: v.length }; });
+      return { titulo: 'Cuánto se movió el precio cada día', resumen: dias2.length + ' día(s) con cambios (se muestra la mediana, no el promedio)', vacio: 'No hay cambios de precio en este período.',
+        html: barras(dias2.map(function (x) { return { n: x.d.split('-').reverse().join('/') + ' (' + x.n + ')', v: x.med, c: x.med >= 0 ? '#16a34a' : '#dc2626' }; }), fp),
+        cols: [{ t: 'Día', w: 2 }, { t: 'Productos tocados', w: 1.6, al: 'r' }, { t: 'Cambio mediano', w: 1.6, al: 'r' }], filas: dias2.map(function (x) { return [x.d.split('-').reverse().join('/'), x.n, fp(x.med)]; }), clases: [], vacioSi: !dias2.length };
+    }
+    var cnt = {}; l.forEach(function (x) { var k = x.codigo + '|' + x.nombre; (cnt[k] = cnt[k] || { n: x.nombre, c: 0 }).c++; });
+    var top = Object.keys(cnt).map(function (k) { return cnt[k]; }).sort(function (a, b) { return b.c - a.c; }).slice(0, 10);
+    return { titulo: 'Los productos que más cambiaron de precio', resumen: 'Una ficha retocada muchas veces en pocos días suele ser un precio que todavía no está decidido', vacio: 'No hay cambios de precio en este período.',
+      html: barras(top.map(function (x) { return { n: x.n, v: x.c, c: '#f59e0b' }; }), function (v) { return v + ' cambios'; }), cols: [{ t: 'Producto', w: 6 }, { t: 'Cambios', w: 1.2, al: 'r' }], filas: top.map(function (x) { return [x.n, x.c]; }), clases: [], vacioSi: !top.length };
+  }
+  // ---------- Pantalla ----------
+  async function cargar(forzar) {
+    var inf = $('informe').value, dias = parseInt($('dias').value, 10) || 365;
+    if (forzar) cache = {};
+    $('cont').innerHTML = '<div class="vacio">Leyendo AxisPOS…</div>'; $('res').textContent = '';
+    try {
+      var m = inf === 'precios' ? await infPrecios(dias, forzar) : inf === 'tasas' ? await infTasas(dias, forzar) : /^var\d$/.test(inf) ? await infVar(+inf.slice(3), dias, forzar) : inf === 'alertas' ? await infAlertas(dias, forzar) : await infGraf(inf, dias, forzar);
+      modelo = m; $('res').textContent = m.resumen;
+      if (m.html) { $('cont').innerHTML = (m.vacioSi || (!m.filas.length)) ? '<div class="vacio">' + esc(m.vacio) + '</div>' : m.html; return; }
+      if (!m.filas.length) { $('cont').innerHTML = '<div class="vacio">' + esc(m.vacio) + '</div>'; return; }
+      $('cont').innerHTML = '<div class="scroll"><table><thead><tr>' + m.cols.map(function (c) { return '<th class="' + (c.al === 'r' ? 'r' : '') + '">' + esc(c.t) + '</th>'; }).join('') + '</tr></thead><tbody>' +
+        m.filas.slice(0, 3000).map(function (f, i) { return '<tr class="' + (m.clases[i] || '') + '">' + f.map(function (v, j) { return '<td class="' + (m.cols[j].al === 'r' ? 'r' : '') + '">' + esc(v) + '</td>'; }).join('') + '</tr>'; }).join('') + '</tbody></table></div>' + (m.filas.length > 3000 ? '<div class="nota">Se muestran 3000; el CSV y el PDF llevan todo.</div>' : '');
+    } catch (e) { modelo = null; $('cont').innerHTML = '<div class="vacio" style="color:#fca5a5">' + esc(e.message || e) + '<br><br>Esta pantalla lee la base de AxisPOS: revisa que el servidor esté conectado a AxisPOS.</div>'; }
+  }
+  function nombreArchivo(ext) { return (modelo.titulo || 'auditoria').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, '-') + '-' + new Date().toISOString().slice(0, 10) + '.' + ext; }
+  function exportarCSV() {
+    if (!modelo || !modelo.filas.length) { alert('No hay datos para exportar.'); return; }
+    var q = function (v) { return '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"'; };
+    var lineas = []; if ($('datosNeg').checked && NEGOCIO) lineas.push(q(NEGOCIO)); lineas.push(q(modelo.titulo)); lineas.push('');
+    lineas.push(modelo.cols.map(function (c) { return q(c.t); }).join(';'));
+    modelo.filas.forEach(function (f) { lineas.push(f.map(q).join(';')); });
+    var blob = new Blob(['﻿' + lineas.join('\r\n')], { type: 'text/csv;charset=utf-8' }), a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = nombreArchivo('csv'); document.body.appendChild(a); a.click(); setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 3000);
+  }
+  function exportarPDF() {
+    if (!modelo || !modelo.filas.length) { alert('No hay datos para exportar.'); return; }
+    if (!window.TTPdf) { alert('No se pudo preparar el PDF.'); return; }
+    var d = TTPdf.tabla({ titulo: modelo.titulo, subtitulo: modelo.resumen + ' · ' + new Date().toLocaleDateString('es-ES'), cols: modelo.cols, filas: modelo.filas, apaisado: modelo.cols.length > 5, firma: $('datosNeg').checked ? NEGOCIO : '', tam: 8.5 });
+    d.guardar(nombreArchivo('pdf'));
+  }
+  cargar(false);
+</script>
+</body>
+</html>
+'@
+
 $htmlEtiquetas = @'
 <!DOCTYPE html>
 <html lang="es">
@@ -15816,6 +16141,7 @@ $htmlEtiquetas = @'
     </div>
     <label class="chk" style="margin-top:8px;"><input type="checkbox" id="oSinStock" onchange="cambioSinStock()"> Ocultar productos sin stock</label>
     <div class="nota" id="notaSinStock" style="margin-top:0;"></div>
+    <select id="fCat" onchange="cambioSinStock()" style="display:none; margin-top:8px;"></select>
     <div id="barCambios"></div>
     <div id="lista"><div class="vacio">Cargando catálogo...</div></div>
     <div class="nota" id="resumen"></div>
@@ -15906,6 +16232,8 @@ $htmlEtiquetas = @'
       <label class="l">Texto libre en la etiqueta (opcional)</label>
       <input type="text" id="exTexto" class="exc" maxlength="60" placeholder="Ej.: Garantía 30 días" oninput="cambio()">
       <label class="chk"><input type="checkbox" id="exFecha" class="exc" onchange="cambio()"> Mostrar la fecha de impresión</label>
+      <label class="chk"><input type="checkbox" id="exUM" class="exc" onchange="cambio()"> Unidad de medida (UM: PZS.) <small style="color:#64748b">AxisPOS</small></label>
+      <label class="chk"><input type="checkbox" id="exCod" class="exc" onchange="cambio()"> Línea «CÓDIGO: …» arriba del precio</label>
       <label class="l">Promoción (el precio grande no cambia)</label>
       <div class="fila">
         <select id="pTipo" class="exc" onchange="cambio()">
@@ -15957,6 +16285,9 @@ $htmlEtiquetas = @'
       <label class="chk"><input type="checkbox" id="lpCPre" class="exc" checked onchange="guardarExtra()"> Precio efectivo</label>
       <label class="chk"><input type="checkbox" id="lpCTr" class="exc" onchange="guardarExtra()"> Precio transferencia (x2)</label>
       <label class="chk"><input type="checkbox" id="lpCStock" class="exc" onchange="guardarExtra()"> Existencias</label>
+      <label class="chk"><input type="checkbox" id="lpCCosto" class="exc" onchange="guardarExtra()"> Costo (AxisPOS)</label>
+      <label class="chk"><input type="checkbox" id="lpCMargen" class="exc" onchange="guardarExtra()"> Margen % sobre la venta (AxisPOS)</label>
+      <label class="chk"><input type="checkbox" id="lpGrupo" class="exc" onchange="guardarExtra()"> Agrupar por categoría (AxisPOS)</label>
       <label class="chk"><input type="checkbox" id="lpDos" class="exc" onchange="guardarExtra()"> Dos columnas por hoja</label>
       <label class="chk"><input type="checkbox" id="lpAp" class="exc" onchange="guardarExtra()"> Hoja horizontal</label>
       <div class="fila" style="margin-top:8px;"><button class="pri" onclick="listadoPDF()">Listado en PDF</button><button onclick="listadoTermica()">Listado simple en la térmica</button></div>
@@ -16093,6 +16424,7 @@ $htmlEtiquetas = @'
     catalogo = ocultar
       ? catalogoTodo.filter(function (p) { return !(p.stock === null || p.stock === undefined || p.stock <= 0); })
       : catalogoTodo;
+    catalogo = filtrarCat(catalogo);
     $('notaSinStock').textContent = ocultar
       ? ((catalogoTodo.length - catalogo.length) + ' producto(s) sin stock ocultos.')
       : (hayControlStockEt() ? '' : 'El Excel no trae columna de cantidad: no se puede saber qué está sin stock.');
@@ -16154,6 +16486,7 @@ $htmlEtiquetas = @'
     if ($('oNeg').checked && neg) s += '<div class="neg">' + esc(neg) + '</div>';
     s += extraHTML(p, 'arriba');
     if ($('oNom').checked) s += '<div class="nom">' + esc(p.nombre) + '</div>';
+    s += extraHTML(p, 'datos');
     var modo = $('modoPrecio').value, mon = $('moneda').value || '$';
     if ($('oPre').checked) {
       s += '<div class="pre">' + mon + fmt(modo === 'transferencia' ? p.precio * 2 : p.precio) + '</div>';
@@ -16209,7 +16542,7 @@ $htmlEtiquetas = @'
     var out = [];
     catalogo.forEach(function (p) {
       var c = sel[clave(p)] || 0;
-      if (c > 0) out.push({ nombre: p.nombre, precio: p.precio, codigo: p.sku || '', cant: c });
+      if (c > 0) out.push({ nombre: p.nombre, precio: p.precio, codigo: p.sku || '', um: p.um, cant: c });
     });
     return out;
   }
@@ -16345,7 +16678,7 @@ function trazarLineaPunteada(g, x, y, w, grosor) {
 function rasterEtiqueta(it) {
     if (it.libre) return rasterLibre(it);
     cfg._sc = 1; var rr = rasterEtiqueta0(it), exr = extrasDatos(it);
-    if (exr.texto || exr.promo) { while (cfg._aH < Math.min(40, cfg.alto * DOTS_MM * 0.18) && cfg._sc > 0.55) { cfg._sc -= 0.07; rr = rasterEtiqueta0(it); } }
+    if (exr.texto || exr.promo || exr.um || exr.cod) { while (cfg._aH < Math.min(40, cfg.alto * DOTS_MM * 0.18) && cfg._sc > 0.55) { cfg._sc -= 0.07; rr = rasterEtiqueta0(it); } }
     cfg._sc = 1; return rr;
   }
   function rasterEtiqueta0(it) {
@@ -16470,6 +16803,7 @@ function rasterEtiqueta(it) {
       g.fillText(st, cx, yb);
     }
 
+    yb = datosRasterAbajo(g, it, yb, cx, inner, famBase, D);
     // Nombre en el espacio que queda
     const aH = yb - y - 4; cfg._aH = aH;
     if (aH > 8) {
@@ -16653,7 +16987,10 @@ function rasterEtiqueta(it) {
   // ---- Extras: texto libre, fecha, promocion ----
   function nEx(v) { return fmt(v); }
   function extrasDatos(it) {
-    var r = { texto: '', promo: null }, partes = [], t = ($('exTexto').value || '').trim();
+    var r = { texto: '', promo: null, um: '', cod: '' }, partes = [], t = ($('exTexto').value || '').trim();
+    if ($('exUM').checked && it.um) r.um = 'UM: ' + String(it.um).toUpperCase();
+    var cd = it.codigo || it.sku || '';
+    if ($('exCod').checked && cd) r.cod = 'CÓDIGO: ' + cd;
     if (t) partes.push(t);
     if ($('exFecha').checked) partes.push(new Date().toLocaleDateString('es-ES'));
     r.texto = partes.join(' · ');
@@ -16670,6 +17007,7 @@ function rasterEtiqueta(it) {
   }
   function extraHTML(p, donde) {
     var e = extrasDatos(p), s = '';
+    if (donde === 'datos') { if (e.um) s += '<div class="ex1">' + esc(e.um) + '</div>'; if (e.cod) s += '<div class="ex1">' + esc(e.cod) + '</div>'; return s; }
     if (donde === 'arriba') {
       if (e.promo && e.promo.donde === 'arriba') s += '<div class="ex1">' + esc(e.promo.l1) + '</div>' + (e.promo.l2 ? '<div class="ex2">' + esc(e.promo.l2) + '</div>' : '');
       return s;
@@ -16685,7 +17023,7 @@ function rasterEtiqueta(it) {
   function listaImpresion() {
     if (libreActiva()) { var l = libreItem(); return [{ p: l, cant: l.cant }]; }
     var out = [];
-    catalogo.forEach(function (p) { var c = sel[clave(p)] || 0; if (c > 0) out.push({ p: { nombre: p.nombre, precio: p.precio, sku: p.sku, codigo: p.sku || '', stock: p.stock }, cant: c }); });
+    catalogo.forEach(function (p) { var c = sel[clave(p)] || 0; if (c > 0) out.push({ p: { nombre: p.nombre, precio: p.precio, sku: p.sku, codigo: p.sku || '', stock: p.stock, um: p.um, grupo: p.grupo, costo: p.costo }, cant: c }); });
     return out;
   }
   function etiquetaLibreHTML(p) {
@@ -16751,6 +17089,16 @@ function rasterEtiqueta(it) {
       y += 2;
     }
     return y;
+  }
+  function datosRasterAbajo(g, it, yb, cx, inner, famBase, D) {
+    var e = extrasDatos(it);
+    [e.cod, e.um].forEach(function (txt) {
+      if (!txt) return;
+      var px = Math.round(2.6 * D * (cfg._sc || 1));
+      while (px > 8) { g.font = 'normal ' + px + 'px ' + famBase; if (g.measureText(txt).width <= inner) break; px -= 1; }
+      yb -= Math.round(px * 1.15); g.fillText(txt, cx, yb);
+    });
+    return yb;
   }
   function extrasRasterAbajo(g, it, yb, cx, inner, famBase, D) {
     var e = extrasDatos(it);
@@ -16820,6 +17168,8 @@ function rasterEtiqueta(it) {
       else { yb -= ps * 1.05; d.texto(ptxt, cx, yb + ps * 0.85, ps * PT, true, al); }
       if (C.modoPrecio === 'ambos') lineaInf('Transf. ' + formatoPrecio(parsePrecio(it.precio) * 2), false, 2.6, 1.5);
     }
+    if (ex.cod) lineaInf(ex.cod, false, 2.6, 1.4);
+    if (ex.um) lineaInf(ex.um, false, 2.6, 1.4);
     aH = yb - y - 0.5;
     if (aH > 2 && d !== NULLD) {
       var fn = C.verPrecio ? est.factorNombre : est.factorNombre * 1.8, fs2 = clamp(h * fn, 3, C.verPrecio ? 6 : 10), lin, nombre = it.nombre || 'Producto';
@@ -16892,6 +17242,7 @@ function rasterEtiqueta(it) {
       if (o === 'pmayor') return parsePrecio(b.precio) - parsePrecio(a.precio);
       return String(a.nombre).localeCompare(String(b.nombre), 'es', { sensitivity: 'base' });
     });
+    if ($('lpGrupo').checked && !$('lpDos').checked) { var ordenIdx = base.map(function (p, i) { return i; }); base = base.map(function (p, i) { return { p: p, i: i }; }).sort(function (a, b) { return String(a.p.grupo || 'Sin categoría').localeCompare(String(b.p.grupo || 'Sin categoría'), 'es', { sensitivity: 'base' }) || a.i - b.i; }).map(function (x) { return x.p; }); }
     return base;
   }
   function resumenPrecios(base) {
@@ -16910,6 +17261,8 @@ function rasterEtiqueta(it) {
     if ($('lpCPre').checked) { cols.push({ t: $('lpCTr').checked ? 'Efectivo' : 'Precio', w: 1.8, al: 'r', b: true }); campos.push(function (p) { return formatoPrecio(parsePrecio(p.precio)); }); }
     if ($('lpCTr').checked) { cols.push({ t: 'Transfer.', w: 1.8, al: 'r', b: true }); campos.push(function (p) { return formatoPrecio(parsePrecio(p.precio) * 2); }); }
     if ($('lpCStock').checked) { cols.push({ t: 'Exist.', w: 1.1, al: 'r' }); campos.push(function (p) { return p.stock == null ? '' : p.stock; }); }
+    if ($('lpCCosto').checked) { cols.push({ t: 'Costo', w: 1.6, al: 'r' }); campos.push(function (p) { return p.costo > 0 ? formatoPrecio(p.costo) : ''; }); }
+    if ($('lpCMargen').checked) { cols.push({ t: 'Margen', w: 1.3, al: 'r' }); campos.push(function (p) { var n = parsePrecio(p.precio); return p.costo > 0 && n > 0 ? ((n - p.costo) / n * 100).toFixed(1) + '%' : ''; }); }
     var dos = $('lpDos').checked, ap = $('lpAp').checked || dos, filas;
     var fila = function (p) { return campos.map(function (f) { return f(p); }); };
     var colsF = cols;
@@ -16917,6 +17270,9 @@ function rasterEtiqueta(it) {
       var mit = Math.ceil(base.length / 2); filas = [];
       for (var i = 0; i < mit; i++) filas.push(fila(base[i]).concat([''], base[i + mit] ? fila(base[i + mit]) : cols.map(function () { return ''; })));
       colsF = cols.concat([{ t: '', w: 0.25 }], cols.map(function (c) { return Object.assign({}, c); }));
+    } else if ($('lpGrupo').checked) {
+      filas = []; var gAnt = null;
+      base.forEach(function (p) { var g = p.grupo || 'Sin categoría'; if (g !== gAnt) { filas.push({ sec: g }); gAnt = g; } filas.push(fila(p)); });
     } else filas = base.map(fila);
     var neg = ($('negocio').value || '').trim(), r = resumenPrecios(base);
     var sub = [($('lpSub').value || '').trim(), new Date().toLocaleDateString('es-ES')].filter(Boolean).join(' · ');
@@ -16990,7 +17346,8 @@ function rasterEtiqueta(it) {
     var inner = cfg.ancho - 2 * 3;
     base.forEach(function (p) {
       var c = String(p.sku || '').trim(), motivo = '';
-      if (!c) motivo = 'no tiene código';
+      if (!(parsePrecio(p.precio) > 0)) motivo = 'no tiene precio';
+      else if (!c) motivo = 'no tiene código';
       else {
         var m = barrasDe(c, tipo);
         if (!m) motivo = tipo === 'ean13' ? 'no es EAN13 válido (12-13 dígitos y dígito de control correcto)' : (tipo === 'code39' ? 'tiene caracteres que Code 39 no admite' : 'tiene caracteres que no se pueden codificar');
@@ -17003,7 +17360,7 @@ function rasterEtiqueta(it) {
   }
   // ---- Datos guardados en la PC (plantillas + precios de referencia) ----
   var datosSrv = { plantillas: [], predeterminada: '', referencia: null, refFecha: '' }, cambiosSet = {}, soloCambios = false;
-  var EXCL = { q: 1, oSinStock: 1, meNombre: 1, meLista: 1, feed: 1, corte: 1, lpPapel: 1 };
+  var EXCL = { fCat: 1, q: 1, oSinStock: 1, meNombre: 1, meLista: 1, feed: 1, corte: 1, lpPapel: 1 };
   async function cargarDatosSrv() {
     var d = null;
     try { var r = await fetch('/api/etiquetas/datos'); if (r.ok) d = await r.json(); } catch (e) {}
@@ -17104,7 +17461,18 @@ function rasterEtiqueta(it) {
     datosSrv.refFecha = new Date().toLocaleString('es-ES'); await guardarDatosSrv();
     soloCambios = false; evaluarCambios(false); pintarLista();
   }
+  async function cargarExtraAxis() {
+    try {
+      var r = await fetch('/api/etiquetas/extra'); var d = await r.json();
+      var mp = (d && d.datos) || {}, grupos = {};
+      catalogoTodo.forEach(function (p) { var x = mp[p.sku]; if (x) { p.um = x.um; p.grupo = x.grupo; p.costo = x.costo; p.min = x.min; p.normal = x.normal; if (x.grupo) grupos[x.grupo] = true; } });
+      var nombres = Object.keys(grupos).sort(function (a, b) { return a.localeCompare(b, 'es', { sensitivity: 'base' }); }), s = $('fCat');
+      if (nombres.length) { s.innerHTML = '<option value="">Todas las categorías</option>' + nombres.map(function (g) { return '<option value="' + esc(g) + '">' + esc(g) + '</option>'; }).join(''); s.style.display = 'block'; aplicarFiltroStock(); }
+    } catch (e) {}
+  }
+  function filtrarCat(lista) { var c = $('fCat') ? $('fCat').value : ''; return c ? lista.filter(function (p) { return p.grupo === c; }) : lista; }
   async function iniciarExtra() {
+    await cargarExtraAxis();
     await cargarDatosSrv(); mePintar();
     var pr = datosSrv.plantillas.find(function (p) { return p.nombre === datosSrv.predeterminada; });
     if (pr) aplicarDiseno(pr.datos);
@@ -18915,6 +19283,11 @@ $global:extrasHtml = @'
       cabecera();
       opt.filas.forEach(function (f, idx) {
         if (y > H - M - 8) { piePag(); d.nueva(); cabecera(); }
+        if (f && f.sec !== undefined) {
+          d.rect(M, y - rh + 1.6, tw, rh, 'f', 0.1, null, 0.93);
+          d.texto(recortar(f.sec, tw - 3, fs, true), M + 1.5, y, fs, true, 'l');
+          y += rh; return;
+        }
         cols.forEach(function (c, i) {
           var txt = f[i] == null ? '' : String(f[i]), bold = !!(c.b);
           var px = c.al === 'r' ? xs[i] + c.mm - 1.5 : (c.al === 'c' ? xs[i] + c.mm / 2 : xs[i] + 1.5);
@@ -20468,6 +20841,14 @@ while ($listener.IsListening) {
                 if ($dInC -and $dInC.PSObject.Properties.Name -contains 'bienvenida') { $global:instalacion.bienvenidaVista = [bool]$dInC.bienvenida }
                 Guardar-Instalacion
                 Enviar-Json $context @{ ok = $true }
+            }
+
+        } elseif ($method -eq "GET" -and $path -eq "/api/etiquetas/extra") {
+            if (-not (Es-PeticionPC $request)) {
+                Enviar-Json $context @{ ok = $false; error = "Solo desde la PC." } 403
+            } else {
+                try { Enviar-Json $context @{ ok = $true; datos = (Leer-ExtraEtiquetasAxis) } 200 5 }
+                catch { Enviar-Json $context @{ ok = $false; error = "$($_.Exception.Message)"; datos = @{} } 200 3 }
             }
 
         } elseif ($path -eq "/api/etiquetas/datos" -and ($method -eq "GET" -or $method -eq "POST")) {
@@ -22181,6 +22562,26 @@ while ($listener.IsListening) {
                     Enviar-Json $context @{ ok = $true; dias = $nSc } 200 3
                 }
             }
+        } elseif ($method -eq "GET" -and $path -eq "/auditoria") {
+            if (-not (Es-PeticionPC $request)) {
+                Enviar-Respuesta -Context $context -Body "Solo desde la PC." -StatusCode 403
+            } else {
+                Enviar-Respuesta -Context $context -Body (Inyectar-Extras (Inyectar-Admin (Inyectar-Guardian $htmlAuditoria)) 'auditoria')
+            }
+
+        } elseif ($method -eq "GET" -and $path -eq "/api/auditoria/datos") {
+            # Solo lectura: consultas fijas a AxisPOS (nada del cliente se mete en el SQL salvo un numero de dias).
+            if (-not (Es-PeticionPC $request)) {
+                Enviar-Json $context @{ ok = $false; error = "Solo desde la PC." } 403
+            } else {
+                try {
+                    $tipoAud = [string]$request.QueryString["tipo"]
+                    $diasAud = 365; $null = [int]::TryParse([string]$request.QueryString["dias"], [ref]$diasAud)
+                    $filasAud = Leer-AuditoriaAxis $tipoAud $diasAud
+                    Enviar-Json $context @{ ok = $true; filas = $filasAud } 200 4
+                } catch { Enviar-Json $context @{ ok = $false; error = "$($_.Exception.Message)" } 200 3 }
+            }
+
         } elseif ($method -eq "GET" -and $path -eq "/etiquetas") {
             Enviar-Respuesta -Context $context -Body (Inyectar-Extras (Inyectar-Admin (Inyectar-Guardian $htmlEtiquetas)) 'etiquetas')
 
