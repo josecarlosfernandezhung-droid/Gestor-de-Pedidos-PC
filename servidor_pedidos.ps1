@@ -1673,6 +1673,9 @@ $global:configAxis = [pscustomobject]@{
     columnaPrecio = "PriceOut2"
     columnaSku    = "Code"
     cadaSegundos  = 30
+    stockCadaSegundos = 4
+    conectorDll = ""
+    conexionDirecta = $true
     cerrarPedidosAuto = $true
     ventasCadaSegundos = 5
     reservaMinutos = 180
@@ -1682,6 +1685,12 @@ $global:configAxis = [pscustomobject]@{
 }
 $global:axisUltimaLectura = [datetime]::MinValue
 $global:axisFallosSeguidos = 0
+$global:axisBase = $null
+$global:axisStockPrev = @{}
+$global:axisStockUltima = [datetime]::MinValue
+$global:axisStockFallos = 0
+$global:catalogoFirma = @{ t = [datetime]::MinValue; v = '' }
+$global:catalogoJsonCache = @{ f = ''; j = '' }
 
 function Cargar-ConfigAxis {
     if (-not (Test-Path $configAxisPath)) {
@@ -1692,7 +1701,7 @@ function Cargar-ConfigAxis {
         $raw = Get-Content $configAxisPath -Raw -Encoding UTF8
         if ($raw -and $raw.Trim().Length -gt 0) {
             $d = $raw | ConvertFrom-Json
-            foreach ($k in @('activo','servidor','puerto','usuario','clave','base','clienteMysql','almacenes','columnaPrecio','columnaSku','cadaSegundos','cerrarPedidosAuto','ventasCadaSegundos','reservaMinutos','avisoPedidoMinutos','cuadreEsperaMinutos','socioTransferencia')) {
+            foreach ($k in @('activo','servidor','puerto','usuario','clave','base','clienteMysql','almacenes','columnaPrecio','columnaSku','cadaSegundos','stockCadaSegundos','conectorDll','conexionDirecta','cerrarPedidosAuto','ventasCadaSegundos','reservaMinutos','avisoPedidoMinutos','cuadreEsperaMinutos','socioTransferencia')) {
                 if (($d.PSObject.Properties.Name -contains $k) -and ($d.$k -ne $null)) { $global:configAxis.$k = $d.$k }
             }
         }
@@ -1707,12 +1716,14 @@ function Cargar-ConfigAxis {
 
 Cargar-ConfigAxis
 
+$global:clienteMysqlCache = $null
 function Buscar-ClienteMysql {
     $cfgExe = [string]$global:configAxis.clienteMysql
     if ($cfgExe -and (Test-Path $cfgExe)) { return $cfgExe }
+    if ($global:clienteMysqlCache -and (Test-Path -LiteralPath $global:clienteMysqlCache)) { return $global:clienteMysqlCache }
     foreach ($n in @('mariadb.exe','mysql.exe')) {
         $c = Get-Command $n -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($c) { return $c.Source }
+        if ($c) { $global:clienteMysqlCache = $c.Source; return $c.Source }
     }
     $patrones = @(
         'C:\Program Files\MariaDB*\bin\mariadb.exe', 'C:\Program Files\MariaDB*\bin\mysql.exe',
@@ -1721,7 +1732,7 @@ function Buscar-ClienteMysql {
     )
     foreach ($p in $patrones) {
         $f = Get-ChildItem -Path $p -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($f) { return $f.FullName }
+        if ($f) { $global:clienteMysqlCache = $f.FullName; return $f.FullName }
     }
     return $null
 }
@@ -1745,6 +1756,7 @@ function Ejecutar-ConsultaAxis([string]$sql) {
     $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
     $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
     if ([string]$c.clave) { $psi.EnvironmentVariables["MYSQL_PWD"] = [string]$c.clave }
+    $swAx = [System.Diagnostics.Stopwatch]::StartNew()
     $proc = [System.Diagnostics.Process]::Start($psi)
     $tareaErr = $proc.StandardError.ReadToEndAsync()
     $tareaOut = $proc.StandardOutput.ReadToEndAsync()
@@ -1759,10 +1771,297 @@ function Ejecutar-ConsultaAxis([string]$sql) {
         if ($errTxt.Length -gt 200) { $errTxt = $errTxt.Substring(0, 200) }
         throw "Error de la base: $errTxt"
     }
+    try { Registrar-Tiempo 'axis(directo, bloquea):consulta' $swAx.ElapsedMilliseconds } catch {}
     return $salida
 }
 
+# ------------------------------------------------------------------
+# HILO DE AXISPOS (segundo plano, solo lectura)
+# Las lecturas que se repiten solas (catalogo, stock rapido, ventas, borradores) las hace un hilo aparte, para que el
+# hilo principal -el que atiende a los moviles y a la caja- nunca se quede esperando a la base de datos. El hilo
+# principal solo recoge el ultimo resultado ya listo y lo procesa con la misma logica de siempre. Si el hilo no esta
+# disponible, todo funciona como antes (lectura directa). Opcional: "conectorDll" en config_axis.json (ruta de
+# MySql.Data.dll) para hablar con MariaDB sin abrir mariadb.exe en cada consulta; se comprueba solo y, si no
+# da exactamente lo mismo que mariadb.exe, se apaga y se sigue con mariadb.exe.
+# ------------------------------------------------------------------
+$global:axisHilo = $null
+$global:axisHiloIntento = [datetime]::MinValue
+$global:axisSinNueva = $false
+$global:axisSeqVisto = @{}
+$global:axisFinUltimo = [datetime]::MinValue
+$global:axisFinProductos = [datetime]::MinValue
+$global:axisStockPrevHora = [datetime]::MinValue
+
+$global:axisHiloGuion = {
+    param($h)
+    $h.vivo = $true
+    $conn = $null
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $directoProbado = $false
+    $tipoConn = $null
+    $dllCargada = $false
+    function Run-Exe($c, [string]$sql) {
+        if (-not $c.exe) { throw "No encuentro mariadb.exe ni mysql.exe. Pon la ruta completa en config_axis.json (clienteMysql)." }
+        foreach ($v in @([string]$c.servidor, [string]$c.usuario, [string]$c.base)) {
+            if ($v -match '["\r\n]') { throw "config_axis.json tiene caracteres no validos en servidor, usuario o base." }
+        }
+        $sqlUna = ($sql -replace '\s+', ' ').Trim()
+        $argumentos = '--protocol=tcp --connect-timeout=5 --default-character-set=utf8mb4 --init-command="SET SESSION TRANSACTION READ ONLY" -B -N -h "{0}" -P {1} -u "{2}" -D "{3}" -e "{4}"' -f $c.servidor, ([int]$c.puerto), $c.usuario, $c.base, $sqlUna
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $c.exe
+        $psi.Arguments = $argumentos
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+        $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
+        if ([string]$c.clave) { $psi.EnvironmentVariables["MYSQL_PWD"] = [string]$c.clave }
+        $proc = [System.Diagnostics.Process]::Start($psi)
+        $tareaErr = $proc.StandardError.ReadToEndAsync()
+        $tareaOut = $proc.StandardOutput.ReadToEndAsync()
+        if (-not $proc.WaitForExit(20000)) {
+            try { $proc.Kill() } catch {}
+            throw "AxisPOS no respondio en 20 segundos."
+        }
+        $proc.WaitForExit()
+        $salida = $tareaOut.Result
+        $errTxt = ([string]$tareaErr.Result).Trim()
+        if ($proc.ExitCode -ne 0) {
+            if ($errTxt.Length -gt 200) { $errTxt = $errTxt.Substring(0, 200) }
+            throw "Error de la base: $errTxt"
+        }
+        return $salida
+    }
+    function Run-Directo($c, [string]$sql) {
+        if ((-not $conn) -or ($conn.State -ne [System.Data.ConnectionState]::Open)) {
+            $cs = "Server=" + $c.servidor + ";Port=" + $c.puerto + ";Database=" + $c.base + ";Uid=" + $c.usuario + ";Pwd=" + $c.clave + ";CharSet=utf8mb4;TreatTinyAsBoolean=false;AllowZeroDateTime=true;ConvertZeroDateTime=false;ConnectionTimeout=5;DefaultCommandTimeout=20;SslMode=None"
+            if (-not $script:tipoConn) {
+                foreach ($nt in @('MySql.Data.MySqlClient.MySqlConnection', 'MySqlConnector.MySqlConnection')) {
+                    foreach ($asm in [AppDomain]::CurrentDomain.GetAssemblies()) { $tt = $null; try { $tt = $asm.GetType($nt, $false) } catch {}; if ($tt) { $script:tipoConn = $tt; break } }
+                    if ($script:tipoConn) { break }
+                }
+                if (-not $script:tipoConn) { throw "el conector no trae MySqlConnection" }
+            }
+            $script:conn = [Activator]::CreateInstance($script:tipoConn, $cs)
+            $script:conn.Open()
+            $c0 = $script:conn.CreateCommand(); $c0.CommandText = "SET SESSION TRANSACTION READ ONLY"; [void]$c0.ExecuteNonQuery()
+        }
+        $cmd = $script:conn.CreateCommand()
+        $cmd.CommandText = $sql
+        $rd = $cmd.ExecuteReader()
+        $sb = New-Object System.Text.StringBuilder
+        try {
+            while ($rd.Read()) {
+                $celdas = New-Object System.Collections.ArrayList
+                for ($i = 0; $i -lt $rd.FieldCount; $i++) {
+                    if ($rd.IsDBNull($i)) { [void]$celdas.Add('NULL'); continue }
+                    $v = $rd.GetValue($i)
+                    if ($v -is [datetime]) { $t = $v.ToString('yyyy-MM-dd HH:mm:ss', $inv) }
+                    elseif ($v -is [decimal] -or $v -is [double] -or $v -is [single]) { $t = [string]::Format($inv, '{0}', $v) }
+                    elseif ($v -is [byte[]]) { throw "columna binaria no soportada" }
+                    else { $t = [string]$v }
+                    $t = $t.Replace('\', '\\').Replace("`t", '\t').Replace("`n", '\n')
+                    [void]$celdas.Add($t)
+                }
+                [void]$sb.Append(($celdas -join "`t")).Append("`n")
+            }
+        } finally { $rd.Close() }
+        return $sb.ToString()
+    }
+    function Aviso([string]$m) { try { [void]$h.avisos.Add($m) } catch {} }
+    function Ejecutar($c, [string]$sql) {
+        if ($c.dll -and $h.directo) {
+            try {
+                if (-not $script:dllCargada) { Add-Type -Path $c.dll -ErrorAction Stop; $script:dllCargada = $true }
+                if (-not $script:directoProbado) {
+                    $script:directoProbado = $true
+                    $ok = $true
+                    foreach ($q in @("SELECT ID, Code, Name, Deleted FROM goods ORDER BY ID LIMIT 20", "SELECT ID, Message, UserRealTime FROM applicationlog ORDER BY ID LIMIT 5", "SELECT ID, Qtty, Sign, Timestamp FROM operations ORDER BY ID LIMIT 5")) {
+                        if ((Run-Directo $c $q) -ne (Run-Exe $c $q)) { $ok = $false; break }
+                    }
+                    if (-not $ok) { $h.directo = $false; Aviso "Conexion directa a MariaDB: el resultado no coincide con el de mariadb.exe; se sigue con mariadb.exe."; return (Run-Exe $c $sql) }
+                    Aviso "Conexion directa a MariaDB activa (comprobada contra mariadb.exe)."
+                }
+                return (Run-Directo $c $sql)
+            } catch {
+                $h.directoFallos = [int]$h.directoFallos + 1
+                try { if ($script:conn) { $script:conn.Dispose() }; $script:conn = $null } catch {}
+                if ($h.directoFallos -ge 3) { $h.directo = $false; Aviso "Conexion directa a MariaDB desactivada por errores ($_); se sigue con mariadb.exe." }
+            }
+        }
+        return (Run-Exe $c $sql)
+    }
+    try {
+        while ($h.activo) {
+            $h.latido = Get-Date
+            $ahora = Get-Date
+            $hizo = $false
+            foreach ($k in @($h.tareas.Keys)) {
+                $t = $h.tareas[$k]
+                if (-not $t) { continue }
+                if ((($ahora - $t.pedida).TotalSeconds) -gt 90) { $h.tareas.Remove($k); continue }
+                $r = $h.res[$k]
+                $debe = (-not $r) -or ($r.sql -ne $t.sql) -or ((($ahora - $r.fin).TotalSeconds) -ge $t.cada)
+                if (-not $debe) { continue }
+                $seq = 1
+                if ($r) { $seq = [int]$r.seq + 1 }
+                $res = $null
+                $t0q = Get-Date
+                try {
+                    $txt = Ejecutar $h.cfg $t.sql
+                    $res = @{ ok = $true; texto = $txt; error = ''; sql = $t.sql; fin = (Get-Date); seq = $seq; ms = ((Get-Date) - $t0q).TotalMilliseconds }
+                } catch {
+                    $res = @{ ok = $false; texto = ''; error = "$_"; sql = $t.sql; fin = (Get-Date); seq = $seq; ms = ((Get-Date) - $t0q).TotalMilliseconds }
+                }
+                $h.res[$k] = $res
+                $hizo = $true
+                $h.latido = Get-Date
+            }
+            if (-not $hizo) { Start-Sleep -Milliseconds 50 }
+        }
+    } finally { $h.vivo = $false }
+}
+
+function Iniciar-HiloAxis {
+    if ($global:axisHilo -and $global:axisHilo.vivo) { return }
+    $h = [hashtable]::Synchronized(@{ activo = $true; cfg = @{}; tareas = [hashtable]::Synchronized(@{}); res = [hashtable]::Synchronized(@{}); latido = (Get-Date); vivo = $false; directo = $true; directoFallos = 0; avisos = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList)) })
+    $h.cfg = Config-HiloAxis
+    if ($h.cfg.dll) { Write-Host ("AxisPOS: encontre el conector de MariaDB (" + $h.cfg.dll + "). Pruebo la conexion directa; si no coincide con mariadb.exe, sigo con mariadb.exe.") }
+    else { Write-Host "AxisPOS: no encontre el conector de MariaDB; se usa mariadb.exe (funciona igual)." }
+    $rs = [runspacefactory]::CreateRunspace()
+    $rs.ApartmentState = [System.Threading.ApartmentState]::MTA
+    $rs.Open()
+    $ps = [powershell]::Create()
+    $ps.Runspace = $rs
+    [void]$ps.AddScript($global:axisHiloGuion.ToString()).AddArgument($h)
+    $h.ps = $ps
+    $h.async = $ps.BeginInvoke()
+    $h.vivo = $true
+    $global:axisHilo = $h
+}
+
+$global:axisConectorCache = @{ hora = [datetime]::MinValue; ruta = '' }
+function Buscar-ConectorDll {
+    if ($global:configAxis.PSObject.Properties.Name -contains 'conexionDirecta') { if (-not [bool]$global:configAxis.conexionDirecta) { return '' } }
+    $cfgDll = [string]$global:configAxis.conectorDll
+    if ($cfgDll -and (Test-Path -LiteralPath $cfgDll)) { return $cfgDll }
+    if ((((Get-Date) - $global:axisConectorCache.hora).TotalMinutes -lt 10) -and ($global:axisConectorCache.hora -ne [datetime]::MinValue)) { return [string]$global:axisConectorCache.ruta }
+    $ruta = ''
+    try {
+        $carpetas = New-Object System.Collections.ArrayList
+        [void]$carpetas.Add($scriptDir)
+        try { foreach ($pr in @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -like '*Axis*' })) { try { $fp = $pr.MainModule.FileName; if ($fp) { [void]$carpetas.Add((Split-Path -Parent $fp)) } } catch {} } } catch {}
+        foreach ($pat in @('C:\Program Files*\*Axis*', 'C:\Program Files*\*Axis*\*', 'C:\*Axis*', 'C:\AxisSoft*', 'C:\Program Files*\MySQL\Connector*\Assemblies\*', 'C:\Windows\Microsoft.NET\assembly\GAC_MSIL\MySql.Data\*')) {
+            try { foreach ($d in @(Get-ChildItem -Path $pat -Directory -ErrorAction SilentlyContinue)) { [void]$carpetas.Add($d.FullName) } } catch {}
+        }
+        foreach ($carp in $carpetas) {
+            foreach ($nom in @('MySql.Data.dll', 'MySqlConnector.dll')) {
+                $cand = Join-Path $carp $nom
+                if (Test-Path -LiteralPath $cand) { $ruta = $cand; break }
+            }
+            if ($ruta) { break }
+        }
+    } catch {}
+    $global:axisConectorCache = @{ hora = (Get-Date); ruta = $ruta }
+    return $ruta
+}
+
+$global:axisHiloCfgCache = $null
+$global:axisHiloCfgHora = [datetime]::MinValue
+function Config-HiloAxis {
+    $c = $global:configAxis
+    return @{ servidor = [string]$c.servidor; puerto = [int]$c.puerto; usuario = [string]$c.usuario; clave = [string]$c.clave; base = [string]$c.base; exe = (Buscar-ClienteMysql); dll = (Buscar-ConectorDll) }
+}
+
+# Lectura periodica en segundo plano. Devuelve el texto del ultimo resultado listo y deja $global:axisSinNueva = $true
+# cuando todavia no hay una lectura nueva desde la ultima vez (en ese caso devuelve ""). Si la ultima lectura fallo,
+# lanza el mismo error que habria dado la lectura directa. Sin hilo disponible, lee directo como siempre.
+function Leer-AxisPeriodico([string]$clave, [string]$sql, [double]$cada) {
+    $global:axisSinNueva = $false
+    $h = $global:axisHilo
+    if ((-not $h) -or (-not $h.vivo) -or ((((Get-Date) - $h.latido).TotalSeconds) -gt 90)) {
+        if (((Get-Date) - $global:axisHiloIntento).TotalSeconds -gt 60) { $global:axisHiloIntento = Get-Date; try { Iniciar-HiloAxis } catch {} }
+        return (Ejecutar-ConsultaAxis $sql)
+    }
+    if (((Get-Date) - $global:axisHiloCfgHora).TotalSeconds -gt 5 -or -not $global:axisHiloCfgCache) { $global:axisHiloCfgCache = Config-HiloAxis; $global:axisHiloCfgHora = Get-Date }
+    $h.cfg = $global:axisHiloCfgCache
+    if ($cada -lt 1) { $cada = 1 }
+    $h.tareas[$clave] = @{ sql = $sql; cada = $cada; pedida = (Get-Date) }
+    try { while ($h.avisos.Count -gt 0) { $m = [string]$h.avisos[0]; $h.avisos.RemoveAt(0); Write-Host ("AxisPOS: " + $m) } } catch {}
+    $r = $h.res[$clave]
+    if ($r -and ([string]$r.sql -ne $sql)) { $r = $null }
+    if (-not $r) {
+        if ($global:axisSeqVisto.ContainsKey($clave)) { $global:axisSinNueva = $true; return "" }
+        # primera vez: se espera el primer resultado (como antes, pero una sola vez)
+        $t0 = Get-Date
+        while (((Get-Date) - $t0).TotalSeconds -lt 25) {
+            $r = $h.res[$clave]
+            if ($r -and ([string]$r.sql -eq $sql)) { break }
+            $r = $null
+            Start-Sleep -Milliseconds 20
+        }
+        if (-not $r) { throw "AxisPOS no respondio a tiempo." }
+    }
+    if (($global:axisSeqVisto.ContainsKey($clave)) -and ([int]$global:axisSeqVisto[$clave] -eq [int]$r.seq)) { $global:axisSinNueva = $true; return "" }
+    $global:axisSeqVisto[$clave] = [int]$r.seq
+    $global:axisFinUltimo = $r.fin
+    try { Registrar-Tiempo ('axis(hilo):' + $clave) ([double]$r.ms) } catch {}
+    if (-not $r.ok) { throw [string]$r.error }
+    return [string]$r.texto
+}
+
+# ------------------------------------------------------------------
+# REGISTRO DE TIEMPOS (solo para medir; no cambia nada del funcionamiento)
+# Anota cuanto tarda cada ruta, cada tarea de mantenimiento del bucle principal y cada consulta a AxisPOS.
+#  - Las lentas (>= 500 ms) salen en la consola y en tiempos_lentos.log.
+#  - El resumen (veces, promedio, maximo, total) se guarda cada minuto en tiempos_rutas.json y se puede ver en
+#    http://localhost:PUERTO/api/tiempos (solo desde la PC; con ?reiniciar=1 se pone en cero).
+# ------------------------------------------------------------------
+$global:tiempos = @{}
+$global:tiemposDesde = Get-Date
+$global:tiemposGuardado = Get-Date
+$global:tiemposLentoMs = 500
+function Normalizar-RutaTiempo([string]$p) {
+    $x = [regex]::Replace($p, '/\d+', '/#')
+    $x = [regex]::Replace($x, '/[0-9a-fA-F]{16,}', '/#')
+    if ($x.Length -gt 80) { $x = $x.Substring(0, 80) }
+    return $x
+}
+function Registrar-Tiempo([string]$nombre, [double]$ms) {
+    try {
+        $e = $global:tiempos[$nombre]
+        if (-not $e) { $e = @{ n = 0; total = 0.0; max = 0.0; ult = 0.0; lentas = 0 }; $global:tiempos[$nombre] = $e }
+        $e.n = $e.n + 1; $e.total = $e.total + $ms; $e.ult = $ms
+        if ($ms -gt $e.max) { $e.max = $ms }
+        if ($ms -ge $global:tiemposLentoMs) {
+            $e.lentas = $e.lentas + 1
+            $linea = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss") + " | " + [math]::Round($ms) + " ms | " + $nombre
+            Write-Host ("[LENTO] " + $linea)
+            $rutaLog = Join-Path $scriptDir "tiempos_lentos.log"
+            if ((-not (Test-Path -LiteralPath $rutaLog)) -or ((Get-Item -LiteralPath $rutaLog).Length -lt 2000000)) { [System.IO.File]::AppendAllText($rutaLog, $linea + "`r`n", [System.Text.Encoding]::UTF8) }
+        }
+        if (((Get-Date) - $global:tiemposGuardado).TotalSeconds -ge 60) {
+            $global:tiemposGuardado = Get-Date
+            [System.IO.File]::WriteAllText((Join-Path $scriptDir "tiempos_rutas.json"), (Resumen-Tiempos | ConvertTo-Json -Depth 6), (New-Object System.Text.UTF8Encoding($false)))
+        }
+    } catch {}
+}
+function Resumen-Tiempos {
+    $lista = New-Object System.Collections.ArrayList
+    foreach ($k in @($global:tiempos.Keys)) {
+        $e = $global:tiempos[$k]
+        if (-not $e -or $e.n -lt 1) { continue }
+        [void]$lista.Add([pscustomobject]@{ nombre = $k; veces = $e.n; promedioMs = [math]::Round($e.total / $e.n, 1); maxMs = [math]::Round($e.max, 1); ultimoMs = [math]::Round($e.ult, 1); totalMs = [math]::Round($e.total); lentas = $e.lentas })
+    }
+    $h = $global:axisHilo
+    $hilo = $null
+    if ($h) { $hilo = [pscustomobject]@{ vivo = [bool]$h.vivo; conexionDirecta = [bool]($h.directo -and $h.cfg.dll); latidoHaceSeg = [math]::Round(((Get-Date) - $h.latido).TotalSeconds, 1) } }
+    return [pscustomobject]@{ desde = $global:tiemposDesde.ToString("yyyy-MM-dd HH:mm:ss"); hiloAxis = $hilo; masLentasPorTotal = @($lista | Sort-Object totalMs -Descending | Select-Object -First 40); masLentasPorMaximo = @($lista | Sort-Object maxMs -Descending | Select-Object -First 15) }
+}
+
 function Leer-ProductosAxis {
+    param([switch]$SegundoPlano)
     $c = $global:configAxis
     $colPrecio = [string]$c.columnaPrecio
     if ($colPrecio -notmatch '^PriceOut([1-9]|10)$') { throw "columnaPrecio invalida (usa PriceOut1 ... PriceOut10)." }
@@ -1772,8 +2071,15 @@ function Leer-ProductosAxis {
     foreach ($a in @($c.almacenes)) { $n = 0; if ([int]::TryParse([string]$a, [ref]$n)) { [void]$ids.Add($n) } }
     if ($ids.Count -eq 0) { throw "config_axis.json: 'almacenes' esta vacio." }
     $lista = ($ids -join ',')
-    $sql = "SELECT g.$colSku, g.Name, g.$colPrecio, CASE WHEN COUNT(s.ID)=0 THEN NULL ELSE ROUND(SUM(s.Qtty),4) END FROM goods g LEFT JOIN store s ON s.GoodID=g.ID AND s.ObjectID IN ($lista) WHERE g.Deleted=0 AND TRIM(g.Name)<>'' GROUP BY g.ID, g.$colSku, g.Name, g.$colPrecio ORDER BY g.Name"
-    $texto = Ejecutar-ConsultaAxis $sql
+    $sql = "SELECT g.$colSku, g.Name, g.$colPrecio, CASE WHEN COUNT(s.ID)=0 THEN NULL ELSE ROUND(SUM(s.Qtty),4) END, g.ID FROM goods g LEFT JOIN store s ON s.GoodID=g.ID AND s.ObjectID IN ($lista) WHERE g.Deleted=0 AND TRIM(g.Name)<>'' GROUP BY g.ID, g.$colSku, g.Name, g.$colPrecio ORDER BY g.Name"
+    if ($SegundoPlano) {
+        $cadaP = [int]$c.cadaSegundos; if ($cadaP -lt 5) { $cadaP = 5 }; if ($cadaP -gt 15) { $cadaP = 15 }
+        $texto = Leer-AxisPeriodico 'productos' $sql $cadaP
+        if ($global:axisSinNueva) { return $null }
+        $global:axisFinProductos = $global:axisFinUltimo
+    } else {
+        $texto = Ejecutar-ConsultaAxis $sql
+    }
     $inv = [System.Globalization.CultureInfo]::InvariantCulture
     $lista2 = New-Object System.Collections.ArrayList
     foreach ($linea in ($texto -split "`n")) {
@@ -1790,7 +2096,9 @@ function Leer-ProductosAxis {
             $sv = 0.0
             if ([double]::TryParse([string]$f[3], [System.Globalization.NumberStyles]::Float, $inv, [ref]$sv)) { $stock = $sv }
         }
-        [void]$lista2.Add([pscustomobject]@{ sku = ([string]$f[0]).Trim(); nombre = $nombre; precio = $precio; stock = $stock })
+        $idProd = ''
+        if ($f.Count -ge 5) { $idProd = ([string]$f[4]).Trim() }
+        [void]$lista2.Add([pscustomobject]@{ sku = ([string]$f[0]).Trim(); nombre = $nombre; precio = $precio; stock = $stock; id = $idProd })
     }
     return @($lista2)
 }
@@ -1879,12 +2187,26 @@ function Revisar-CatalogoAxis {
     $espera = [int]$global:configAxis.cadaSegundos
     if ($espera -lt 5) { $espera = 5 }
     if ($global:axisFallosSeguidos -gt 0) { $espera = [math]::Min(300, $espera * ($global:axisFallosSeguidos + 1)) }
+    elseif ((-not $Forzar) -and $global:axisHilo -and $global:axisHilo.vivo) { $espera = 2 }
     if ((-not $Forzar) -and (($ahora - $global:axisUltimaLectura).TotalSeconds -lt $espera)) { return }
     $global:axisUltimaLectura = $ahora
     try {
-        $productos = Leer-ProductosAxis
+        $global:axisSinNueva = $false
+        $productos = if ($Forzar) { Leer-ProductosAxis } else { Leer-ProductosAxis -SegundoPlano }
+        if ((-not $Forzar) -and $global:axisSinNueva) { return }
+        if ((-not $Forzar) -and ($global:axisStockPrevHora -gt $global:axisFinProductos)) {
+            # el stock rapido es mas nuevo que esta lectura completa: se conserva el mas nuevo
+            try { foreach ($pq in @($productos)) { if ($pq.id -and $global:axisStockPrev.ContainsKey([string]$pq.id)) { $tq = [string]$global:axisStockPrev[[string]$pq.id]; $dq = 0.0; if ($tq -ne '' -and [double]::TryParse($tq, [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$dq)) { $pq.stock = $dq } } } } catch {}
+        }
         if (@($productos).Count -eq 0) { throw "La consulta no devolvio productos (se conserva el catalogo anterior)." }
         Aplicar-ProductosCatalogo $productos | Out-Null
+        try {
+            $global:axisBase = @($productos)
+            $prevMap = @{}
+            foreach ($pb in $global:axisBase) { if ($pb.id) { $prevMap[[string]$pb.id] = if ($pb.stock -ne $null) { [string]$pb.stock } else { '' } } }
+            $global:axisStockPrev = $prevMap
+            $global:axisStockUltima = Get-Date
+        } catch {}
         if ($global:axisFallosSeguidos -gt 0) { Write-Host "AxisPOS: conexion recuperada." }
         $global:axisFallosSeguidos = 0
     } catch {
@@ -1892,6 +2214,83 @@ function Revisar-CatalogoAxis {
         $global:catalogoInfo.error = "No se pudo leer AxisPOS: $_"
         if ($global:axisFallosSeguidos -eq 1) { Write-Host "Aviso: $($global:catalogoInfo.error)" }
     }
+}
+
+# Lectura RAPIDA del stock (solo lectura): una consulta chica, solo la tabla de existencias, cada pocos segundos.
+# No reemplaza a la lectura completa (nombres y precios, cada cadaSegundos): cuando el stock cambia, usa la
+# ultima lista completa con las cifras nuevas y la pasa por Aplicar-ProductosCatalogo, la MISMA rutina de siempre
+# (reservas, avisos, stock vendido desde moviles). Si algo falla, no hace nada y sigue la lectura completa.
+function Leer-StockAxisRapido([double]$cada) {
+    $c = $global:configAxis
+    $ids = New-Object System.Collections.ArrayList
+    foreach ($a in @($c.almacenes)) { $n = 0; if ([int]::TryParse([string]$a, [ref]$n)) { [void]$ids.Add($n) } }
+    if ($ids.Count -eq 0) { throw "almacenes vacio" }
+    $lista = ($ids -join ',')
+    $texto = Leer-AxisPeriodico 'stock' "SELECT s.GoodID, ROUND(SUM(s.Qtty),4) FROM store s WHERE s.ObjectID IN ($lista) GROUP BY s.GoodID" $cada
+    if ($global:axisSinNueva) { return $null }
+    $mapa = @{}
+    foreach ($linea in ($texto -split "`n")) {
+        $linea = $linea.TrimEnd("`r")
+        if ([string]::IsNullOrWhiteSpace($linea)) { continue }
+        $f = $linea -split "`t"
+        if ($f.Count -lt 2) { continue }
+        $mapa[([string]$f[0]).Trim()] = ([string]$f[1]).Trim()
+    }
+    return $mapa
+}
+
+function Revisar-StockAxis {
+    if (-not $global:configAxis.activo) { return }
+    $cada = 4
+    try { $cada = [int]$global:configAxis.stockCadaSegundos } catch { $cada = 4 }
+    if ($cada -le 0) { return }
+    if ($cada -lt 2) { $cada = 2 }
+    if (-not $global:axisBase -or @($global:axisBase).Count -eq 0) { return }
+    $ahora = Get-Date
+    $espera = $cada
+    if ($global:axisStockFallos -gt 0) { $espera = [math]::Min(120, $cada * ($global:axisStockFallos + 1)) }
+    elseif ($global:axisHilo -and $global:axisHilo.vivo) { $espera = 1 }
+    if (($ahora - $global:axisStockUltima).TotalSeconds -lt $espera) { return }
+    $global:axisStockUltima = $ahora
+    try {
+        $mapa = Leer-StockAxisRapido $cada
+        if ($null -eq $mapa) { return }
+        $global:axisStockFallos = 0
+        $global:axisStockPrevHora = $global:axisFinUltimo
+        $cambio = $false
+        $inv = [System.Globalization.CultureInfo]::InvariantCulture
+        foreach ($pb in $global:axisBase) {
+            if (-not $pb.id) { continue }
+            $k = [string]$pb.id
+            if (-not $mapa.ContainsKey($k)) { continue }
+            $nuevoTxt = $mapa[$k]
+            $sv = 0.0
+            $okNum = ($nuevoTxt -ne 'NULL' -and $nuevoTxt -ne '' -and [double]::TryParse($nuevoTxt, [System.Globalization.NumberStyles]::Float, $inv, [ref]$sv))
+            $normTxt = if ($okNum) { [string]$sv } else { '' }
+            $antTxt = $global:axisStockPrev[$k]
+            if ($antTxt -ne $normTxt) {
+                $cambio = $true
+                $global:axisStockPrev[$k] = $normTxt
+                if ($okNum) { $pb.stock = $sv }
+            }
+        }
+        if ($cambio) { Aplicar-ProductosCatalogo $global:axisBase | Out-Null }
+    } catch {
+        $global:axisStockFallos = $global:axisStockFallos + 1
+    }
+}
+
+# Firma corta del catalogo (SKU, stock, precio y reservas). Los moviles la preguntan cada pocos segundos y
+# solo piden el catalogo completo cuando cambia. Se calcula como mucho una vez por segundo.
+function Obtener-FirmaCatalogo {
+    if (((Get-Date) - $global:catalogoFirma.t).TotalMilliseconds -lt 800 -and $global:catalogoFirma.v) { return $global:catalogoFirma.v }
+    $sb = New-Object System.Text.StringBuilder
+    foreach ($p in @($global:catalogo)) {
+        [void]$sb.Append([string]$p.sku).Append(':').Append([string]$p.nombre).Append(':').Append([string]$p.stock).Append(':').Append([string]$p.precio).Append(':').Append([string]$p.reservado).Append(';')
+    }
+    $v = "" + @($global:catalogo).Count + "-" + $sb.ToString().GetHashCode()
+    $global:catalogoFirma = @{ t = (Get-Date); v = $v }
+    return $v
 }
 
 # ------------------------------------------------------------------
@@ -1956,7 +2355,9 @@ function Leer-VentasAxis([long]$desdeId) {
     if ($ids.Count -eq 0) { throw "config_axis.json: 'almacenes' esta vacio." }
     $lista = ($ids -join ',')
     $sql = "SELECT o.ID, o.Acct, o.ObjectID, g.$colSku, o.Qtty, DATE_FORMAT(IF(o.UserRealTime IS NULL OR o.UserRealTime < '2000-01-01', o.Timestamp, o.UserRealTime), '%Y-%m-%d %H:%i:%s'), o.PriceOut, o.Sign, o.OperatorID FROM operations o JOIN goods g ON g.ID = o.GoodID WHERE o.OperType = 2 AND o.Sign <> 0 AND o.Acct > 0 AND o.ID > $desdeMinimo AND (o.ID > $desdeId OR o.Timestamp >= DATE_SUB(NOW(), INTERVAL 30 MINUTE) OR o.UserRealTime >= DATE_SUB(NOW(), INTERVAL 30 MINUTE)) AND o.ObjectID IN ($lista) ORDER BY o.ID"
-    $texto = Ejecutar-ConsultaAxis $sql
+    $cadaV = [int]$c.ventasCadaSegundos; if ($cadaV -lt 1) { $cadaV = 1 }
+    $texto = Leer-AxisPeriodico 'ventas' $sql $cadaV
+    if ($global:axisSinNueva) { return @() }
     $inv = [System.Globalization.CultureInfo]::InvariantCulture
     $res = New-Object System.Collections.ArrayList
     foreach ($linea in ($texto -split "`n")) {
@@ -2044,6 +2445,7 @@ function Revisar-VentasAxis {
     $espera = [int]$global:configAxis.ventasCadaSegundos
     if ($espera -lt 1) { $espera = 1 }
     if ($global:axisVentasFallos -gt 0) { $espera = [math]::Min(300, $espera * ($global:axisVentasFallos + 1)) }
+    elseif ($global:axisHilo -and $global:axisHilo.vivo) { $espera = 1 }
     $ahora = Get-Date
     if (($ahora - $global:axisVentasUltima).TotalSeconds -lt $espera) { return }
     $global:axisVentasUltima = $ahora
@@ -2060,7 +2462,9 @@ function Revisar-VentasAxis {
             return
         }
         if (-not $global:axisSeguimientoDesde) { $global:axisSeguimientoDesde = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss"); Guardar-EstadoVentasAxis }
+        $global:axisSinNueva = $false
         $filas = @(Leer-VentasAxis $global:axisVentasUltimoId)
+        if ($global:axisSinNueva) { return }
         $global:axisVentasFallos = 0
         # Filas con ID viejo (borradores que se cobraron ahora): solo cuentan si esa venta aun no se habia registrado.
         $desdeIdAct = $global:axisVentasUltimoId
@@ -2285,7 +2689,9 @@ function Revisar-BorradoresAxis {
     $ahora = Get-Date
     $espera = [int]$global:configAxis.ventasCadaSegundos * 2
     if ($espera -lt 10) { $espera = 10 }
-    if (($ahora - $global:axisBorradoresUltima).TotalSeconds -lt $espera) { return }
+    $esperaMain = $espera
+    if ($global:axisHilo -and $global:axisHilo.vivo) { $esperaMain = 2 }
+    if (($ahora - $global:axisBorradoresUltima).TotalSeconds -lt $esperaMain) { return }
     $hayPend = $false
     foreach ($pp in @($global:pedidos)) { if ([string]$pp.estado -eq "pendiente") { $hayPend = $true; break } }
     if (-not $hayPend) { return }
@@ -2300,7 +2706,8 @@ function Revisar-BorradoresAxis {
         $lista = ($ids -join ',')
         $desde = [math]::Max([long]0, $global:axisVentasUltimoId - 5000)
         $sql = "SELECT o.Acct, o.ObjectID, g.$colSku, o.Qtty, DATE_FORMAT(o.Timestamp, '%Y-%m-%d %H:%i:%s') FROM operations o JOIN goods g ON g.ID = o.GoodID WHERE o.OperType = 2 AND o.Sign = 0 AND o.Acct < 0 AND o.ID > $desde AND o.ObjectID IN ($lista) AND o.Timestamp >= DATE_SUB(NOW(), INTERVAL 3 HOUR) ORDER BY o.ID"
-        $texto = Ejecutar-ConsultaAxis $sql
+        $texto = Leer-AxisPeriodico 'borradores' $sql $espera
+        if ($global:axisSinNueva) { return }
         $inv = [System.Globalization.CultureInfo]::InvariantCulture
         $grupos = [ordered]@{}
         foreach ($linea in ($texto -split "`n")) {
@@ -12556,6 +12963,20 @@ TT.iniciar('vendedor');
     }
     cargarCatalogo();
     setInterval(cargarCatalogo, 15000);
+    // Aviso rapido de cambios: pregunta una firma muy liviana cada 3 s y solo baja el catalogo cuando cambia (stock al instante).
+    let firmaCatalogo = null, firmaOcupada = false;
+    setInterval(async () => {
+      if (firmaOcupada || document.visibilityState === 'hidden') return;
+      firmaOcupada = true;
+      try {
+        const rf = await fetch('/api/catalogo/version', { cache: 'no-store' });
+        if (rf.ok) {
+          const df = await rf.json();
+          if (df && df.v) { if (firmaCatalogo !== null && df.v !== firmaCatalogo) cargarCatalogo(); firmaCatalogo = df.v; }
+        }
+      } catch (e) {}
+      firmaOcupada = false;
+    }, 3000);
 
     // ---- Subir y mapear Excel desde el movil ----
     let archivoExcelBuffer = null;
@@ -16149,8 +16570,16 @@ $htmlEtiquetas = @'
     <h2>Contenido de la etiqueta</h2>
     <label style="font-size:12px; color:#94a3b8;">Nombre del negocio</label>
     <input type="text" id="negocio" value="__NEGOCIO__" oninput="cambio()">
-    <label class="chk"><input type="checkbox" id="oNeg" checked onchange="cambio()"> Mostrar nombre del negocio</label>
-    <label class="chk"><input type="checkbox" id="oNom" checked onchange="cambio()"> Mostrar nombre del producto</label>
+    <div class="nota" style="margin:2px 0 6px;">Agregar a la etiqueta · Vertical (arriba/abajo del precio) y horizontal.</div>
+    <div class="cr"><label class="chk"><input type="checkbox" id="oNeg" checked onchange="cambio()"> Nombre del negocio</label><select id="nV" class="exc" onchange="cambio()" title="Vertical: respecto del precio"><option value="arriba">Arriba</option><option value="abajo">Abajo</option></select><select id="nH" class="exc" onchange="cambio()" title="Horizontal"><option value="auto">Según estilo</option><option value="izq">Izquierda</option><option value="cen">Centro</option><option value="der">Derecha</option></select></div>
+    <div class="cr"><label class="chk"><input type="checkbox" id="oNom" checked onchange="cambio()"> Nombre del producto</label><select id="pV" class="exc" onchange="cambio()" title="Vertical: respecto del precio"><option value="arriba">Arriba</option><option value="abajo">Abajo</option></select><select id="pH" class="exc" onchange="cambio()" title="Horizontal"><option value="auto">Según estilo</option><option value="izq">Izquierda</option><option value="cen">Centro</option><option value="der">Derecha</option></select></div>
+    <div class="cr"><label class="chk"><input type="checkbox" id="exUM" onchange="cambio()" class="exc"> Unidad de medida (UM: PZS.) <small style="color:#64748b">AxisPOS</small></label><select id="umV" class="exc" onchange="cambio()" title="Vertical: respecto del precio"><option value="arriba">Arriba</option><option value="abajo">Abajo</option></select><select id="umH" class="exc" onchange="cambio()" title="Horizontal"><option value="izq">Izquierda</option><option value="cen">Centro</option><option value="der">Derecha</option></select></div>
+    <div class="cr"><label class="chk"><input type="checkbox" id="exCU" onchange="cambio()" class="exc"> Texto «C/U»</label><select id="cuV" class="exc" onchange="cambio()" title="Vertical: respecto del precio"><option value="arriba">Arriba</option><option value="abajo">Abajo</option></select><select id="cuH" class="exc" onchange="cambio()" title="Horizontal"><option value="izq">Izquierda</option><option value="cen">Centro</option><option value="der">Derecha</option></select></div>
+    <div class="cr"><label class="chk"><input type="checkbox" id="exCod" onchange="cambio()" class="exc"> Código del producto («CODIGO:»)</label><select id="codV" class="exc" onchange="cambio()" title="Vertical: respecto del precio"><option value="arriba">Arriba</option><option value="abajo">Abajo</option></select><select id="codH" class="exc" onchange="cambio()" title="Horizontal"><option value="izq">Izquierda</option><option value="cen">Centro</option><option value="der">Derecha</option></select></div>
+    <div class="cr"><label class="chk"><input type="checkbox" id="exFProd" onchange="cambio()" class="exc"> Fecha de producción</label><select id="fpV" class="exc" onchange="cambio()" title="Vertical: respecto del precio"><option value="arriba">Arriba</option><option value="abajo">Abajo</option></select><select id="fpH" class="exc" onchange="cambio()" title="Horizontal"><option value="izq">Izquierda</option><option value="cen">Centro</option><option value="der">Derecha</option></select></div>
+    <input type="text" id="exFProdVal" class="exc" maxlength="12" placeholder="dd/mm/aa" style="margin:0 0 4px 22px; width:110px;" oninput="cambio()">
+    <div class="cr"><label class="chk"><input type="checkbox" id="exFecha" onchange="cambio()" class="exc"> Fecha de impresión («FECHA:»)</label><select id="fiV" class="exc" onchange="cambio()" title="Vertical: respecto del precio"><option value="arriba">Arriba</option><option value="abajo">Abajo</option></select><select id="fiH" class="exc" onchange="cambio()" title="Horizontal"><option value="izq">Izquierda</option><option value="cen">Centro</option><option value="der">Derecha</option></select></div>
+    <div class="nota">El precio va siempre centrado y lo más grande que permita el papel. «Arriba» y «abajo» son respecto de él; con código de barras puesto, «abajo» es después de las barras.</div>
     <label class="chk"><input type="checkbox" id="oPre" checked onchange="cambio()"> Mostrar precio</label>
     <label style="font-size:12px; color:#94a3b8; display:block; margin-top:6px;">Precio que se imprime</label>
     <select id="modoPrecio" onchange="cambio()">
@@ -16170,6 +16599,7 @@ $htmlEtiquetas = @'
           <option value="banner-precio">Banner en el precio</option><option value="marco-doble">Marco doble</option><option value="oferta">Oferta</option>
           <option value="retro">Retro punteado</option><option value="lineas">Líneas</option><option value="minimal">Minimal</option>
           <option value="boutique">Boutique</option><option value="pop">Pop</option><option value="industrial">Industrial</option>
+          <option value="asteriscos">Oferta con asteriscos</option><option value="ticket">Ticket (filetes)</option>
         </select></div>
       <div><label style="font-size:12px; color:#94a3b8;">Letra</label>
         <select id="fuente" onchange="cambio()">
@@ -16181,6 +16611,12 @@ $htmlEtiquetas = @'
       <div><label style="font-size:12px; color:#94a3b8;">Moneda</label><input type="text" id="moneda" value="$" maxlength="4" oninput="cambio()"></div>
       <div><label style="font-size:12px; color:#94a3b8;">Decimales</label>
         <select id="decimales" onchange="cambio()"><option value="auto">Auto</option><option value="0">Sin decimales</option><option value="2">2 decimales</option></select></div>
+    </div>
+    <div class="fila" style="margin-top:8px;">
+      <div><label style="font-size:12px; color:#94a3b8;">Separador de miles</label>
+        <select id="fMil" class="exc" onchange="cambio()"><option value="">Ninguno</option><option value=",">Coma (19,500)</option><option value=".">Punto (19.500)</option><option value="esp">Espacio</option></select></div>
+      <div><label style="font-size:12px; color:#94a3b8;">Separador de decimales</label>
+        <select id="fDec" class="exc" onchange="cambio()"><option value=".">Punto (.)</option><option value=",">Coma (,)</option></select></div>
     </div>
     <label style="font-size:12px; color:#94a3b8; display:block; margin-top:8px;">Tamaño del precio</label>
     <input type="range" id="tamPrecio" min="50" max="200" value="100" oninput="cambio()">
@@ -16219,6 +16655,11 @@ $htmlEtiquetas = @'
       details.ex > summary { cursor:pointer; font-size:12px; font-weight:700; color:#7dd3fc; padding:8px 0; text-transform:uppercase; letter-spacing:.5px; }
       details.ex label.l { font-size:12px; color:#94a3b8; display:block; margin-top:6px; }
       details.ex textarea { width:100%; padding:8px; border-radius:6px; border:1px solid #334155; background:#0f172a; color:#e2e8f0; font-size:14px; }
+      .cr { display:grid; grid-template-columns:1fr 86px 112px; gap:6px; align-items:center; margin:3px 0; }
+      .cr select { padding:4px; font-size:12px; }
+      .et .zr { display:flex; width:100%; font-size:calc(var(--k) * 2.4mm); line-height:1.15; }
+      .et .zr span { flex:1; text-align:center; white-space:nowrap; overflow:hidden; }
+      .et .zr span.izq { text-align:left; } .et .zr span.der { text-align:right; }
       .et .ex1 { font-size:calc(var(--k) * 2.4mm); line-height:1.1; }
       .et .ex2 { font-size:calc(var(--k) * 3.2mm); font-weight:800; line-height:1.1; }
       #hojaPrev { display:grid; gap:1px; background:#475569; padding:1px; margin-top:6px; max-width:210px; }
@@ -16229,11 +16670,8 @@ $htmlEtiquetas = @'
       #msgCodigos { font-size:12px; color:#fbbf24; margin-top:6px; white-space:pre-wrap; }
     </style>
     <details class="ex" open><summary>Contenido extra</summary>
-      <label class="l">Texto libre en la etiqueta (opcional)</label>
+      <label class="l">Texto libre en la etiqueta (opcional; con el estilo «Oferta con asteriscos» es el título grande)</label>
       <input type="text" id="exTexto" class="exc" maxlength="60" placeholder="Ej.: Garantía 30 días" oninput="cambio()">
-      <label class="chk"><input type="checkbox" id="exFecha" class="exc" onchange="cambio()"> Mostrar la fecha de impresión</label>
-      <label class="chk"><input type="checkbox" id="exUM" class="exc" onchange="cambio()"> Unidad de medida (UM: PZS.) <small style="color:#64748b">AxisPOS</small></label>
-      <label class="chk"><input type="checkbox" id="exCod" class="exc" onchange="cambio()"> Línea «CÓDIGO: …» arriba del precio</label>
       <label class="l">Promoción (el precio grande no cambia)</label>
       <div class="fila">
         <select id="pTipo" class="exc" onchange="cambio()">
@@ -16481,25 +16919,27 @@ $htmlEtiquetas = @'
 
   function etiquetaHTML(p) {
     if (p.libre) return etiquetaLibreHTML(p);
-    var neg = $('negocio').value.trim();
+    var neg = $('negocio').value.trim(), pn = posC('neg'), pp = posC('nom');
     var s = '<div class="et" style="width:' + $('ancho').value + 'mm;height:' + $('alto').value + 'mm;--k:' + (($('escala').value || 100) / 100) + '">';
-    if ($('oNeg').checked && neg) s += '<div class="neg">' + esc(neg) + '</div>';
+    if ($('oNeg').checked && neg && pn.v === 'arriba') s += '<div class="neg"' + alHTML(pn.h) + '>' + esc(neg) + '</div>';
     s += extraHTML(p, 'arriba');
-    if ($('oNom').checked) s += '<div class="nom">' + esc(p.nombre) + '</div>';
+    if ($('oNom').checked && pp.v === 'arriba') s += '<div class="nom"' + alHTML(pp.h) + '>' + esc(p.nombre) + '</div>';
     s += extraHTML(p, 'datos');
-    var modo = $('modoPrecio').value, mon = $('moneda').value || '$';
+    var modo = $('modoPrecio').value;
     if ($('oPre').checked) {
-      s += '<div class="pre">' + mon + fmt(modo === 'transferencia' ? p.precio * 2 : p.precio) + '</div>';
-      if (modo === 'ambos') s += '<div class="tr">Transferencia: ' + mon + fmt(p.precio * 2) + '</div>';
+      s += '<div class="pre">' + esc(formatoPrecio(modo === 'transferencia' ? p.precio * 2 : p.precio)) + '</div>';
+      if (modo === 'ambos') s += '<div class="tr">Transferencia: ' + esc(formatoPrecio(p.precio * 2)) + '</div>';
     }
     s += extraHTML(p, 'abajo');
     if ($('oBc').checked && p.sku) s += '<div class="bc">' + barcodeSVG(String(p.sku)) + '</div>';
     if ($('oSk').checked && p.sku) s += '<div class="sk">' + esc(p.sku) + '</div>';
+    s += extraHTML(p, 'pie');
     return s + '</div>';
   }
 
   function pintarVista() {
     var out = [], n = 0;
+    try { leerCfgRaster(); } catch (e) {}
     listaImpresion().forEach(function (x) {
       for (var i = 0; i < x.cant; i++) { out.push(etiquetaHTML(x.p)); n++; }
     });
@@ -16533,7 +16973,8 @@ $htmlEtiquetas = @'
       empresa: $('negocio').value, moneda: $('moneda').value, decimales: $('decimales').value,
       verEmpresa: $('oNeg').checked, verPrecio: $('oPre').checked, verBarras: $('oBc').checked, verCodigo: $('oSk').checked,
       modoPrecio: $('modoPrecio').value, tamPrecio: clamp(parseInt($('tamPrecio').value, 10) || 100, 50, 200),
-      estilo: $('estilo').value, fuente: $('fuente').value, orient: $('orient').value
+      estilo: $('estilo').value, fuente: $('fuente').value, orient: $('orient').value,
+      verNombre: $('oNom').checked, miles: $('fMil').value, sepDec: $('fDec').value
     };
     return cfg;
   }
@@ -16571,7 +17012,9 @@ const ESTILOS = {
     minimal:        { padding: 1.2, marco: 'ninguno',  header: 'ninguno', precioBanner: false, alinear: 'izquierda', factorNombre: 0.12, factorPrecio: 0.28 },
     boutique:       { padding: 2.1, marco: 'simple',   header: 'linea',   precioBanner: false, alinear: 'centro',    factorNombre: 0.12, factorPrecio: 0.24 },
     pop:            { padding: 1.7, marco: 'grueso',   header: 'linea',   precioBanner: false, alinear: 'centro',    factorNombre: 0.13, factorPrecio: 0.29 },
-    industrial:     { padding: 1.6, marco: 'grueso',   header: 'banner',  precioBanner: false, alinear: 'centro',    factorNombre: 0.13, factorPrecio: 0.27 }
+    industrial:     { padding: 1.6, marco: 'grueso',   header: 'banner',  precioBanner: false, alinear: 'centro',    factorNombre: 0.13, factorPrecio: 0.27 },
+    asteriscos:     { padding: 1.4, marco: 'ninguno',  header: 'ninguno', precioBanner: false, alinear: 'centro',    factorNombre: 0.10, factorPrecio: 0.24, ast: true },
+    ticket:         { padding: 1.4, marco: 'filetes',  header: 'ninguno', precioBanner: false, alinear: 'centro',    factorNombre: 0.12, factorPrecio: 0.27 }
   };
 
 function parsePrecio(txt) {
@@ -16600,6 +17043,7 @@ function formatoPrecio(txt) {
     } else {
       cuerpo = Number.isInteger(n) ? String(n) : n.toFixed(2);
     }
+    cuerpo = sepNum(cuerpo);
     if (!mon) return cuerpo;
     return mon.length <= 2 ? mon + cuerpo : cuerpo + ' ' + mon;
   }
@@ -16678,7 +17122,7 @@ function trazarLineaPunteada(g, x, y, w, grosor) {
 function rasterEtiqueta(it) {
     if (it.libre) return rasterLibre(it);
     cfg._sc = 1; var rr = rasterEtiqueta0(it), exr = extrasDatos(it);
-    if (exr.texto || exr.promo || exr.um || exr.cod) { while (cfg._aH < Math.min(40, cfg.alto * DOTS_MM * 0.18) && cfg._sc > 0.55) { cfg._sc -= 0.07; rr = rasterEtiqueta0(it); } }
+    if (exr.texto || exr.promo || exr.titulo || hayZonas(exr)) { while (cfg._aH < Math.min(40, cfg.alto * DOTS_MM * 0.18) && cfg._sc > 0.55) { cfg._sc -= 0.07; rr = rasterEtiqueta0(it); } }
     cfg._sc = 1; return rr;
   }
   function rasterEtiqueta0(it) {
@@ -16712,6 +17156,8 @@ function rasterEtiqueta(it) {
       trazarRect(g, 0, 0, W, H, grosor);
       trazarRect(g, hueco, hueco, W - 2 * hueco, H - 2 * hueco, grosor);
       inset = hueco + grosor + Math.round(0.3 * D);
+    } else if (est.marco === 'filetes') {
+      g.fillRect(0, 0, W, 2); trazarLineaPunteada(g, 0, H - 3, W, 2); inset = 4;
     }
 
     const pad = Math.round(est.padding * D) + inset, inner = W - 2 * pad;
@@ -16732,35 +17178,40 @@ function rasterEtiqueta(it) {
 
     // Encabezado
     let y = pad;
-    if (cfg.verEmpresa && cfg.empresa.trim()) {
+    if (est.ast) y += filaAsteriscos(g, y, pad, inner, famBase, D);
+    const nPos = posC('neg'), hx = xAl(nPos.h, pad, inner, cx), svTA = g.textAlign;
+    g.textAlign = taAl(nPos.h, svTA);
+    if (cfg.verEmpresa && cfg.empresa.trim() && nPos.v === 'arriba') {
       const txt = cfg.empresa.trim().toUpperCase();
       if (est.header === 'banner') {
         const fs = ajustar1(txt, 'bold', clamp(hl * 0.075, 2.2, 3.5) * D, famBase, 8);
         const altoBanner = Math.round(fs * 1.7);
         g.fillRect(0, y - Math.round(0.4 * D), W, altoBanner);
         g.fillStyle = '#fff';
-        g.fillText(txt, cx, y + Math.round((altoBanner - fs) / 2) - Math.round(0.4 * D));
+        g.fillText(txt, hx, y + Math.round((altoBanner - fs) / 2) - Math.round(0.4 * D));
         g.fillStyle = '#000';
         y += altoBanner + 4;
       } else if (est.header === 'lineas') {
         g.fillRect(pad, y, inner, 2); y += 5;
         const fs = ajustar1(txt, 'bold', clamp(hl * 0.075, 2.2, 3.5) * D, famBase, 8);
-        g.fillText(txt, cx, y);
+        g.fillText(txt, hx, y);
         y += Math.round(fs * 1.15) + 3;
         g.fillRect(pad, y, inner, 2); y += 7;
       } else {
         const fs = ajustar1(txt, 'bold', clamp(hl * 0.075, 2.2, 3.5) * D, famBase, 8);
-        g.fillText(txt, cx, y);
+        g.fillText(txt, hx, y);
         y += Math.round(fs * 1.15) + 3;
         if (est.header === 'linea') { g.fillRect(pad, y, inner, 2); y += 7; }
         else if (est.header === 'punteada') { trazarLineaPunteada(g, pad, y, inner, 2); y += 7; }
         else { y += 3; }
       }
     }
-
+    g.textAlign = svTA;
     y = extrasRasterArriba(g, it, y, pad, inner, cx, famBase, D);
     // Parte inferior (de abajo hacia arriba): código en texto, barras, precio
     let yb = H - pad;
+    if (est.ast) yb -= filaAsteriscos0(g, yb, pad, inner, famBase, D);
+    yb = zonaRaster(g, it, 'abajo', yb, pad, inner, famBase, D);
     const conBarras = cfg.verBarras && it.codigo, conCodigo = cfg.verCodigo && it.codigo;
     if (conCodigo) {
       const fs = ajustar1(it.codigo, 'normal', 2.4 * D, 'Consolas, "Courier New", monospace', 9);
@@ -16803,10 +17254,10 @@ function rasterEtiqueta(it) {
       g.fillText(st, cx, yb);
     }
 
-    yb = datosRasterAbajo(g, it, yb, cx, inner, famBase, D);
+    yb = zonaRaster(g, it, 'arriba', yb, pad, inner, famBase, D);
     // Nombre en el espacio que queda
     const aH = yb - y - 4; cfg._aH = aH;
-    if (aH > 8) {
+    if (aH > 8 && cfg.verNombre && posC('nom').v === 'arriba') {
       const fNombre = cfg.verPrecio ? est.factorNombre : est.factorNombre * 1.8;
       let fs = clamp(hl * fNombre, 3, cfg.verPrecio ? 6 : 10) * D, lineas = [];
       const nombre = it.nombre || 'Producto';
@@ -16818,7 +17269,9 @@ function rasterEtiqueta(it) {
       }
       lineas = lineas.slice(0, Math.max(1, Math.floor(aH / (fs * 1.1))));
       let ty = y + Math.max(0, (aH - lineas.length * fs * 1.1) / 2);
-      lineas.forEach(l => { g.fillText(l, cx, ty); ty += fs * 1.1; });
+      const nmP = posC('nom'), svN = g.textAlign; g.textAlign = taAl(nmP.h, svN);
+      lineas.forEach(l => { g.fillText(l, xAl(nmP.h, pad, inner, cx), ty); ty += fs * 1.1; });
+      g.textAlign = svN;
     }
 
     // Si es vertical, se gira el dibujo 90 grados antes de pasarlo a puntos
@@ -16986,14 +17439,37 @@ function rasterEtiqueta(it) {
 
   // ---- Extras: texto libre, fecha, promocion ----
   function nEx(v) { return fmt(v); }
+  // ---- Contenido de la etiqueta: cada dato con su posición (V: arriba/abajo del precio, H: izquierda/centro/derecha) ----
+  var CONT = [
+    { k: 'neg', on: 'oNeg', v: 'nV', h: 'nH' }, { k: 'nom', on: 'oNom', v: 'pV', h: 'pH' },
+    { k: 'um', on: 'exUM', v: 'umV', h: 'umH' }, { k: 'cu', on: 'exCU', v: 'cuV', h: 'cuH' },
+    { k: 'cod', on: 'exCod', v: 'codV', h: 'codH' }, { k: 'fpr', on: 'exFProd', v: 'fpV', h: 'fpH' }, { k: 'fim', on: 'exFecha', v: 'fiV', h: 'fiH' }
+  ];
+  function posC(k) {
+    var c = CONT.filter(function (x) { return x.k === k; })[0];
+    return { v: $(c.v).value === 'abajo' ? 'abajo' : 'arriba', h: $(c.h).value || 'cen' };
+  }
+  function estiloAst() { var e = ESTILOS[$('estilo').value]; return !!(e && e.ast); }
   function extrasDatos(it) {
-    var r = { texto: '', promo: null, um: '', cod: '' }, partes = [], t = ($('exTexto').value || '').trim();
-    if ($('exUM').checked && it.um) r.um = 'UM: ' + String(it.um).toUpperCase();
-    var cd = it.codigo || it.sku || '';
-    if ($('exCod').checked && cd) r.cod = 'CÓDIGO: ' + cd;
-    if (t) partes.push(t);
-    if ($('exFecha').checked) partes.push(new Date().toLocaleDateString('es-ES'));
-    r.texto = partes.join(' · ');
+    var r = { texto: '', titulo: '', promo: null, zonas: { arriba: [], abajo: [] } };
+    var t = ($('exTexto').value || '').trim();
+    if (estiloAst()) r.titulo = (t || 'OFERTA').toUpperCase(); else r.texto = t;
+    var cd = it.codigo || it.sku || '', fp = ($('exFProdVal').value || '').trim();
+    var lin = {
+      neg: $('oNeg').checked && ($('negocio').value || '').trim() ? ($('negocio').value || '').trim().toUpperCase() : '',
+      nom: $('oNom').checked && it.nombre ? String(it.nombre) : '',
+      um: $('exUM').checked && it.um ? 'UM: ' + String(it.um).toUpperCase() : '',
+      cu: $('exCU').checked ? 'C/U' : '',
+      cod: $('exCod').checked && cd ? 'CODIGO: ' + cd : '',
+      fpr: $('exFProd').checked && fp ? 'PROD: ' + fp : '',
+      fim: $('exFecha').checked ? 'FECHA: ' + new Date().toLocaleDateString('es-ES') : ''
+    };
+    CONT.forEach(function (c) {
+      if (!lin[c.k]) return;
+      var p = posC(c.k);
+      if ((c.k === 'neg' || c.k === 'nom') && p.v === 'arriba') return; // esos dos, arriba, se dibujan como siempre
+      r.zonas[p.v].push({ k: c.k, txt: lin[c.k], h: p.h === 'auto' ? 'cen' : p.h, b: c.k === 'cu' || c.k === 'neg' || c.k === 'nom' });
+    });
     var tipo = $('pTipo').value, txt = ($('pTexto').value || '').trim(), val = parseFloat(String($('pValor').value).replace(',', '.')) || 0;
     if (tipo !== 'ninguna' && txt) {
       var n = parsePrecio(it.precio), mon = $('moneda').value || '$', v2 = '';
@@ -17005,9 +17481,22 @@ function rasterEtiqueta(it) {
     }
     return r;
   }
+  function hayZonas(e) { return e.zonas.arriba.length + e.zonas.abajo.length > 0; }
+  function filasZona(lin) {
+    var c = { izq: [], cen: [], der: [] };
+    lin.forEach(function (x) { (c[x.h] || c.cen).push(x); });
+    var n = Math.max(c.izq.length, c.cen.length, c.der.length), out = [];
+    for (var i = 0; i < n; i++) out.push({ izq: c.izq[i], cen: c.cen[i], der: c.der[i] });
+    return out;
+  }
+  function zonaHTML(lin) {
+    return filasZona(lin).map(function (r) { return '<div class="zr">' + ['izq', 'cen', 'der'].map(function (h) { return '<span class="' + h + '">' + (r[h] ? esc(r[h].txt) : '') + '</span>'; }).join('') + '</div>'; }).join('');
+  }
+  function alHTML(h) { return h === 'izq' ? ' style="align-self:stretch;text-align:left"' : (h === 'der' ? ' style="align-self:stretch;text-align:right"' : (h === 'cen' ? ' style="align-self:stretch;text-align:center"' : '')); }
   function extraHTML(p, donde) {
     var e = extrasDatos(p), s = '';
-    if (donde === 'datos') { if (e.um) s += '<div class="ex1">' + esc(e.um) + '</div>'; if (e.cod) s += '<div class="ex1">' + esc(e.cod) + '</div>'; return s; }
+    if (donde === 'datos') return zonaHTML(e.zonas.arriba);
+    if (donde === 'pie') return zonaHTML(e.zonas.abajo);
     if (donde === 'arriba') {
       if (e.promo && e.promo.donde === 'arriba') s += '<div class="ex1">' + esc(e.promo.l1) + '</div>' + (e.promo.l2 ? '<div class="ex2">' + esc(e.promo.l2) + '</div>' : '');
       return s;
@@ -17016,6 +17505,79 @@ function rasterEtiqueta(it) {
     if (e.promo && e.promo.donde === 'precio') s += '<div class="ex1">' + esc(e.promo.l1) + '</div>' + (e.promo.l2 ? '<div class="ex2">' + esc(e.promo.l2) + '</div>' : '');
     return s;
   }
+  // ---- Térmica (raster) ----
+  function xAl(h, pad, inner, def) { return h === 'izq' ? pad : (h === 'der' ? pad + inner : (h === 'cen' ? pad + inner / 2 : def)); }
+  function taAl(h, def) { return h === 'izq' ? 'left' : (h === 'der' ? 'right' : (h === 'cen' ? 'center' : def)); }
+  function filaAsteriscos0(g, yb, pad, inner, famBase, D) { var h = filaAsteriscos(g, yb - Math.round(2.4 * D * (cfg._sc || 1) * 1.1), pad, inner, famBase, D); return h; }
+  function filaAsteriscos(g, y, pad, inner, famBase, D) {
+    var px = Math.round(2.4 * D * (cfg._sc || 1)); g.font = 'bold ' + px + 'px ' + famBase;
+    var cw = g.measureText('*').width || px * 0.5, n = Math.max(3, Math.floor(inner / cw)), sv = g.textAlign;
+    g.textAlign = 'center'; g.fillText(new Array(n + 1).join('*'), pad + inner / 2, y); g.textAlign = sv;
+    return Math.round(px * 1.1);
+  }
+  function extrasRasterArriba(g, it, y, pad, inner, cx, famBase, D) {
+    var e = extrasDatos(it), sc0 = cfg._sc || 1;
+    if (e.titulo) {
+      var px = Math.round(clamp(cfg.alto * 0.2, 4, 12) * D * sc0);
+      while (px > 12) { g.font = 'bold ' + px + 'px ' + famBase; if (g.measureText(e.titulo).width <= inner) break; px -= 1; }
+      g.font = 'bold ' + px + 'px ' + famBase; var sv = g.textAlign; g.textAlign = 'center'; g.fillText(e.titulo, pad + inner / 2, y); g.textAlign = sv; y += Math.round(px * 1.1) + 2;
+    }
+    if (e.promo && e.promo.donde === 'arriba') {
+      g.font = 'normal ' + Math.round(2.4 * D * sc0) + 'px ' + famBase; g.fillText(e.promo.l1, cx, y); y += Math.round(2.4 * D * sc0 * 1.15);
+      if (e.promo.l2) { g.font = 'bold ' + Math.round(3.4 * D * sc0) + 'px ' + famBase; g.fillText(e.promo.l2, cx, y); y += Math.round(3.4 * D * sc0 * 1.15); }
+      y += 2;
+    }
+    return y;
+  }
+  function zonaRaster(g, it, zona, yb, pad, inner, famBase, D) {
+    var rows = filasZona(extrasDatos(it).zonas[zona]); if (!rows.length) return yb;
+    var sv = g.textAlign;
+    for (var i = rows.length - 1; i >= 0; i--) {
+      var r = rows[i], cols = ['izq', 'cen', 'der'].filter(function (h) { return r[h]; });
+      var mm = cols.some(function (h) { return r[h].k === 'cu'; }) ? 3.6 : 2.6, px = Math.round(mm * D * (cfg._sc || 1));
+      for (;;) {
+        var tot = 0; cols.forEach(function (h) { g.font = (r[h].b ? 'bold ' : 'normal ') + px + 'px ' + famBase; tot += g.measureText(r[h].txt).width; });
+        if (tot + (cols.length - 1) * 8 <= inner || px <= 8) break; px -= 1;
+      }
+      yb -= Math.round(px * 1.15);
+      cols.forEach(function (h) { g.font = (r[h].b ? 'bold ' : 'normal ') + px + 'px ' + famBase; g.textAlign = taAl(h); g.fillText(r[h].txt, xAl(h, pad, inner), yb); });
+    }
+    g.textAlign = sv; return yb - 3;
+  }
+  // ---- PDF ----
+  function filaAstPdf(d, x0, y, w, sc) {
+    var mm = 2.4 * sc, cw = TTPdf.ancho('*', mm * PT, true) || mm * 0.5 * PT, n = Math.max(3, Math.floor(w * PT / cw));
+    d.texto(new Array(n + 1).join('*'), x0 + w / 2, y + mm * 0.85, mm * PT, true, 'c'); return mm * 1.1;
+  }
+  function zonaPdf(d, ex, zona, yb, x0, pad, inner, sc) {
+    var rows = filasZona(ex.zonas[zona]);
+    for (var i = rows.length - 1; i >= 0; i--) {
+      var r = rows[i], cols = ['izq', 'cen', 'der'].filter(function (h) { return r[h]; });
+      var mm = (cols.some(function (h) { return r[h].k === 'cu'; }) ? 3.6 : 2.6) * sc;
+      for (;;) { var tot = 0; cols.forEach(function (h) { tot += TTPdf.ancho(r[h].txt, mm * PT, r[h].b); }); if (tot + (cols.length - 1) * 2 * PT <= inner * PT || mm <= 1.3) break; mm -= 0.1; }
+      yb -= mm * 1.15;
+      cols.forEach(function (h) { d.texto(r[h].txt, h === 'izq' ? x0 + pad : (h === 'der' ? x0 + pad + inner : x0 + pad + inner / 2), yb + mm * 0.85, mm * PT, r[h].b, h === 'izq' ? 'l' : (h === 'der' ? 'r' : 'c')); });
+    }
+    return yb;
+  }
+  // ---- Formato de número (miles y decimales) ----
+  function sepNum(c) {
+    var m = cfg.miles || '', dsep = cfg.sepDec || '.';
+    if (!m && dsep === '.') return c;
+    var p = String(c).split('.'); if (!/^-?\d+$/.test(p[0])) return c;
+    if (m) p[0] = p[0].replace(/\B(?=(\d{3})+(?!\d))/g, m === 'esp' ? ' ' : m);
+    return p.length > 1 ? p[0] + dsep + p[1] : p[0];
+  }
+  // ---- Modelos listos (se aplican como cualquier etiqueta guardada) ----
+  var MODELO_BASE = { oNeg: false, oNom: false, oPre: true, oBc: false, oSk: false, exUM: false, exCU: false, exCod: false, exFProd: false, exFecha: false, exTexto: '', pTipo: 'ninguna', lbOn: false,
+    nV: 'arriba', nH: 'auto', pV: 'arriba', pH: 'auto', umV: 'arriba', umH: 'cen', cuV: 'abajo', cuH: 'cen', codV: 'arriba', codH: 'cen', fpV: 'abajo', fpH: 'izq', fiV: 'abajo', fiH: 'izq', modoPrecio: 'efectivo' };
+  var MODELOS = [
+    { nombre: 'Modelo: Oferta con asteriscos', datos: { estilo: 'asteriscos', exTexto: 'OFERTA', oNom: true, exCU: true, decimales: '0', fMil: '', fDec: '.' } },
+    { nombre: 'Modelo: Ticket, código arriba', datos: { estilo: 'ticket', exCod: true, oBc: true, decimales: '2', fMil: ',', fDec: '.' } },
+    { nombre: 'Modelo: Ticket, pie con datos', datos: { estilo: 'ticket', exUM: true, umV: 'abajo', umH: 'izq', exFecha: true, fiV: 'abajo', fiH: 'izq', exCod: true, codV: 'abajo', codH: 'der', oBc: true, decimales: '0', fMil: ',', fDec: '.' } }
+  ].map(function (m) { var d = {}; Object.keys(MODELO_BASE).forEach(function (k) { d[k] = MODELO_BASE[k]; }); Object.keys(m.datos).forEach(function (k) { d[k] = m.datos[k]; }); return { nombre: m.nombre, datos: d, modelo: true }; });
+  function modeloPorNombre(n) { return MODELOS.filter(function (m) { return m.nombre === n; })[0]; }
+
   // ---- Etiqueta libre ----
   function libreActiva() { return !!($('lbOn') && $('lbOn').checked); }
   function libreCopias() { return Math.max(1, Math.min(200, parseInt($('lbCopias').value, 10) || 1)); }
@@ -17081,25 +17643,6 @@ function rasterEtiqueta(it) {
     return cierreRaster(cv, g, W, H);
   }
   // ---- Extras en la termica (raster) ----
-  function extrasRasterArriba(g, it, y, pad, inner, cx, famBase, D) {
-    var e = extrasDatos(it);
-    if (e.promo && e.promo.donde === 'arriba') {
-      var sc0 = cfg._sc || 1; g.font = 'normal ' + Math.round(2.4 * D * sc0) + 'px ' + famBase; g.fillText(e.promo.l1, cx, y); y += Math.round(2.4 * D * sc0 * 1.15);
-      if (e.promo.l2) { g.font = 'bold ' + Math.round(3.4 * D * sc0) + 'px ' + famBase; g.fillText(e.promo.l2, cx, y); y += Math.round(3.4 * D * sc0 * 1.15); }
-      y += 2;
-    }
-    return y;
-  }
-  function datosRasterAbajo(g, it, yb, cx, inner, famBase, D) {
-    var e = extrasDatos(it);
-    [e.cod, e.um].forEach(function (txt) {
-      if (!txt) return;
-      var px = Math.round(2.6 * D * (cfg._sc || 1));
-      while (px > 8) { g.font = 'normal ' + px + 'px ' + famBase; if (g.measureText(txt).width <= inner) break; px -= 1; }
-      yb -= Math.round(px * 1.15); g.fillText(txt, cx, yb);
-    });
-    return yb;
-  }
   function extrasRasterAbajo(g, it, yb, cx, inner, famBase, D) {
     var e = extrasDatos(it);
     function linea(txt, peso, mm) {
@@ -17127,30 +17670,36 @@ function rasterEtiqueta(it) {
     if (est.marco === 'simple' || est.marco === 'grueso') { var gz = est.marco === 'grueso' ? 0.6 : 0.3; d.rect(x0, y0, w, h, 's', gz); inset = gz + 0.5; }
     else if (est.marco === 'punteado') { d.rect(x0, y0, w, h, 's', 0.35, [0.8, 0.8]); inset = 0.85; }
     else if (est.marco === 'doble') { d.rect(x0, y0, w, h, 's', 0.22); d.rect(x0 + 0.9, y0 + 0.9, w - 1.8, h - 1.8, 's', 0.22); inset = 1.42; }
+    else if (est.marco === 'filetes') { d.linea(x0, y0 + 0.1, x0 + w, y0 + 0.1, 0.25); d.linea(x0, y0 + h - 0.1, x0 + w, y0 + h - 0.1, 0.25, [0.8, 0.8]); inset = 0.6; }
     var pad = est.padding + inset, inner = w - 2 * pad, cx = izq ? x0 + pad : x0 + w / 2, y = y0 + pad;
-    var ex = extrasDatos(it);
-    if (C.verEmpresa && C.empresa.trim()) {
+    var ex = extrasDatos(it), nP = posC('neg'), nmP = posC('nom');
+    if (est.ast) y += filaAstPdf(d, x0 + pad, y, inner, sc);
+    var nx = nP.h === 'izq' ? x0 + pad : (nP.h === 'der' ? x0 + pad + inner : (nP.h === 'cen' ? x0 + pad + inner / 2 : cx)), nal = nP.h === 'izq' ? 'l' : (nP.h === 'der' ? 'r' : (nP.h === 'cen' ? 'c' : al));
+    if (C.verEmpresa && C.empresa.trim() && nP.v === 'arriba') {
       var txt = C.empresa.trim().toUpperCase(), fs = ajusteMm(txt, true, clamp(h * 0.075, 2.2, 3.5), 1.4, inner);
       if (est.header === 'banner') {
         var bh = fs * 1.7; d.rect(x0, y - 0.4, w, bh, 'f', 0.1, null, 0);
-        d.texto(txt, cx, y - 0.4 + bh / 2 + fs * 0.33, fs * PT, true, al, 1); y += bh + 0.4;
+        d.texto(txt, nx, y - 0.4 + bh / 2 + fs * 0.33, fs * PT, true, nal, 1); y += bh + 0.4;
       } else if (est.header === 'lineas') {
         d.linea(x0 + pad, y, x0 + pad + inner, y, 0.25); y += 0.7;
-        d.texto(txt, cx, y + fs * 0.85, fs * PT, true, al); y += fs * 1.15 + 0.4;
+        d.texto(txt, nx, y + fs * 0.85, fs * PT, true, nal); y += fs * 1.15 + 0.4;
         d.linea(x0 + pad, y, x0 + pad + inner, y, 0.25); y += 0.9;
       } else {
-        d.texto(txt, cx, y + fs * 0.85, fs * PT, true, al); y += fs * 1.15 + 0.4;
+        d.texto(txt, nx, y + fs * 0.85, fs * PT, true, nal); y += fs * 1.15 + 0.4;
         if (est.header === 'linea') { d.linea(x0 + pad, y, x0 + pad + inner, y, 0.25); y += 0.9; }
         else if (est.header === 'punteada') { d.linea(x0 + pad, y, x0 + pad + inner, y, 0.25, [0.6, 0.6]); y += 0.9; }
         else y += 0.4;
       }
     }
+    if (ex.titulo) { var ts = ajusteMm(ex.titulo, true, clamp(h * 0.2, 4, 12) * sc, 3, inner); d.texto(ex.titulo, x0 + pad + inner / 2, y + ts * 0.85, ts * PT, true, 'c'); y += ts * 1.1 + 0.3; }
     if (ex.promo && ex.promo.donde === 'arriba') {
       var a1 = ajusteMm(ex.promo.l1, false, 2.4 * sc, 1.2, inner); d.texto(ex.promo.l1, cx, y + a1 * 0.85, a1 * PT, false, al); y += a1 * 1.15;
       if (ex.promo.l2) { var a2 = ajusteMm(ex.promo.l2, true, 3.4 * sc, 1.4, inner); d.texto(ex.promo.l2, cx, y + a2 * 0.85, a2 * PT, true, al); y += a2 * 1.15; }
       y += 0.3;
     }
     var yb = y0 + h - pad;
+    if (est.ast) yb -= filaAstPdf(d, x0 + pad, yb - 2.4 * sc * 1.1, inner, sc);
+    yb = zonaPdf(d, ex, 'abajo', yb, x0, pad, inner, sc);
     if (C.verCodigo && it.codigo) { var cs = ajusteMm(it.codigo, false, 2.4 * sc, 1.3, inner); yb -= cs * 1.1; d.texto(it.codigo, cx, yb + cs * 0.85, cs * PT, false, al); }
     if (C.verBarras && it.codigo) {
       var m = barrasDe(it.codigo, tipoBarrasSel());
@@ -17168,15 +17717,15 @@ function rasterEtiqueta(it) {
       else { yb -= ps * 1.05; d.texto(ptxt, cx, yb + ps * 0.85, ps * PT, true, al); }
       if (C.modoPrecio === 'ambos') lineaInf('Transf. ' + formatoPrecio(parsePrecio(it.precio) * 2), false, 2.6, 1.5);
     }
-    if (ex.cod) lineaInf(ex.cod, false, 2.6, 1.4);
-    if (ex.um) lineaInf(ex.um, false, 2.6, 1.4);
+    yb = zonaPdf(d, ex, 'arriba', yb, x0, pad, inner, sc);
     aH = yb - y - 0.5;
-    if (aH > 2 && d !== NULLD) {
+    if (aH > 2 && d !== NULLD && C.verNombre && nmP.v === 'arriba') {
       var fn = C.verPrecio ? est.factorNombre : est.factorNombre * 1.8, fs2 = clamp(h * fn, 3, C.verPrecio ? 6 : 10), lin, nombre = it.nombre || 'Producto';
       for (;;) { lin = TTPdf.partir(nombre, inner, fs2 * PT, true); if (lin.length * fs2 * 1.1 <= aH || fs2 <= 1.8) break; fs2 -= 0.1; }
       lin = lin.slice(0, Math.max(1, Math.floor(aH / (fs2 * 1.1))));
       var ty = y + Math.max(0, (aH - lin.length * fs2 * 1.1) / 2);
-      lin.forEach(function (t) { d.texto(t, cx, ty + fs2 * 0.85, fs2 * PT, true, al); ty += fs2 * 1.1; });
+      var mx = nmP.h === 'izq' ? x0 + pad : (nmP.h === 'der' ? x0 + pad + inner : (nmP.h === 'cen' ? x0 + pad + inner / 2 : cx)), mal = nmP.h === 'izq' ? 'l' : (nmP.h === 'der' ? 'r' : (nmP.h === 'cen' ? 'c' : al));
+      lin.forEach(function (t) { d.texto(t, mx, ty + fs2 * 0.85, fs2 * PT, true, mal); ty += fs2 * 1.1; });
     }
     return aH;
   }
@@ -17389,10 +17938,11 @@ function rasterEtiqueta(it) {
   function meMsg(t, ok) { var m = $('msgMe'); m.style.color = ok === false ? '#fca5a5' : '#86efac'; m.textContent = t; }
   function mePintar() {
     var s = $('meLista'), ant = s.value;
-    s.innerHTML = datosSrv.plantillas.length ? datosSrv.plantillas.map(function (p) { return '<option value="' + esc(p.nombre) + '">' + (p.nombre === datosSrv.predeterminada ? '★ ' : '') + esc(p.nombre) + '</option>'; }).join('') : '<option value="">(aún no hay ninguna)</option>';
+    s.innerHTML = '<optgroup label="Modelos listos">' + MODELOS.map(function (m) { return '<option value="' + esc(m.nombre) + '">' + esc(m.nombre) + '</option>'; }).join('') + '</optgroup>' +
+      (datosSrv.plantillas.length ? '<optgroup label="Mis etiquetas">' + datosSrv.plantillas.map(function (p) { return '<option value="' + esc(p.nombre) + '">' + (p.nombre === datosSrv.predeterminada ? '★ ' : '') + esc(p.nombre) + '</option>'; }).join('') + '</optgroup>' : '');
     if (ant) s.value = ant;
   }
-  function meElegida() { if ($('meLista').value) $('meNombre').value = $('meLista').value; }
+  function meElegida() { var v = $('meLista').value; if (v) $('meNombre').value = modeloPorNombre(v) ? v.replace(/^Modelo: /, '') : v; }
   async function meGuardar() {
     var n = $('meNombre').value.trim();
     if (!n) { meMsg('Escribe un nombre.', false); return; }
@@ -17403,18 +17953,20 @@ function rasterEtiqueta(it) {
     await guardarDatosSrv(); mePintar(); $('meLista').value = n; meMsg('Guardada: ' + n);
   }
   function meUsar() {
-    var p = datosSrv.plantillas.find(function (x) { return x.nombre === $('meLista').value; });
+    var p = modeloPorNombre($('meLista').value) || datosSrv.plantillas.find(function (x) { return x.nombre === $('meLista').value; });
     if (!p) { meMsg('Elige una de la lista.', false); return; }
     aplicarDiseno(p.datos); meMsg('Puesta: ' + p.nombre);
   }
   async function mePred() {
     var n = $('meLista').value; if (!n) { meMsg('Elige una de la lista.', false); return; }
+    if (modeloPorNombre(n)) { meMsg('Un modelo no se marca como predeterminado: úsalo, ajústalo y guárdalo con tu nombre.', false); return; }
     datosSrv.predeterminada = (datosSrv.predeterminada === n) ? '' : n;
     await guardarDatosSrv(); mePintar(); $('meLista').value = n;
     meMsg(datosSrv.predeterminada ? 'Predeterminada: ' + n : 'Ya no hay predeterminada.');
   }
   async function meBorrar() {
     var n = $('meLista').value; if (!n) return;
+    if (modeloPorNombre(n)) { meMsg('Los modelos listos no se borran.', false); return; }
     if (!confirm('¿Borrar "' + n + '"? No se puede deshacer.')) return;
     datosSrv.plantillas = datosSrv.plantillas.filter(function (p) { return p.nombre !== n; });
     if (datosSrv.predeterminada === n) datosSrv.predeterminada = '';
@@ -19830,27 +20382,27 @@ if (MODO !== 'vendedor') {
 }
 function arrancar() {
   if (MODO === 'vendedor') return;
-  if (MODO === 'pc') {
-    api('/api/instalacion').then(function (r) {
-      if (!r.ok) { splash(function () {}); return; }
-      var info = r.d; if (info.negocio && info.negocio.nombre) NEGOCIO = info.negocio.nombre;
+  if (MODO === 'etiquetas') {
+    var fab = document.createElement('button'); fab.className = 'ttx-fab'; fab.type = 'button'; fab.textContent = '? Ayuda (F1)'; fab.onclick = function () { TTAyuda.abrir(); }; document.body.appendChild(fab);
+  }
+  if (MODO !== 'pc' && MODO !== 'etiquetas') return;
+  // La pantalla de inicio y la bienvenida salen UNA sola vez: la primera vez que se abre y sin nada configurado.
+  // Después (o si ya había configuración de antes) no vuelven a salir; quedan en Ayuda y en «Acerca de».
+  api('/api/instalacion').then(function (r) {
+    if (!r.ok) return;
+    var info = r.d; if (info.negocio && info.negocio.nombre) NEGOCIO = info.negocio.nombre;
+    if (info.bienvenidaVista) return;
+    if (info.configurado) { api('/api/instalacion/completar', { bienvenida: true }); return; }
+    api('/api/licencia').then(function (rl) {
+      info.licencia = rl.d;
       splash(function () {
-        if (info.bienvenidaVista && info.configurado) return;
         bienvenida(info, function () {
           api('/api/instalacion/completar', { bienvenida: true });
-          if (!info.configurado) TTAsistente.abrir();
+          if (MODO === 'pc') TTAsistente.abrir();
         });
       });
     });
-  } else if (MODO === 'etiquetas') {
-    var fab = document.createElement('button'); fab.className = 'ttx-fab'; fab.type = 'button'; fab.textContent = '? Ayuda (F1)'; fab.onclick = function () { TTAyuda.abrir(); }; document.body.appendChild(fab);
-    api('/api/licencia').then(function (r) {
-      splash(function () {
-        if (leerLS('ttx_bienv_etq') === '1') return;
-        bienvenida({ licencia: r.d }, function () { guardarLS('ttx_bienv_etq', '1'); });
-      });
-    });
-  }
+  });
 }
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', arrancar); else arrancar();
 })();
@@ -20450,6 +21002,7 @@ if (@($ips).Count -gt 0) {
 Write-Host " Panel en esta PC -> http://localhost:$port/"
 Write-Host " Impresora configurada: $nombreImpresora"
 Aplicar-OrigenDatos -Inicio
+if ($global:configAxis.activo) { try { Iniciar-HiloAxis } catch { Write-Host "Aviso: no se pudo iniciar el hilo de AxisPOS ($_); se lee directo." } }
 Revisar-CatalogoAxis -Forzar
 if ($global:configAxis.activo -and [bool]$global:configAxis.cerrarPedidosAuto) { Write-Host " Cierre automatico: los pedidos pendientes se cierran solos cuando AxisPOS registra la misma venta." }
 if ($global:catalogoInfo.cargado) {
@@ -20501,6 +21054,8 @@ while ($listener.IsListening) {
     $path = $request.Url.AbsolutePath
     $method = $request.HttpMethod
     $origen = $request.RemoteEndPoint
+    $swReq = [System.Diagnostics.Stopwatch]::StartNew()
+    $msMant = 0.0
     # ---- CORS: solo para la app APK del vendedor (su origen es http://localhost) ----
     try {
         $orig = [string]$request.Headers["Origin"]
@@ -20535,15 +21090,18 @@ while ($listener.IsListening) {
         continue
     }
 
-    Revisar-CambioCatalogo
-    Revisar-CatalogoAxis
-    Revisar-VentasAxis
-    Revisar-BorradoresAxis
-    Reintentar-ConciliacionDiferidos
-    Revisar-TareasPedidos
+    $swT = [System.Diagnostics.Stopwatch]::StartNew()
+    Revisar-CambioCatalogo; Registrar-Tiempo 'tarea:CambioCatalogo(Excel)' $swT.ElapsedMilliseconds; $swT.Restart()
+    Revisar-CatalogoAxis; Registrar-Tiempo 'tarea:CatalogoAxis' $swT.ElapsedMilliseconds; $swT.Restart()
+    Revisar-StockAxis; Registrar-Tiempo 'tarea:StockAxis' $swT.ElapsedMilliseconds; $swT.Restart()
+    Revisar-VentasAxis; Registrar-Tiempo 'tarea:VentasAxis' $swT.ElapsedMilliseconds; $swT.Restart()
+    Revisar-BorradoresAxis; Registrar-Tiempo 'tarea:BorradoresAxis' $swT.ElapsedMilliseconds; $swT.Restart()
+    Reintentar-ConciliacionDiferidos; Registrar-Tiempo 'tarea:ConciliacionDiferidos' $swT.ElapsedMilliseconds; $swT.Restart()
+    Revisar-TareasPedidos; Registrar-Tiempo 'tarea:TareasPedidos' $swT.ElapsedMilliseconds
+    $msMant = $swReq.ElapsedMilliseconds
 
     # Las consultas de sincronizacion del Gestor de Almacenes (cada ~10 s por telefono) no se anotan en pantalla para no llenar la consola.
-    if (-not ($method -eq "GET" -and ($path.StartsWith("/api/almacen/") -or $path -eq "/api/fotos/skus"))) {
+    if (-not ($method -eq "GET" -and ($path.StartsWith("/api/almacen/") -or $path -eq "/api/fotos/skus" -or $path -eq "/api/catalogo/version"))) {
         Write-Host "[$((Get-Date).ToString('HH:mm:ss'))] $method $path  <- $origen"
     }
 
@@ -21068,10 +21626,27 @@ while ($listener.IsListening) {
                 }
             }
 
+        } elseif ($method -eq "GET" -and $path -eq "/api/tiempos") {
+            if (-not (Es-PeticionPC $request)) {
+                Enviar-Json $context @{ ok = $false; error = "Solo desde la PC." } 403
+            } else {
+                if ([string]$request.QueryString["reiniciar"] -eq "1") { $global:tiempos = @{}; $global:tiemposDesde = Get-Date }
+                Enviar-Respuesta -Context $context -Body ((Resumen-Tiempos) | ConvertTo-Json -Depth 6) -ContentType "application/json; charset=utf-8"
+            }
+
+        } elseif ($method -eq "GET" -and $path -eq "/api/catalogo/version") {
+            Enviar-Respuesta -Context $context -Body ('{"v":"' + (Obtener-FirmaCatalogo) + '"}') -ContentType "application/json; charset=utf-8"
+
         } elseif ($method -eq "GET" -and $path -eq "/api/catalogo") {
-            $json = if ($global:catalogo.Count -eq 0) { "[]" } else {
-                $j = $global:catalogo | ConvertTo-Json -Depth 6
-                if ($global:catalogo.Count -eq 1) { "[" + $j + "]" } else { $j }
+            $firmaCat = Obtener-FirmaCatalogo
+            if (($global:catalogoJsonCache.f -eq $firmaCat) -and $global:catalogoJsonCache.j) {
+                $json = [string]$global:catalogoJsonCache.j
+            } else {
+                $json = if ($global:catalogo.Count -eq 0) { "[]" } else {
+                    $j = $global:catalogo | ConvertTo-Json -Depth 6
+                    if ($global:catalogo.Count -eq 1) { "[" + $j + "]" } else { $j }
+                }
+                $global:catalogoJsonCache = @{ f = $firmaCat; j = $json }
             }
             Enviar-Respuesta -Context $context -Body $json -ContentType "application/json; charset=utf-8"
 
@@ -23394,6 +23969,7 @@ while ($listener.IsListening) {
             Enviar-Respuesta -Context $context -Body (@{ ok = $false; error = "$_" } | ConvertTo-Json) -ContentType "application/json; charset=utf-8" -StatusCode 500
         } catch {}
     }
+    try { Registrar-Tiempo ('ruta: ' + $method + ' ' + (Normalizar-RutaTiempo $path)) ($swReq.ElapsedMilliseconds - $msMant) } catch {}
 }
 
 $listener.Stop()
