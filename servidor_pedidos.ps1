@@ -1873,7 +1873,33 @@ $global:axisHiloGuion = {
     function Ejecutar($c, [string]$sql) {
         if ($c.dll -and $h.directo) {
             try {
-                if (-not $script:dllCargada) { Add-Type -Path $c.dll -ErrorAction Stop; $script:dllCargada = $true }
+                if (-not $script:dllCargada) {
+                    # El conector pide versiones exactas de System.Memory, etc.; AxisPOS las resuelve con redirecciones en su .config y
+                    # PowerShell no las tiene, asi que se atiende el pedido de ensamblados con los que hay en la carpeta del conector.
+                    try {
+                        if (-not ('TotoResolvedor' -as [type])) {
+                            Add-Type -TypeDefinition @"
+using System; using System.IO; using System.Reflection;
+public static class TotoResolvedor {
+    public static string Carpeta;
+    public static void Iniciar(string carpeta) {
+        Carpeta = carpeta;
+        AppDomain.CurrentDomain.AssemblyResolve += delegate(object s, ResolveEventArgs e) {
+            string n = new AssemblyName(e.Name).Name;
+            foreach (Assembly a in AppDomain.CurrentDomain.GetAssemblies()) { if (a.GetName().Name == n) return a; }
+            string p = Path.Combine(Carpeta, n + ".dll");
+            if (File.Exists(p)) { try { return Assembly.LoadFrom(p); } catch { } }
+            return null;
+        };
+    }
+}
+"@
+                        }
+                        [TotoResolvedor]::Iniciar((Split-Path -Parent $c.dll))
+                    } catch { try { $h.motivoDirecto = "resolvedor: " + [string]$_ } catch {} }
+                    try { foreach ($dep in @(Get-ChildItem -LiteralPath (Split-Path -Parent $c.dll) -Filter '*.dll' -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^(System\.(Memory|Buffers|Threading\.Tasks\.Extensions|Runtime\.CompilerServices\.Unsafe|Diagnostics\.DiagnosticSource|ValueTuple)|Microsoft\.Extensions\.Logging\.Abstractions)\.dll$' })) { try { [void][System.Reflection.Assembly]::LoadFrom($dep.FullName) } catch {} } } catch {}
+                    Add-Type -Path $c.dll -ErrorAction Stop; $script:dllCargada = $true
+                }
                 if (-not $script:directoProbado) {
                     $script:directoProbado = $true
                     $ok = $true
@@ -1886,6 +1912,7 @@ $global:axisHiloGuion = {
                 return (Run-Directo $c $sql)
             } catch {
                 $h.directoFallos = [int]$h.directoFallos + 1
+                try { $h.motivoDirecto = ([string]$_).Substring(0, [math]::Min(300, ([string]$_).Length)) } catch {}
                 try { if ($script:conn) { $script:conn.Dispose() }; $script:conn = $null } catch {}
                 if ($h.directoFallos -ge 3) { $h.directo = $false; Aviso "Conexion directa a MariaDB desactivada por errores ($_); se sigue con mariadb.exe." }
             }
@@ -1942,6 +1969,10 @@ function Iniciar-HiloAxis {
 }
 
 $global:axisConectorCache = @{ hora = [datetime]::MinValue; ruta = '' }
+$global:axisConectorBuscado = @()
+$global:pedidosJsonCache = $null
+$global:pedidosJsonHora = [datetime]::MinValue
+$global:pedidosJsonCuenta = -1
 function Buscar-ConectorDll {
     if ($global:configAxis.PSObject.Properties.Name -contains 'conexionDirecta') { if (-not [bool]$global:configAxis.conexionDirecta) { return '' } }
     $cfgDll = [string]$global:configAxis.conectorDll
@@ -1952,9 +1983,14 @@ function Buscar-ConectorDll {
         $carpetas = New-Object System.Collections.ArrayList
         [void]$carpetas.Add($scriptDir)
         try { foreach ($pr in @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -like '*Axis*' })) { try { $fp = $pr.MainModule.FileName; if ($fp) { [void]$carpetas.Add((Split-Path -Parent $fp)) } } catch {} } } catch {}
+        try { foreach ($pe in @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '*Axis*' -and $_.ExecutablePath })) { [void]$carpetas.Add((Split-Path -Parent $pe.ExecutablePath)) } } catch {}
+        foreach ($pexe in @('C:\Program Files*\*\AxisPOS.exe', 'C:\Program Files*\*\*\AxisPOS.exe', 'C:\*\AxisPOS.exe', 'D:\*\AxisPOS.exe', 'D:\Program Files*\*\AxisPOS.exe')) {
+            try { foreach ($fx in @(Get-ChildItem -Path $pexe -ErrorAction SilentlyContinue)) { [void]$carpetas.Add($fx.DirectoryName) } } catch {}
+        }
         foreach ($pat in @('C:\Program Files*\*Axis*', 'C:\Program Files*\*Axis*\*', 'C:\*Axis*', 'C:\AxisSoft*', 'C:\Program Files*\MySQL\Connector*\Assemblies\*', 'C:\Windows\Microsoft.NET\assembly\GAC_MSIL\MySql.Data\*')) {
             try { foreach ($d in @(Get-ChildItem -Path $pat -Directory -ErrorAction SilentlyContinue)) { [void]$carpetas.Add($d.FullName) } } catch {}
         }
+        $global:axisConectorBuscado = @($carpetas | Select-Object -Unique)
         foreach ($carp in $carpetas) {
             foreach ($nom in @('MySql.Data.dll', 'MySqlConnector.dll')) {
                 $cand = Join-Path $carp $nom
@@ -2056,8 +2092,13 @@ function Resumen-Tiempos {
     }
     $h = $global:axisHilo
     $hilo = $null
-    if ($h) { $hilo = [pscustomobject]@{ vivo = [bool]$h.vivo; conexionDirecta = [bool]($h.directo -and $h.cfg.dll); latidoHaceSeg = [math]::Round(((Get-Date) - $h.latido).TotalSeconds, 1) } }
-    return [pscustomobject]@{ desde = $global:tiemposDesde.ToString("yyyy-MM-dd HH:mm:ss"); hiloAxis = $hilo; masLentasPorTotal = @($lista | Sort-Object totalMs -Descending | Select-Object -First 40); masLentasPorMaximo = @($lista | Sort-Object maxMs -Descending | Select-Object -First 15) }
+    $dllInfo = $null
+    try {
+        $dllR = Buscar-ConectorDll
+        $dllInfo = [pscustomobject]@{ conexionDirectaPermitida = [bool]$global:configAxis.conexionDirecta; conectorEncontrado = [string]$dllR; carpetasBuscadas = @($global:axisConectorBuscado); avisoSiVacio = "Si conectorEncontrado esta vacio, copia MySql.Data.dll (o MySqlConnector.dll) junto a servidor_pedidos.ps1 o escribe su ruta en config_axis.json (conectorDll)." }
+    } catch {}
+    if ($h) { $hilo = [pscustomobject]@{ vivo = [bool]$h.vivo; conexionDirecta = [bool]($h.directo -and $h.cfg.dll); latidoHaceSeg = [math]::Round(((Get-Date) - $h.latido).TotalSeconds, 1); ultimoErrorConexionDirecta = [string]$h.motivoDirecto } }
+    return [pscustomobject]@{ desde = $global:tiemposDesde.ToString("yyyy-MM-dd HH:mm:ss"); hiloAxis = $hilo; conector = $dllInfo; masLentasPorTotal = @($lista | Sort-Object totalMs -Descending | Select-Object -First 40); masLentasPorMaximo = @($lista | Sort-Object maxMs -Descending | Select-Object -First 15) }
 }
 
 function Leer-ProductosAxis {
@@ -16570,7 +16611,8 @@ $htmlEtiquetas = @'
     <h2>Contenido de la etiqueta</h2>
     <label style="font-size:12px; color:#94a3b8;">Nombre del negocio</label>
     <input type="text" id="negocio" value="__NEGOCIO__" oninput="cambio()">
-    <div class="nota" style="margin:2px 0 6px;">Agregar a la etiqueta · Vertical (arriba/abajo del precio) y horizontal.</div>
+    <style>select#nV,select#nH,select#pV,select#pH,select#umV,select#umH,select#cuV,select#cuH,select#codV,select#codH,select#fpV,select#fpH,select#fiV,select#fiH{display:none !important}</style>
+    <div class="nota" style="margin:2px 0 6px;">Agregar a la etiqueta.</div>
     <div class="cr"><label class="chk"><input type="checkbox" id="oNeg" checked onchange="cambio()"> Nombre del negocio</label><select id="nV" class="exc" onchange="cambio()" title="Vertical: respecto del precio"><option value="arriba">Arriba</option><option value="abajo">Abajo</option></select><select id="nH" class="exc" onchange="cambio()" title="Horizontal"><option value="auto">Según estilo</option><option value="izq">Izquierda</option><option value="cen">Centro</option><option value="der">Derecha</option></select></div>
     <div class="cr"><label class="chk"><input type="checkbox" id="oNom" checked onchange="cambio()"> Nombre del producto</label><select id="pV" class="exc" onchange="cambio()" title="Vertical: respecto del precio"><option value="arriba">Arriba</option><option value="abajo">Abajo</option></select><select id="pH" class="exc" onchange="cambio()" title="Horizontal"><option value="auto">Según estilo</option><option value="izq">Izquierda</option><option value="cen">Centro</option><option value="der">Derecha</option></select></div>
     <div class="cr"><label class="chk"><input type="checkbox" id="exUM" onchange="cambio()" class="exc"> Unidad de medida (UM: PZS.) <small style="color:#64748b">AxisPOS</small></label><select id="umV" class="exc" onchange="cambio()" title="Vertical: respecto del precio"><option value="arriba">Arriba</option><option value="abajo">Abajo</option></select><select id="umH" class="exc" onchange="cambio()" title="Horizontal"><option value="izq">Izquierda</option><option value="cen">Centro</option><option value="der">Derecha</option></select></div>
@@ -16579,7 +16621,7 @@ $htmlEtiquetas = @'
     <div class="cr"><label class="chk"><input type="checkbox" id="exFProd" onchange="cambio()" class="exc"> Fecha de producción</label><select id="fpV" class="exc" onchange="cambio()" title="Vertical: respecto del precio"><option value="arriba">Arriba</option><option value="abajo">Abajo</option></select><select id="fpH" class="exc" onchange="cambio()" title="Horizontal"><option value="izq">Izquierda</option><option value="cen">Centro</option><option value="der">Derecha</option></select></div>
     <input type="text" id="exFProdVal" class="exc" maxlength="12" placeholder="dd/mm/aa" style="margin:0 0 4px 22px; width:110px;" oninput="cambio()">
     <div class="cr"><label class="chk"><input type="checkbox" id="exFecha" onchange="cambio()" class="exc"> Fecha de impresión («FECHA:»)</label><select id="fiV" class="exc" onchange="cambio()" title="Vertical: respecto del precio"><option value="arriba">Arriba</option><option value="abajo">Abajo</option></select><select id="fiH" class="exc" onchange="cambio()" title="Horizontal"><option value="izq">Izquierda</option><option value="cen">Centro</option><option value="der">Derecha</option></select></div>
-    <div class="nota">El precio va siempre centrado y lo más grande que permita el papel. «Arriba» y «abajo» son respecto de él; con código de barras puesto, «abajo» es después de las barras.</div>
+    <div class="nota">El precio va siempre centrado y lo más grande que permita el papel.</div>
     <label class="chk"><input type="checkbox" id="oPre" checked onchange="cambio()"> Mostrar precio</label>
     <label style="font-size:12px; color:#94a3b8; display:block; margin-top:6px;">Precio que se imprime</label>
     <select id="modoPrecio" onchange="cambio()">
@@ -16612,7 +16654,7 @@ $htmlEtiquetas = @'
       <div><label style="font-size:12px; color:#94a3b8;">Decimales</label>
         <select id="decimales" onchange="cambio()"><option value="auto">Auto</option><option value="0">Sin decimales</option><option value="2">2 decimales</option></select></div>
     </div>
-    <div class="fila" style="margin-top:8px;">
+    <div class="fila" style="margin-top:8px; display:none;">
       <div><label style="font-size:12px; color:#94a3b8;">Separador de miles</label>
         <select id="fMil" class="exc" onchange="cambio()"><option value="">Ninguno</option><option value=",">Coma (19,500)</option><option value=".">Punto (19.500)</option><option value="esp">Espacio</option></select></div>
       <div><label style="font-size:12px; color:#94a3b8;">Separador de decimales</label>
@@ -21067,6 +21109,11 @@ while ($listener.IsListening) {
             $context.Response.Headers["Access-Control-Expose-Headers"] = "X-Nombre-Archivo, X-Nombre-Archivo-Enc"
             $context.Response.Headers["Access-Control-Allow-Private-Network"] = "true"
         }
+        if ($request.Url.AbsolutePath -eq "/api/tienda/estado") {
+            $context.Response.Headers["Access-Control-Allow-Origin"] = "*"
+            $context.Response.Headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+            $context.Response.Headers["Access-Control-Allow-Private-Network"] = "true"
+        }
     } catch {}
     if ($method -eq "OPTIONS") {
         try { $context.Response.StatusCode = 204; $context.Response.ContentLength64 = 0; $context.Response.OutputStream.Close() } catch {}
@@ -21099,6 +21146,7 @@ while ($listener.IsListening) {
     Reintentar-ConciliacionDiferidos; Registrar-Tiempo 'tarea:ConciliacionDiferidos' $swT.ElapsedMilliseconds; $swT.Restart()
     Revisar-TareasPedidos; Registrar-Tiempo 'tarea:TareasPedidos' $swT.ElapsedMilliseconds
     $msMant = $swReq.ElapsedMilliseconds
+    if ($method -ne "GET") { $global:pedidosJsonCache = $null }
 
     # Las consultas de sincronizacion del Gestor de Almacenes (cada ~10 s por telefono) no se anotan en pantalla para no llenar la consola.
     if (-not ($method -eq "GET" -and ($path.StartsWith("/api/almacen/") -or $path -eq "/api/fotos/skus" -or $path -eq "/api/catalogo/version"))) {
@@ -21520,6 +21568,46 @@ while ($listener.IsListening) {
                     if ([int]::TryParse([string]$aDef, [ref]$nDef)) { $pisoDef = $nDef; break }
                 }
                 Enviar-Json $context @{ ok = $true; pisoDefecto = $pisoDef; pisoGuardado = [int]$global:configApp.reposPiso; origenGuardado = [string]$global:configApp.reposOrigen; almacenes = @($listaAl) }
+            } catch {
+                Enviar-Json $context @{ ok = $false; error = [string]$_.Exception.Message }
+            }
+
+        } elseif ($method -eq "GET" -and $path -eq "/api/tienda/estado") {
+            # Para el Panel ToTo Tools: existencia y ventas por producto (solo lectura, sin datos de clientes).
+            try {
+                $diasT = 30
+                $tmpT = 0
+                if ([int]::TryParse([string]$request.QueryString["dias"], [ref]$tmpT)) { $diasT = $tmpT }
+                if ($diasT -lt 1) { $diasT = 1 }
+                if ($diasT -gt 90) { $diasT = 90 }
+                $ventasT = @{}
+                $ventasOkT = $false
+                try {
+                    if ($global:configAxis.activo) {
+                        $pisoT = 0
+                        if ($global:configApp.reposPiso) { $pisoT = [int]$global:configApp.reposPiso }
+                        if ($pisoT -le 0) {
+                            foreach ($aT in @($global:configAxis.almacenes)) {
+                                $nT = 0
+                                if ([int]::TryParse([string]$aT, [ref]$nT)) { $pisoT = $nT; break }
+                            }
+                        }
+                        if ($pisoT -gt 0) {
+                            $ventasT = Leer-VentasPisoMapa ([string]$global:configAxis.columnaSku) $pisoT $diasT
+                            $ventasOkT = $true
+                        }
+                    }
+                } catch { $ventasOkT = $false }
+                $listaT = New-Object System.Collections.ArrayList
+                foreach ($prT in @($global:catalogo)) {
+                    $skuT = [string]$prT.sku
+                    $stT = $null
+                    if ($null -ne $prT.stockBase) { $stT = [double]$prT.stockBase } elseif ($null -ne $prT.stock) { $stT = [double]$prT.stock }
+                    $vT = 0.0
+                    if ($skuT -and $ventasT.ContainsKey($skuT)) { $vT = [double]$ventasT[$skuT] }
+                    [void]$listaT.Add([pscustomobject]@{ sku = $skuT; nombre = [string]$prT.nombre; precio = [double]$prT.precio; stock = $stT; vendido = [math]::Round($vT, 2) })
+                }
+                Enviar-Json $context @{ ok = $true; dias = $diasT; ventas = $ventasOkT; generado = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss"); cantidad = $listaT.Count; items = @($listaT) } 200 5
             } catch {
                 Enviar-Json $context @{ ok = $false; error = [string]$_.Exception.Message }
             }
@@ -22695,11 +22783,18 @@ while ($listener.IsListening) {
             Enviar-Respuesta -Context $context -Body (@{ ok = $true; asignados = $todos } | ConvertTo-Json -Depth 5) -ContentType "application/json; charset=utf-8"
 
         } elseif ($method -eq "GET" -and $path -eq "/api/pedidos") {
-            if ($global:pedidos.Count -eq 0) {
-                $json = "[]"
-            } else {
-                $json = $global:pedidos | ConvertTo-Json -Depth 10
-                if ($global:pedidos.Count -eq 1) { $json = "[" + $json + "]" }
+            # Convertir todos los pedidos a JSON es lo mas pesado del servidor y los moviles lo piden cada pocos segundos.
+            # Se reutiliza el ultimo resultado hasta 1 s; cualquier peticion que no sea GET (crear/cobrar/editar) lo descarta.
+            $json = $null
+            if ($global:pedidosJsonCache -and ((([datetime]::UtcNow - $global:pedidosJsonHora).TotalMilliseconds) -lt 1000) -and ($global:pedidosJsonCuenta -eq $global:pedidos.Count)) { $json = $global:pedidosJsonCache }
+            if ($null -eq $json) {
+                if ($global:pedidos.Count -eq 0) {
+                    $json = "[]"
+                } else {
+                    $json = $global:pedidos | ConvertTo-Json -Depth 10
+                    if ($global:pedidos.Count -eq 1) { $json = "[" + $json + "]" }
+                }
+                $global:pedidosJsonCache = $json; $global:pedidosJsonHora = [datetime]::UtcNow; $global:pedidosJsonCuenta = $global:pedidos.Count
             }
             Enviar-Respuesta -Context $context -Body $json -ContentType "application/json; charset=utf-8"
 
