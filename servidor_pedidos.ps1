@@ -1032,8 +1032,30 @@ function Reparar-JsonCorruptos {
 }
 Reparar-JsonCorruptos
 
+$global:pedidosSucio = $false
+$global:pedidosRecJson = $null
+$global:pedidosRecHora = [datetime]::MinValue
 function Guardar-Pedidos {
-    Escribir-ArchivoConReintento -ruta $pedidosFile -contenido ($global:pedidos | ConvertTo-Json -Depth 10) | Out-Null
+    # Ya no se escribe aqui: se marca y se escribe cuando termina la peticion (el movil recibe su respuesta antes y,
+    # si una misma peticion pide guardar 3 veces, se serializa una sola). Los datos nunca quedan sin guardar mas alla de esa peticion.
+    $global:pedidosSucio = $true
+    $global:pedidosJsonCache = $null
+    $global:pedidosRecJson = $null
+}
+function Vaciar-Pedidos {
+    if (-not $global:pedidosSucio) { return }
+    $global:pedidosSucio = $false
+    $swG = [System.Diagnostics.Stopwatch]::StartNew()
+    $jsonP = ($global:pedidos | ConvertTo-Json -Depth 10)
+    Escribir-ArchivoConReintento -ruta $pedidosFile -contenido $jsonP | Out-Null
+    # el mismo texto sirve para GET /api/pedidos (vista completa de la PC)
+    try {
+        if ($global:pedidos.Count -eq 0) { $global:pedidosJsonCache = "[]" }
+        elseif ($global:pedidos.Count -eq 1) { $global:pedidosJsonCache = "[" + $jsonP + "]" }
+        else { $global:pedidosJsonCache = $jsonP }
+        $global:pedidosJsonHora = [datetime]::UtcNow; $global:pedidosJsonCuenta = $global:pedidos.Count
+    } catch { $global:pedidosJsonCache = $null }
+    try { Registrar-Tiempo 'guardar:pedidos.json' $swG.ElapsedMilliseconds } catch {}
 }
 
 function Cargar-Asignados {
@@ -1261,6 +1283,9 @@ function Necesita-Revision($p) {
 }
 
 function Cerrar-Dia {
+    param([switch]$Auto)
+    # -Auto: cierre automatico. Archiva solo lo cobrado/cancelado de ANTES de ayer (hoy y ayer se quedan a la vista) para que
+    # pedidos.json no crezca aunque no se pulse "Cerrar el dia". Usa el mismo archivo de historial de siempre.
     # Archiva los pedidos ya cobrados o cancelados en un archivo aparte
     # y deja pedidos.json solo con los que siguen pendientes, para que
     # no crezca para siempre.
@@ -1271,8 +1296,17 @@ function Cerrar-Dia {
 
     # Los cobrados por un vendedor que la caja aun no reviso se quedan en la
     # lista (igual que los pendientes) hasta que se marquen como revisados.
+    if ($Auto) {
+        $corteAuto = (Get-Date).Date.AddDays(-1).ToString("yyyy-MM-dd HH:mm:ss")
+        $paraArchivar = @($global:pedidos | Where-Object { ($_.estado -eq "cobrado" -or $_.estado -eq "cancelado") -and -not (Necesita-Revision $_) -and ([string]$_.hora) -and (([string]$_.hora) -lt $corteAuto) })
+        if ($paraArchivar.Count -eq 0) { return $true }
+        $idsArch = @{}
+        foreach ($pa in $paraArchivar) { $idsArch[[string]$pa.id] = $true }
+        $pendientes = @($global:pedidos | Where-Object { -not $idsArch.ContainsKey([string]$_.id) })
+    } else {
     $paraArchivar = @($global:pedidos | Where-Object { ($_.estado -eq "cobrado" -or $_.estado -eq "cancelado") -and -not (Necesita-Revision $_) })
     $pendientes = @($global:pedidos | Where-Object { ($_.estado -ne "cobrado" -and $_.estado -ne "cancelado") -or (Necesita-Revision $_) })
+    }
 
     if ($paraArchivar.Count -gt 0) {
         $nombreArchivo = "pedidos_" + (Get-Date).ToString("yyyy-MM-dd_HHmmss") + ".json"
@@ -1793,7 +1827,7 @@ $global:axisFinProductos = [datetime]::MinValue
 $global:axisStockPrevHora = [datetime]::MinValue
 
 $global:axisHiloGuion = {
-    param($h)
+    param($h, $grupo)
     $h.vivo = $true
     $conn = $null
     $inv = [System.Globalization.CultureInfo]::InvariantCulture
@@ -1835,7 +1869,8 @@ $global:axisHiloGuion = {
     }
     function Run-Directo($c, [string]$sql) {
         if ((-not $conn) -or ($conn.State -ne [System.Data.ConnectionState]::Open)) {
-            $cs = "Server=" + $c.servidor + ";Port=" + $c.puerto + ";Database=" + $c.base + ";Uid=" + $c.usuario + ";Pwd=" + $c.clave + ";CharSet=utf8mb4;TreatTinyAsBoolean=false;AllowZeroDateTime=true;ConvertZeroDateTime=false;ConnectionTimeout=5;DefaultCommandTimeout=20;SslMode=None"
+            $srvDir = [string]$c.servidor; if ($srvDir -eq 'localhost') { $srvDir = '127.0.0.1' }
+            $cs = "Server=" + $srvDir + ";Port=" + $c.puerto + ";Database=" + $c.base + ";Uid=" + $c.usuario + ";Pwd=" + $c.clave + ";CharSet=utf8mb4;TreatTinyAsBoolean=false;AllowZeroDateTime=true;ConvertZeroDateTime=false;ConnectionTimeout=8;DefaultCommandTimeout=20;SslMode=None"
             if (-not $script:tipoConn) {
                 foreach ($nt in @('MySql.Data.MySqlClient.MySqlConnection', 'MySqlConnector.MySqlConnection')) {
                     foreach ($asm in [AppDomain]::CurrentDomain.GetAssemblies()) { $tt = $null; try { $tt = $asm.GetType($nt, $false) } catch {}; if ($tt) { $script:tipoConn = $tt; break } }
@@ -1843,6 +1878,18 @@ $global:axisHiloGuion = {
                 }
                 if (-not $script:tipoConn) { throw "el conector no trae MySqlConnection" }
             }
+            # La cadena se arma con el constructor del propio conector para que una clave con ; o = no la rompa.
+            try {
+                $tb = $script:tipoConn.Assembly.GetType(($script:tipoConn.FullName + 'StringBuilder'), $false)
+                if ($tb) {
+                    $bb = [Activator]::CreateInstance($tb)
+                    $bb.set_Item('Server', $srvDir); $bb.set_Item('Port', [string]$c.puerto); $bb.set_Item('Database', [string]$c.base)
+                    $bb.set_Item('User ID', [string]$c.usuario); $bb.set_Item('Password', [string]$c.clave)
+                    $bb.set_Item('CharSet', 'utf8mb4'); $bb.set_Item('TreatTinyAsBoolean', 'false'); $bb.set_Item('AllowZeroDateTime', 'true'); $bb.set_Item('ConvertZeroDateTime', 'false')
+                    $bb.set_Item('ConnectionTimeout', '8'); $bb.set_Item('DefaultCommandTimeout', '20'); $bb.set_Item('SslMode', 'None')
+                    $cs = [string]$bb.ConnectionString
+                }
+            } catch {}
             $script:conn = [Activator]::CreateInstance($script:tipoConn, $cs)
             $script:conn.Open()
             $c0 = $script:conn.CreateCommand(); $c0.CommandText = "SET SESSION TRANSACTION READ ONLY"; [void]$c0.ExecuteNonQuery()
@@ -1912,7 +1959,13 @@ public static class TotoResolvedor {
                 return (Run-Directo $c $sql)
             } catch {
                 $h.directoFallos = [int]$h.directoFallos + 1
-                try { $h.motivoDirecto = ([string]$_).Substring(0, [math]::Min(300, ([string]$_).Length)) } catch {}
+                try {
+                    $mm = [string]$_
+                    $ex = $_.Exception
+                    while ($ex -and $ex.InnerException) { $ex = $ex.InnerException }
+                    if ($ex) { $mm = $mm + " | detalle: " + [string]$ex.Message }
+                    $h.motivoDirecto = $mm.Substring(0, [math]::Min(500, $mm.Length))
+                } catch {}
                 try { if ($script:conn) { $script:conn.Dispose() }; $script:conn = $null } catch {}
                 if ($h.directoFallos -ge 3) { $h.directo = $false; Aviso "Conexion directa a MariaDB desactivada por errores ($_); se sigue con mariadb.exe." }
             }
@@ -1925,6 +1978,8 @@ public static class TotoResolvedor {
             $ahora = Get-Date
             $hizo = $false
             foreach ($k in @($h.tareas.Keys)) {
+                $esB = (@('ventas', 'borradores', 'usuarios') -contains [string]$k)
+                if (($grupo -eq 'B') -ne $esB) { continue }
                 $t = $h.tareas[$k]
                 if (-not $t) { continue }
                 if ((($ahora - $t.pedida).TotalSeconds) -gt 90) { $h.tareas.Remove($k); continue }
@@ -1942,6 +1997,7 @@ public static class TotoResolvedor {
                     $res = @{ ok = $false; texto = ''; error = "$_"; sql = $t.sql; fin = (Get-Date); seq = $seq; ms = ((Get-Date) - $t0q).TotalMilliseconds }
                 }
                 $h.res[$k] = $res
+                if ([double]$res.ms -gt 1200) { $h.ultLenta = Get-Date }
                 $hizo = $true
                 $h.latido = Get-Date
             }
@@ -1961,9 +2017,21 @@ function Iniciar-HiloAxis {
     $rs.Open()
     $ps = [powershell]::Create()
     $ps.Runspace = $rs
-    [void]$ps.AddScript($global:axisHiloGuion.ToString()).AddArgument($h)
+    [void]$ps.AddScript($global:axisHiloGuion.ToString()).AddArgument($h).AddArgument('A')
     $h.ps = $ps
     $h.async = $ps.BeginInvoke()
+    try { $h.tareas['usuarios'] = @{ sql = "SELECT ID, Name FROM users"; cada = 600; pedida = (Get-Date) } } catch {}
+    # segundo hilo: las ventas y los borradores no esperan a la lectura de productos y stock
+    try {
+        $rs2 = [runspacefactory]::CreateRunspace()
+        $rs2.ApartmentState = [System.Threading.ApartmentState]::MTA
+        $rs2.Open()
+        $ps2 = [powershell]::Create()
+        $ps2.Runspace = $rs2
+        [void]$ps2.AddScript($global:axisHiloGuion.ToString()).AddArgument($h).AddArgument('B')
+        $h.ps2 = $ps2
+        $h.async2 = $ps2.BeginInvoke()
+    } catch {}
     $h.vivo = $true
     $global:axisHilo = $h
 }
@@ -1973,6 +2041,9 @@ $global:axisConectorBuscado = @()
 $global:pedidosJsonCache = $null
 $global:pedidosJsonHora = [datetime]::MinValue
 $global:pedidosJsonCuenta = -1
+$global:mantHora = [datetime]::MinValue
+$global:stockBajoJson = $null; $global:stockBajoHora = [datetime]::MinValue; $global:stockBajoUmbral = ""
+$global:fotosSkusJson = $null; $global:fotosSkusHora = [datetime]::MinValue; $global:fotosSkusMarca = ""
 function Buscar-ConectorDll {
     if ($global:configAxis.PSObject.Properties.Name -contains 'conexionDirecta') { if (-not [bool]$global:configAxis.conexionDirecta) { return '' } }
     $cfgDll = [string]$global:configAxis.conectorDll
@@ -2222,8 +2293,22 @@ function Aplicar-ProductosCatalogo($productos) {
 }
 
 function Revisar-CatalogoAxis {
-    param([switch]$Forzar)
+    param([switch]$Forzar, [switch]$Suave)
     if (-not $global:configAxis.activo) { return }
+    # -Suave: lo usan los cierres de venta. Antes leian TODO el catalogo en el hilo principal justo cuando AxisPOS tiene la base ocupada
+    # cerrando la venta (2 a 8 s con todos los moviles esperando). Ahora se le pide el refresco al hilo de AxisPOS y se aplica al llegar.
+    if ($Suave) {
+        $hS = $global:axisHilo
+        if ($hS -and $hS.vivo -and $global:axisBase -and (@($global:axisBase).Count -gt 0) -and ((((Get-Date) - $hS.latido).TotalSeconds) -lt 30)) {
+            try {
+                foreach ($kS in @('productos', 'stock')) { $rS = $hS.res[$kS]; if ($rS) { $rS.fin = [datetime]::MinValue } }
+                $global:axisUltimaLectura = [datetime]::MinValue
+                $global:axisStockUltima = [datetime]::MinValue
+                return
+            } catch {}
+        }
+        $Forzar = [switch]$true
+    }
     $ahora = Get-Date
     $espera = [int]$global:configAxis.cadaSegundos
     if ($espera -lt 5) { $espera = 5 }
@@ -2571,7 +2656,16 @@ function Nombre-OperadorAxis([string]$id) {
     if ([string]::IsNullOrWhiteSpace($id)) { return "" }
     try {
         if ((((Get-Date) - $global:axisOperadoresHora).TotalMinutes -gt 10) -or (-not $global:axisOperadores.ContainsKey($id))) {
-            $t = Ejecutar-ConsultaAxis "SELECT ID, Name FROM users"
+            $t = $null
+            $hU = $global:axisHilo
+            if ($hU -and $hU.vivo) {
+                # por el hilo de AxisPOS, sin esperar: si todavia no hay respuesta se usa "usuario N" y la proxima vez ya esta el nombre
+                $sqlU = "SELECT ID, Name FROM users"
+                $hU.tareas['usuarios'] = @{ sql = $sqlU; cada = 600; pedida = (Get-Date) }
+                $rU = $hU.res['usuarios']
+                if ($rU -and $rU.ok -and ([string]$rU.sql -eq $sqlU)) { $t = [string]$rU.texto }
+            } else { $t = Ejecutar-ConsultaAxis "SELECT ID, Name FROM users" }
+            if ($null -eq $t) { $t = "" }
             $m = @{}
             foreach ($lin in ($t -split "`n")) {
                 $lin = $lin.TrimEnd("`r")
@@ -3194,7 +3288,7 @@ function Conciliar-PedidoConVentasPrevias($p) {
                 Cerrar-PedidosUnidos $comb2 ([string]$s2.acct) $s2
                 Guardar-Pedidos
                 Guardar-VentasAxisDia
-                try { Revisar-CatalogoAxis -Forzar } catch {}
+                try { Revisar-CatalogoAxis -Suave } catch {}
                 try { Recalcular-Reservas } catch {}
                 return $true
             }
@@ -3218,7 +3312,7 @@ function Conciliar-PedidoConVentasPrevias($p) {
     Guardar-VentasAxisDia
     try { Agregar-AlertaVendedor ([string]$p.vendedor) ("Tu pedido #" + $p.id + " ya se cobro en caja.") $p.id "pedido" } catch {}
     Write-Host ("[" + (Get-Date).ToString('HH:mm:ss') + "] AxisPOS: el pedido #" + $p.id + " llego despues y ya estaba cobrado (venta " + [string]$mejor.acct + ")")
-    try { Revisar-CatalogoAxis -Forzar } catch {}
+    try { Revisar-CatalogoAxis -Suave } catch {}
     try { Recalcular-Reservas } catch {}
     return $true
 }
@@ -3235,7 +3329,7 @@ function Conciliar-VentaAxis($grupo) {
         # Devolucion hecha en AxisPOS: el stock ya sube solo (se lee de AxisPOS); no cierra ni toca pedidos.
         Poner-Prop $rec "devolucion" $true
         Guardar-VentasAxisDia
-        try { Revisar-CatalogoAxis -Forzar } catch {}
+        try { Revisar-CatalogoAxis -Suave } catch {}
         try { Recalcular-Reservas } catch {}
         Write-Host ("[" + (Get-Date).ToString('HH:mm:ss') + "] AxisPOS: devolucion registrada (movimiento " + [string]$grupo[0].acct + ")")
         return
@@ -3378,7 +3472,7 @@ function Conciliar-VentaAxis($grupo) {
 
     Guardar-VentasAxisDia
     if ($hecho) {
-        try { Revisar-CatalogoAxis -Forzar } catch {}
+        try { Revisar-CatalogoAxis -Suave } catch {}
         Recalcular-Reservas
     }
 }
@@ -3585,8 +3679,12 @@ function Revisar-TareasPedidos {
     try { Actualizar-CuadreAxis } catch {}
     try { Recalcular-Reservas } catch {}
     try { Revisar-Respaldo } catch { $global:respaldoEnCurso = $false }
-    try { Revisar-CostosAxis } catch {}
-    try { Revisar-MinimosAxis } catch {}
+    $axOcupada = $false
+    try { $hO = $global:axisHilo; if ($hO -and $hO.ultLenta -and ((((Get-Date) - $hO.ultLenta).TotalSeconds) -lt 45)) { $axOcupada = $true } } catch {}
+    if (-not $axOcupada) {
+        try { Revisar-CostosAxis } catch {}
+        try { Revisar-MinimosAxis } catch {}
+    }
 }
 
 # ------------------------------------------------------------------
@@ -3651,6 +3749,7 @@ function Copiar-ZipADestino([string]$zipOrigen, [string]$dirDestino, [int]$conse
 }
 
 function Crear-Respaldo([string]$motivo = "auto") {
+    try { Vaciar-Pedidos } catch {}
     if ($global:respaldoEnCurso) { return @{ ok = $false; mensaje = "Ya hay una copia en curso." } }
     $global:respaldoEnCurso = $true
     $cfgR = $global:respaldoCfg
@@ -20461,9 +20560,51 @@ function Inyectar-Extras([string]$html, [string]$modo) {
 # ------------------------------------------------------------------
 # Funciones de respuesta HTTP
 # ------------------------------------------------------------------
+# Antes la respuesta se escribia en el mismo hilo que atiende a todos: si un movil iba lento o se dormia a media descarga,
+# el servidor se quedaba esperando (hasta 150 s en tus registros) y los demas moviles parecian desconectados.
+# Ahora la escritura se lanza en segundo plano y el servidor sigue con la siguiente peticion. Si el movil acepta gzip, se comprime.
+$global:envioAsincrono = $false
+try {
+    if (-not ('TotoEnvio' -as [type])) {
+        Add-Type -TypeDefinition @"
+using System; using System.IO; using System.IO.Compression; using System.Net;
+public static class TotoEnvio {
+    public static void Enviar(HttpListenerContext c, byte[] datos, bool comprimir) {
+        HttpListenerResponse r = c.Response;
+        if (comprimir && datos.Length > 1400) {
+            try {
+                MemoryStream ms = new MemoryStream();
+                using (GZipStream gz = new GZipStream(ms, CompressionMode.Compress, true)) { gz.Write(datos, 0, datos.Length); }
+                byte[] z = ms.ToArray();
+                if (z.Length < datos.Length) { datos = z; r.AddHeader("Content-Encoding", "gzip"); r.AddHeader("Vary", "Accept-Encoding"); }
+            } catch { }
+        }
+        Stream s = r.OutputStream;
+        r.ContentLength64 = datos.Length;
+        try {
+            s.BeginWrite(datos, 0, datos.Length, delegate(IAsyncResult ar) {
+                try { s.EndWrite(ar); } catch { }
+                try { s.Close(); } catch { }
+            }, null);
+        } catch { try { s.Close(); } catch { } }
+    }
+}
+"@
+    }
+    $global:envioAsincrono = $true
+} catch { $global:envioAsincrono = $false }
+
 function Enviar-Respuesta {
     param($Context, [string]$Body, [string]$ContentType = "text/html; charset=utf-8", [int]$StatusCode = 200)
     $bytes = [System.Text.Encoding]::UTF8.GetBytes($Body)
+    if ($global:envioAsincrono) {
+        $Context.Response.StatusCode = $StatusCode
+        $Context.Response.ContentType = $ContentType
+        $gz = $false
+        try { $gz = ([string]$Context.Request.Headers["Accept-Encoding"]) -match 'gzip' } catch { $gz = $false }
+        [TotoEnvio]::Enviar($Context, $bytes, $gz)
+        return
+    }
     $Context.Response.StatusCode = $StatusCode
     $Context.Response.ContentType = $ContentType
     $Context.Response.ContentLength64 = $bytes.Length
@@ -20973,6 +21114,14 @@ function Calcular-ComprasNominal([int]$dias = 30) {
 # ------------------------------------------------------------------
 $listener = New-Object System.Net.HttpListener
 $listener.Prefixes.Add("http://+:$port/")
+# Un movil que se cae a media peticion ya no puede tener al servidor esperando minutos.
+try {
+    $tm = $listener.TimeoutManager
+    $tm.EntityBody = [TimeSpan]::FromSeconds(20)
+    $tm.DrainEntityBody = [TimeSpan]::FromSeconds(10)
+    $tm.HeaderWait = [TimeSpan]::FromSeconds(20)
+    $tm.IdleConnection = [TimeSpan]::FromSeconds(120)
+} catch {}
 
 try {
     $listener.Start()
@@ -21084,7 +21233,22 @@ if (-not (Abrir-PanelComoApp)) {
     Write-Host "Aviso: no se pudo abrir el navegador automaticamente. Abre http://localhost:$port/ manualmente."
 }
 
+$global:cierreAutoDia = ""
 while ($listener.IsListening) {
+    try { Vaciar-Pedidos } catch {}
+    # Cierre automatico de dias anteriores: una vez al arrancar y una vez cada dia nuevo, entre peticiones.
+    try {
+        $hoyTxt = (Get-Date).ToString("yyyy-MM-dd")
+        if ($global:cierreAutoDia -ne $hoyTxt) {
+            $global:cierreAutoDia = $hoyTxt
+            $swCa = [System.Diagnostics.Stopwatch]::StartNew()
+            $antes = $global:pedidos.Count
+            [void](Cerrar-Dia -Auto)
+            Vaciar-Pedidos
+            if ($global:pedidos.Count -ne $antes) { Write-Host ("[" + (Get-Date).ToString('HH:mm:ss') + "] Cierre automatico: se archivaron " + ($antes - $global:pedidos.Count) + " pedidos de dias anteriores (quedan " + $global:pedidos.Count + ").") }
+            Registrar-Tiempo 'tarea:CierreAutomaticoDia' $swCa.ElapsedMilliseconds
+        }
+    } catch {}
     try {
         $context = $listener.GetContext()
     } catch {
@@ -21107,11 +21271,6 @@ while ($listener.IsListening) {
             $context.Response.Headers["Access-Control-Allow-Headers"] = "Content-Type, X-Vendedor, X-Pos-Token, X-Clave-Caja"
             $context.Response.Headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
             $context.Response.Headers["Access-Control-Expose-Headers"] = "X-Nombre-Archivo, X-Nombre-Archivo-Enc"
-            $context.Response.Headers["Access-Control-Allow-Private-Network"] = "true"
-        }
-        if ($request.Url.AbsolutePath -eq "/api/tienda/estado") {
-            $context.Response.Headers["Access-Control-Allow-Origin"] = "*"
-            $context.Response.Headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
             $context.Response.Headers["Access-Control-Allow-Private-Network"] = "true"
         }
     } catch {}
@@ -21138,6 +21297,8 @@ while ($listener.IsListening) {
     }
 
     $swT = [System.Diagnostics.Stopwatch]::StartNew()
+    if (($method -ne "GET") -or ((([datetime]::UtcNow - $global:mantHora).TotalMilliseconds) -ge 700)) {
+    $global:mantHora = [datetime]::UtcNow
     Revisar-CambioCatalogo; Registrar-Tiempo 'tarea:CambioCatalogo(Excel)' $swT.ElapsedMilliseconds; $swT.Restart()
     Revisar-CatalogoAxis; Registrar-Tiempo 'tarea:CatalogoAxis' $swT.ElapsedMilliseconds; $swT.Restart()
     Revisar-StockAxis; Registrar-Tiempo 'tarea:StockAxis' $swT.ElapsedMilliseconds; $swT.Restart()
@@ -21145,8 +21306,9 @@ while ($listener.IsListening) {
     Revisar-BorradoresAxis; Registrar-Tiempo 'tarea:BorradoresAxis' $swT.ElapsedMilliseconds; $swT.Restart()
     Reintentar-ConciliacionDiferidos; Registrar-Tiempo 'tarea:ConciliacionDiferidos' $swT.ElapsedMilliseconds; $swT.Restart()
     Revisar-TareasPedidos; Registrar-Tiempo 'tarea:TareasPedidos' $swT.ElapsedMilliseconds
+    }
     $msMant = $swReq.ElapsedMilliseconds
-    if ($method -ne "GET") { $global:pedidosJsonCache = $null }
+    if ($method -ne "GET") { $global:pedidosJsonCache = $null; $global:pedidosRecJson = $null }
 
     # Las consultas de sincronizacion del Gestor de Almacenes (cada ~10 s por telefono) no se anotan en pantalla para no llenar la consola.
     if (-not ($method -eq "GET" -and ($path.StartsWith("/api/almacen/") -or $path -eq "/api/fotos/skus" -or $path -eq "/api/catalogo/version"))) {
@@ -21551,12 +21713,22 @@ while ($listener.IsListening) {
             # en Ajustes. umbral 0 desactiva la alerta (no se avisa de nada).
             $umbral = [int]$global:configApp.umbralStockBajo
             $bajos = @()
+            # La lista de stock bajo solo se vuelve a calcular cuando cambia el stock del catalogo o los minimos; mientras no, se reutiliza.
+            $sumaMin = 0.0
+            try { foreach ($vm in $global:minimosStock.Values) { $sumaMin += [double]$vm }; if ($global:minAxis.usar) { foreach ($vm2 in $global:minAxis.datos.Values) { $sumaMin += [double]$vm2 } } } catch {}
+            $claveBajo = (Obtener-FirmaCatalogo) + "|" + $umbral + "|" + $sumaMin + "|" + $global:minimosStock.Count + "|" + [string]$global:minAxis.usar
+            if (($null -ne $global:stockBajoJson) -and ($global:stockBajoUmbral -eq $claveBajo)) {
+                Enviar-Respuesta -Context $context -Body $global:stockBajoJson -ContentType "application/json; charset=utf-8"
+            } else {
             if ($true) {
                 $bajos = @($global:catalogo | Where-Object { $mm = Minimo-Efectivo $_; $_.stock -ne $null -and $mm -gt 0 -and [double]$_.stock -le $mm } |
                     Sort-Object -Property @{ Expression = { [double]$_.stock } } |
                     ForEach-Object { [pscustomobject]@{ sku = $_.sku; nombre = $_.nombre; stock = $_.stock } })
             }
-            Enviar-Respuesta -Context $context -Body (@{ umbral = $umbral; productos = $bajos } | ConvertTo-Json -Depth 5) -ContentType "application/json; charset=utf-8"
+            $global:stockBajoJson = (@{ umbral = $umbral; productos = $bajos } | ConvertTo-Json -Depth 5)
+            $global:stockBajoHora = [datetime]::UtcNow; $global:stockBajoUmbral = $claveBajo
+            Enviar-Respuesta -Context $context -Body $global:stockBajoJson -ContentType "application/json; charset=utf-8"
+            }
 
         } elseif ($method -eq "GET" -and $path -eq "/api/reposicion/almacenes") {
             try {
@@ -21568,46 +21740,6 @@ while ($listener.IsListening) {
                     if ([int]::TryParse([string]$aDef, [ref]$nDef)) { $pisoDef = $nDef; break }
                 }
                 Enviar-Json $context @{ ok = $true; pisoDefecto = $pisoDef; pisoGuardado = [int]$global:configApp.reposPiso; origenGuardado = [string]$global:configApp.reposOrigen; almacenes = @($listaAl) }
-            } catch {
-                Enviar-Json $context @{ ok = $false; error = [string]$_.Exception.Message }
-            }
-
-        } elseif ($method -eq "GET" -and $path -eq "/api/tienda/estado") {
-            # Para el Panel ToTo Tools: existencia y ventas por producto (solo lectura, sin datos de clientes).
-            try {
-                $diasT = 30
-                $tmpT = 0
-                if ([int]::TryParse([string]$request.QueryString["dias"], [ref]$tmpT)) { $diasT = $tmpT }
-                if ($diasT -lt 1) { $diasT = 1 }
-                if ($diasT -gt 90) { $diasT = 90 }
-                $ventasT = @{}
-                $ventasOkT = $false
-                try {
-                    if ($global:configAxis.activo) {
-                        $pisoT = 0
-                        if ($global:configApp.reposPiso) { $pisoT = [int]$global:configApp.reposPiso }
-                        if ($pisoT -le 0) {
-                            foreach ($aT in @($global:configAxis.almacenes)) {
-                                $nT = 0
-                                if ([int]::TryParse([string]$aT, [ref]$nT)) { $pisoT = $nT; break }
-                            }
-                        }
-                        if ($pisoT -gt 0) {
-                            $ventasT = Leer-VentasPisoMapa ([string]$global:configAxis.columnaSku) $pisoT $diasT
-                            $ventasOkT = $true
-                        }
-                    }
-                } catch { $ventasOkT = $false }
-                $listaT = New-Object System.Collections.ArrayList
-                foreach ($prT in @($global:catalogo)) {
-                    $skuT = [string]$prT.sku
-                    $stT = $null
-                    if ($null -ne $prT.stockBase) { $stT = [double]$prT.stockBase } elseif ($null -ne $prT.stock) { $stT = [double]$prT.stock }
-                    $vT = 0.0
-                    if ($skuT -and $ventasT.ContainsKey($skuT)) { $vT = [double]$ventasT[$skuT] }
-                    [void]$listaT.Add([pscustomobject]@{ sku = $skuT; nombre = [string]$prT.nombre; precio = [double]$prT.precio; stock = $stT; vendido = [math]::Round($vT, 2) })
-                }
-                Enviar-Json $context @{ ok = $true; dias = $diasT; ventas = $ventasOkT; generado = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss"); cantidad = $listaT.Count; items = @($listaT) } 200 5
             } catch {
                 Enviar-Json $context @{ ok = $false; error = [string]$_.Exception.Message }
             }
@@ -21822,12 +21954,17 @@ while ($listener.IsListening) {
             # asi un producto sin imagen no provoca peticiones fallidas ni parpadeos.
             $listaSkusFoto = New-Object System.Collections.ArrayList
             $carpetaFotosLista = Join-Path $scriptDir "fotos_catalogo"
-            if (Test-Path $carpetaFotosLista) {
+            # La lista de fotos solo se relee cuando la carpeta cambia (se agrega o quita una foto); mientras no, se reutiliza.
+            $fotosMarca = ""
+            try { if (Test-Path -LiteralPath $carpetaFotosLista) { $fotosMarca = (Get-Item -LiteralPath $carpetaFotosLista).LastWriteTimeUtc.Ticks.ToString() } } catch {}
+            $fotosCacheOk = (($null -ne $global:fotosSkusJson) -and ($global:fotosSkusMarca -eq $fotosMarca))
+            if ((-not $fotosCacheOk) -and (Test-Path $carpetaFotosLista)) {
                 foreach ($ffLista in @(Get-ChildItem -Path $carpetaFotosLista -Filter "*.jpg" -File -ErrorAction SilentlyContinue)) {
                     [void]$listaSkusFoto.Add([System.IO.Path]::GetFileNameWithoutExtension($ffLista.Name))
                 }
             }
-            Enviar-Respuesta -Context $context -Body (ConvertTo-Json -InputObject @($listaSkusFoto) -Compress) -ContentType "application/json; charset=utf-8"
+            if (-not $fotosCacheOk) { $global:fotosSkusJson = (ConvertTo-Json -InputObject @($listaSkusFoto) -Compress); $global:fotosSkusHora = [datetime]::UtcNow; $global:fotosSkusMarca = $fotosMarca }
+            Enviar-Respuesta -Context $context -Body $global:fotosSkusJson -ContentType "application/json; charset=utf-8"
 
         } elseif ($method -eq "GET" -and $path -match "^/foto/grande/([^/]+)\.jpg$") {
             $skuFoto = [System.Uri]::UnescapeDataString($matches[1])
@@ -22783,18 +22920,37 @@ while ($listener.IsListening) {
             Enviar-Respuesta -Context $context -Body (@{ ok = $true; asignados = $todos } | ConvertTo-Json -Depth 5) -ContentType "application/json; charset=utf-8"
 
         } elseif ($method -eq "GET" -and $path -eq "/api/pedidos") {
-            # Convertir todos los pedidos a JSON es lo mas pesado del servidor y los moviles lo piden cada pocos segundos.
-            # Se reutiliza el ultimo resultado hasta 1 s; cualquier peticion que no sea GET (crear/cobrar/editar) lo descarta.
+            # Los moviles piden esto cada pocos segundos y la lista completa (con todos los pedidos ya cobrados de dias anteriores)
+            # puede pesar varios MB. A los moviles se les manda lo pendiente y lo de los ultimos 3 dias; la PC sigue recibiendo todo.
             $json = $null
-            if ($global:pedidosJsonCache -and ((([datetime]::UtcNow - $global:pedidosJsonHora).TotalMilliseconds) -lt 1000) -and ($global:pedidosJsonCuenta -eq $global:pedidos.Count)) { $json = $global:pedidosJsonCache }
-            if ($null -eq $json) {
-                if ($global:pedidos.Count -eq 0) {
-                    $json = "[]"
-                } else {
-                    $json = $global:pedidos | ConvertTo-Json -Depth 10
-                    if ($global:pedidos.Count -eq 1) { $json = "[" + $json + "]" }
+            if (Es-PeticionPC $request) {
+                if ($global:pedidosJsonCache -and ((([datetime]::UtcNow - $global:pedidosJsonHora).TotalMilliseconds) -lt 5000) -and ($global:pedidosJsonCuenta -eq $global:pedidos.Count)) { $json = $global:pedidosJsonCache }
+                if ($null -eq $json) {
+                    if ($global:pedidos.Count -eq 0) { $json = "[]" }
+                    else {
+                        $json = $global:pedidos | ConvertTo-Json -Depth 10
+                        if ($global:pedidos.Count -eq 1) { $json = "[" + $json + "]" }
+                    }
+                    $global:pedidosJsonCache = $json; $global:pedidosJsonHora = [datetime]::UtcNow; $global:pedidosJsonCuenta = $global:pedidos.Count
                 }
-                $global:pedidosJsonCache = $json; $global:pedidosJsonHora = [datetime]::UtcNow; $global:pedidosJsonCuenta = $global:pedidos.Count
+            } else {
+                if ($global:pedidosRecJson -and ((([datetime]::UtcNow - $global:pedidosRecHora).TotalMilliseconds) -lt 5000)) { $json = $global:pedidosRecJson }
+                if ($null -eq $json) {
+                    $corte = (Get-Date).AddDays(-3).ToString("yyyy-MM-dd HH:mm:ss")
+                    $recientes = New-Object System.Collections.ArrayList
+                    foreach ($pr in $global:pedidos) {
+                        $est = [string]$pr.estado
+                        if (($est -ne "cobrado") -and ($est -ne "cancelado")) { [void]$recientes.Add($pr); continue }
+                        $hr = [string]$pr.hora
+                        if ((-not $hr) -or ($hr -ge $corte)) { [void]$recientes.Add($pr) }
+                    }
+                    if ($recientes.Count -eq 0) { $json = "[]" }
+                    else {
+                        $json = $recientes | ConvertTo-Json -Depth 10
+                        if ($recientes.Count -eq 1) { $json = "[" + $json + "]" }
+                    }
+                    $global:pedidosRecJson = $json; $global:pedidosRecHora = [datetime]::UtcNow
+                }
             }
             Enviar-Respuesta -Context $context -Body $json -ContentType "application/json; charset=utf-8"
 
@@ -24065,7 +24221,9 @@ while ($listener.IsListening) {
         } catch {}
     }
     try { Registrar-Tiempo ('ruta: ' + $method + ' ' + (Normalizar-RutaTiempo $path)) ($swReq.ElapsedMilliseconds - $msMant) } catch {}
+    try { Vaciar-Pedidos } catch {}
 }
 
+try { Vaciar-Pedidos } catch {}
 $listener.Stop()
 $listener.Close()
