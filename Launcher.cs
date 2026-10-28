@@ -100,7 +100,13 @@ namespace TotoLic
         }
         static bool Leer(string token, out DateTime exp, out string cli, out string err)
         {
-            exp = DateTime.MinValue; cli = ""; err = "";
+            DateTime ini;
+            return LeerFull(token, out exp, out ini, out cli, out err);
+        }
+        static string NormTok(string t) { return (t ?? "").Trim().Replace("\r", "").Replace("\n", "").Replace(" ", ""); }
+        static bool LeerFull(string token, out DateTime exp, out DateTime ini, out string cli, out string err)
+        {
+            exp = DateTime.MinValue; ini = DateTime.MinValue; cli = ""; err = "";
             try
             {
                 token = (token ?? "").Trim().Replace("\r", "").Replace("\n", "").Replace(" ", "");
@@ -113,10 +119,65 @@ namespace TotoLic
                 if (f.Length < 5 || f[0] != "TT1") { err = "Licencia no valida."; return false; }
                 if (f[1] != MachineRaw()) { err = "Esta licencia es de otra PC."; return false; }
                 exp = DateTime.ParseExact(f[3], "yyyyMMdd", CultureInfo.InvariantCulture);
+                try { ini = DateTime.ParseExact(f[2], "yyyyMMdd", CultureInfo.InvariantCulture); } catch { ini = DateTime.MinValue; }
                 cli = f[4];
                 return true;
             }
             catch { err = "Licencia ilegible."; return false; }
+        }
+
+        // ---------- licencia.lic: la clave y, si se renovo antes de vencer, los dias que se sumaron ----------
+        // Linea 1: la clave. Linea 2 (opcional): +DIAS;MAC  (la MAC la liga a esta clave y a esta PC; si se toca, no vale).
+        static void LeerArchivoLic(string raw, out string token, out int bonus)
+        {
+            token = ""; bonus = 0;
+            if (string.IsNullOrEmpty(raw)) return;
+            string[] ls = raw.Replace("\r", "").Split('\n');
+            for (int i = 0; i < ls.Length; i++)
+            {
+                string t = ls[i].Trim();
+                if (t.Length == 0) continue;
+                if (token.Length == 0 && !t.StartsWith("+")) { token = NormTok(t); continue; }
+                if (token.Length > 0 && t.StartsWith("+"))
+                {
+                    string[] p = t.Substring(1).Split(';');
+                    int n;
+                    if (p.Length == 2 && int.TryParse(p[0], out n) && n > 0 && n <= 3650 && Mac("BONO|" + token + "|" + p[0]) == p[1]) bonus = n;
+                }
+            }
+        }
+        static string ArchivoLic(string token, int bonus)
+        {
+            string s = token;
+            if (bonus > 0) s += "\r\n+" + bonus.ToString() + ";" + Mac("BONO|" + token + "|" + bonus.ToString());
+            return s;
+        }
+        static string UsadasFile() { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "TotoTools", "lu.dat"); }
+        static string UsadaId(string token) { return Mac("USADA|" + token); }
+        static bool UsadaTiene(string token)
+        {
+            string id = UsadaId(token);
+            string[] raws = new string[2];
+            try { using (RegistryKey k = Registry.LocalMachine.OpenSubKey(RegPath)) { if (k != null) raws[0] = k.GetValue("lu") as string; } } catch { }
+            try { if (File.Exists(UsadasFile())) raws[1] = File.ReadAllText(UsadasFile()); } catch { }
+            foreach (string r in raws)
+            {
+                if (string.IsNullOrEmpty(r)) continue;
+                foreach (string l in r.Replace("\r", "").Split('\n')) { if (l.Trim() == id) return true; }
+            }
+            return false;
+        }
+        static void UsadaPon(string token)
+        {
+            if (string.IsNullOrEmpty(token) || UsadaTiene(token)) return;
+            string id = UsadaId(token);
+            string r0 = null, r1 = null;
+            try { using (RegistryKey k = Registry.LocalMachine.OpenSubKey(RegPath)) { if (k != null) r0 = k.GetValue("lu") as string; } } catch { }
+            try { if (File.Exists(UsadasFile())) r1 = File.ReadAllText(UsadasFile()); } catch { }
+            string n0 = (string.IsNullOrEmpty(r0) ? "" : r0.Trim() + "\n") + id;
+            string n1 = (string.IsNullOrEmpty(r1) ? "" : r1.Trim() + "\n") + id;
+            try { using (RegistryKey k = Registry.LocalMachine.CreateSubKey(RegPath)) k.SetValue("lu", n0); } catch { }
+            try { string f = UsadasFile(); Directory.CreateDirectory(Path.GetDirectoryName(f)); File.WriteAllText(f, n1); } catch { }
         }
 
         // ---------- proteccion contra atrasar el reloj ----------
@@ -259,7 +320,8 @@ namespace TotoLic
             DateTime tEnd; string tMsg;
             bool trialOk = Trial(out tEnd, out tMsg);
             string token = "";
-            try { string f = Path.Combine(_dir, "licencia.lic"); if (File.Exists(f)) token = File.ReadAllText(f); } catch { }
+            int bonus = 0;
+            try { string f = Path.Combine(_dir, "licencia.lic"); if (File.Exists(f)) LeerArchivoLic(File.ReadAllText(f), out token, out bonus); } catch { }
             bool hayToken = token.Trim().Length > 0;
             string lmsg = "";
             bool licOk = false;
@@ -268,7 +330,9 @@ namespace TotoLic
             else
             {
                 string err;
-                if (!Leer(token, out exp, out cli, out err)) lmsg = err;
+                bool leido = Leer(token, out exp, out cli, out err);
+                if (leido && bonus > 0) exp = exp.AddDays(bonus);
+                if (!leido) lmsg = err;
                 else if (DateTime.Now >= exp) lmsg = "La licencia vencio el " + exp.ToString("dd/MM/yyyy") + ".";
                 else
                 {
@@ -309,17 +373,43 @@ namespace TotoLic
         }
         static bool Activate(string token, out string msg)
         {
-            DateTime exp; string cli, err;
+            DateTime exp, ini; string cli, err;
             msg = "";
-            if (!Leer(token, out exp, out cli, out err)) { msg = err; return false; }
+            token = NormTok(token);
+            if (!LeerFull(token, out exp, out ini, out cli, out err)) { msg = err; return false; }
             if (DateTime.Now >= exp) { msg = "Esa licencia ya vencio (" + exp.ToString("dd/MM/yyyy") + ")."; return false; }
             string f = Path.Combine(_dir, "licencia.lic");
             string old = null;
             try { if (File.Exists(f)) old = File.ReadAllText(f); } catch { }
-            File.WriteAllText(f, token.Trim());
+            // licencia que esta vigente ahora (con sus dias sumados), si la hay
+            string oldTok; int oldBonus;
+            LeerArchivoLic(old, out oldTok, out oldBonus);
+            DateTime oldExp = DateTime.MinValue; bool oldVig = false;
+            if (oldTok.Length > 0)
+            {
+                DateTime e0, i0; string c0, er0;
+                if (LeerFull(oldTok, out e0, out i0, out c0, out er0)) { oldExp = e0.AddDays(oldBonus); oldVig = DateTime.Now < oldExp; }
+            }
+            if (oldTok == token) { msg = oldVig ? "Esa licencia ya esta activada en esta PC." : "Esa licencia ya se uso en esta PC."; return false; }
+            if (UsadaTiene(token)) { msg = "Esa licencia ya se uso en esta PC."; return false; }
+            // Renovar antes de vencer: los dias que quedan se suman a los de la licencia nueva.
+            int bonus = 0;
+            if (oldVig && ini > DateTime.MinValue && exp > ini)
+            {
+                int dias = (int)Math.Round((exp - ini).TotalDays);
+                DateTime sumada = oldExp.AddDays(dias);
+                int b = (int)Math.Ceiling((sumada - exp).TotalDays);
+                if (b > 0 && b <= 3650) bonus = b;
+            }
+            File.WriteAllText(f, ArchivoLic(token, bonus));
             string m1;
             bool ok = Check(out m1);
-            if (ok && _modo == "licencia") return true;
+            if (ok && _modo == "licencia")
+            {
+                UsadaPon(token);
+                if (oldTok.Length > 0) UsadaPon(oldTok);
+                return true;
+            }
             msg = string.IsNullOrEmpty(_licMsg) ? m1 : _licMsg;
             try { if (old != null) File.WriteAllText(f, old); else File.Delete(f); } catch { }
             Check(out err);
