@@ -1,6 +1,6 @@
 ﻿<#
 ====================================================================
- SERVIDOR DE PEDIDOS - Toto Tools
+ SERVIDOR DE PEDIDOS
 ====================================================================
  Este script corre en la PC y hace tres cosas a la vez:
 
@@ -43,7 +43,7 @@
  CONFIGURACION DEL EXCEL (una sola vez, desde el Panel):
  La primera fila del Excel debe ser el encabezado. La primera vez
  que abras el Panel (http://localhost:8080/), te va a pedir la ruta
- completa del archivo (ej: C:\ToTo Tools\catalogo.xlsx) y luego que
+ completa del archivo (ej: C:\Catalogo\catalogo.xlsx) y luego que
  elijas, de una lista con los encabezados reales de tu archivo,
  cual columna es SKU, cual es Nombre, cual es Precio y cual es
  Cantidad/Stock (esta ultima es opcional). Esa configuracion queda
@@ -74,7 +74,7 @@
      con el metodo que dejo el vendedor en el pedido (Efectivo, o
      Transferencia con total x2). El vendedor lo elige en el movil,
      tambien cuando deja el pedido "Pendiente de pago".
-   - Recibo estilo TOTOOLS de 32 columnas (ver variables $recibo... al
+   - Recibo de 32 columnas (ver variables $recibo... al
      inicio del script). En transferencia se imprime el precio por
      transferencia. Tasa USD: casilla del Panel (config_app.json).
    - Movil: Ajustes en un menu aparte, "Mis pedidos de hoy" plegable y
@@ -137,10 +137,10 @@
 
 $port = 8080
 $nombreImpresora = "CAJA"                                    # <-- nombre EXACTO de tu impresora en Windows
-$catalogoPath    = "C:\ToTo Tools\catalogo.xlsx"              # <-- valor SOLO por defecto; se reemplaza al configurar la ruta desde el Panel
+$catalogoPath    = "C:\Catalogo\catalogo.xlsx"              # <-- valor SOLO por defecto; se reemplaza al configurar la ruta desde el Panel
 
 # ---- Formato del recibo (ticket) ----
-$reciboNombre    = "TOTOOLS"                                 # nombre grande de arriba
+$reciboNombre    = "MI NEGOCIO"                               # nombre grande de arriba (se cambia en Ajustes)
 $reciboNit       = "84060426826"                             # deja "" para no imprimir el NIT
 $reciboPie       = "Los Equipos Electricos tienen una Garantia de 7 dias."   # mensaje final ("" = ninguno)
 $reciboAncho     = 32                                        # columnas del papel: 58 mm = 32 | 80 mm = 42 o 48
@@ -154,9 +154,78 @@ if (-not ("TotoLic.Gate" -as [type]) -or -not $global:TT_APPDIR) {
     exit
 }
 $scriptDir = $global:TT_APPDIR
-$pedidosFile = Join-Path $scriptDir "pedidos.json"
-$asignadosFile = Join-Path $scriptDir "pedidos_asignados.json"
-$alertasFile = Join-Path $scriptDir "alertas_vendedor.json"
+
+# ------------------------------------------------------------------
+# Carpetas organizadas (la raiz del programa queda mas limpia)
+#   config\  -> ajustes
+#   datos\   -> pedidos, vendedores, stock auxiliar, etc.
+#   logs\    -> registros
+#   lib\     -> conectores MariaDB (MySqlConnector.dll, etc.)
+#   historial\, respaldos\, fotos_catalogo\ -> ya existian
+# Al arrancar se MUEVEN solos los archivos que todavia esten en la raiz
+# (instalaciones antiguas) hacia su carpeta nueva.
+# ------------------------------------------------------------------
+$configDir = Join-Path $scriptDir "config"
+$datosDir  = Join-Path $scriptDir "datos"
+$logsDir   = Join-Path $scriptDir "logs"
+$libDir    = Join-Path $scriptDir "lib"
+foreach ($dOrg in @($configDir, $datosDir, $logsDir, $libDir)) {
+    if (-not (Test-Path -LiteralPath $dOrg)) {
+        try { New-Item -ItemType Directory -Path $dOrg -Force | Out-Null } catch {}
+    }
+}
+function Mover-SiEstaEnRaiz([string]$nombre, [string]$destinoDir) {
+    $origen = Join-Path $scriptDir $nombre
+    $destino = Join-Path $destinoDir $nombre
+    if (-not (Test-Path -LiteralPath $origen)) { return }
+    if (Test-Path -LiteralPath $destino) {
+        # Ya existe en el sitio nuevo: la copia de la raiz se deja como .raiz-antigua
+        try { Move-Item -LiteralPath $origen -Destination ($destino + ".raiz-antigua") -Force -ErrorAction SilentlyContinue } catch {}
+        return
+    }
+    try {
+        if (-not (Test-Path -LiteralPath $destinoDir)) { New-Item -ItemType Directory -Path $destinoDir -Force | Out-Null }
+        Move-Item -LiteralPath $origen -Destination $destino -Force
+    } catch {}
+    # Mueve tambien .bak y .tmp si existen
+    foreach ($suf in @('.bak', '.tmp', '.corrupto')) {
+        $o2 = $origen + $suf
+        $d2 = $destino + $suf
+        if ((Test-Path -LiteralPath $o2) -and -not (Test-Path -LiteralPath $d2)) {
+            try { Move-Item -LiteralPath $o2 -Destination $d2 -Force -ErrorAction SilentlyContinue } catch {}
+        }
+    }
+}
+# Configuracion
+foreach ($n in @(
+    'config_axis.json','config_app.json','config_excel.json','recibo_config.json',
+    'red_config.json','colores_config.json','garantia_config.json','respaldo_config.json',
+    'instalacion.json','sinonimos.json'
+)) { Mover-SiEstaEnRaiz $n $configDir }
+# Datos de trabajo
+foreach ($n in @(
+    'pedidos.json','pedidos_asignados.json','alertas_vendedor.json','pines_vendedores.json',
+    'permisos_vendedores.json','roles_vendedores.json','costos.json','postits.json',
+    'devoluciones.json','mensajes_pc.json','skus_conocidos.json','productos_nuevos.json',
+    'axis_ventas.json','axis_ventas_dia.json','pos_clave.json','admin_remoto.json',
+    'minimos_stock.json','minimos_axis.json','proveedores.json','etiquetas_datos.json','gastos_cuentas.json'
+)) { Mover-SiEstaEnRaiz $n $datosDir }
+# Logs
+foreach ($n in @('tiempos_lentos.log','tiempos_rutas.json','diferencias_caja.log','auditoria.log')) {
+    Mover-SiEstaEnRaiz $n $logsDir
+}
+# Conectores sueltos en la raiz -> lib\
+foreach ($n in @(
+    'MySqlConnector.dll','MySql.Data.dll',
+    'System.Memory.dll','System.Buffers.dll','System.Numerics.Vectors.dll',
+    'System.Runtime.CompilerServices.Unsafe.dll','System.Threading.Tasks.Extensions.dll',
+    'System.Diagnostics.DiagnosticSource.dll','System.ValueTuple.dll',
+    'Microsoft.Extensions.Logging.Abstractions.dll'
+)) { Mover-SiEstaEnRaiz $n $libDir }
+
+$pedidosFile = Join-Path $datosDir "pedidos.json"
+$asignadosFile = Join-Path $datosDir "pedidos_asignados.json"
+$alertasFile = Join-Path $datosDir "alertas_vendedor.json"
 
 # ------------------------------------------------------------------
 # Libreria SheetJS (xlsx_full_min.js) -- debe estar en esta carpeta
@@ -833,7 +902,7 @@ $global:icon512Bytes = [Convert]::FromBase64String(($icon512Base64 -replace '\s'
 
 $global:manifestVendedor = @'
 {
-  "name": "Toto Tools - Pedidos",
+  "name": "Pedidos",
   "short_name": "Pedidos",
   "start_url": "/vendedor",
   "scope": "/",
@@ -849,7 +918,7 @@ $global:manifestVendedor = @'
 
 $global:manifestPC = @'
 {
-  "name": "Toto Tools - Panel de Pedidos",
+  "name": "Panel de Pedidos",
   "short_name": "Panel Pedidos",
   "start_url": "/",
   "scope": "/",
@@ -1013,20 +1082,23 @@ function Reparar-JsonCorruptos {
         } catch { return $false }
     }
     try {
-        foreach ($fj in @(Get-ChildItem -LiteralPath $scriptDir -Filter "*.json" -File -ErrorAction SilentlyContinue)) {
-            if ($fj.Length -gt 30MB) { continue }
-            if (& $jsonValido $fj.FullName) { continue }
-            $bakRep = $fj.FullName + ".bak"
-            if ((Test-Path -LiteralPath $bakRep) -and (& $jsonValido $bakRep)) {
-                Copy-Item -LiteralPath $fj.FullName -Destination ($fj.FullName + ".corrupto") -Force -ErrorAction SilentlyContinue
-                Copy-Item -LiteralPath $bakRep -Destination $fj.FullName -Force
-                Write-Host ("[AVISO] '" + $fj.Name + "' estaba danado (corte de luz?). Se recupero la ultima copia buena.")
-            } else {
-                Write-Host ("[AVISO] '" + $fj.Name + "' parece danado y no hay copia anterior. Revisa la carpeta 'respaldos'.")
+        $dirsJson = @($scriptDir, $configDir, $datosDir) | Where-Object { $_ -and (Test-Path -LiteralPath $_) }
+        foreach ($dirJ in $dirsJson) {
+            foreach ($fj in @(Get-ChildItem -LiteralPath $dirJ -Filter "*.json" -File -ErrorAction SilentlyContinue)) {
+                if ($fj.Length -gt 30MB) { continue }
+                if (& $jsonValido $fj.FullName) { continue }
+                $bakRep = $fj.FullName + ".bak"
+                if ((Test-Path -LiteralPath $bakRep) -and (& $jsonValido $bakRep)) {
+                    Copy-Item -LiteralPath $fj.FullName -Destination ($fj.FullName + ".corrupto") -Force -ErrorAction SilentlyContinue
+                    Copy-Item -LiteralPath $bakRep -Destination $fj.FullName -Force
+                    Write-Host ("[AVISO] '" + $fj.Name + "' estaba danado (corte de luz?). Se recupero la ultima copia buena.")
+                } else {
+                    Write-Host ("[AVISO] '" + $fj.Name + "' parece danado y no hay copia anterior. Revisa la carpeta 'respaldos'.")
+                }
             }
-        }
-        foreach ($tj in @(Get-ChildItem -LiteralPath $scriptDir -Filter "*.json.tmp" -File -ErrorAction SilentlyContinue)) {
-            Remove-Item -LiteralPath $tj.FullName -Force -ErrorAction SilentlyContinue
+            foreach ($tj in @(Get-ChildItem -LiteralPath $dirJ -Filter "*.json.tmp" -File -ErrorAction SilentlyContinue)) {
+                Remove-Item -LiteralPath $tj.FullName -Force -ErrorAction SilentlyContinue
+            }
         }
     } catch {}
 }
@@ -1787,7 +1859,7 @@ $global:catalogoInfo = [pscustomobject]@{
     origen           = "excel"
 }
 
-$configExcelPath = Join-Path $scriptDir "config_excel.json"
+$configExcelPath = Join-Path $configDir "config_excel.json"
 $global:configExcel = [pscustomobject]@{ ruta = $catalogoPath; mapeo = $null }
 $global:catalogoMTimeProcesada = $null
 
@@ -1826,7 +1898,7 @@ Cargar-ConfigExcel
 # nada en la base: la consulta es un SELECT fijo y la sesion se abre
 # en modo "solo lectura". Usa el cliente mariadb.exe / mysql.exe.
 # ------------------------------------------------------------------
-$configAxisPath = Join-Path $scriptDir "config_axis.json"
+$configAxisPath = Join-Path $configDir "config_axis.json"
 $global:configAxis = [pscustomobject]@{
     activo        = $false
     servidor      = "localhost"
@@ -2203,6 +2275,7 @@ function Buscar-ConectorDll {
     $ruta = ''
     try {
         $carpetas = New-Object System.Collections.ArrayList
+        [void]$carpetas.Add($libDir)
         [void]$carpetas.Add($scriptDir)
         try { foreach ($pr in @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -like '*Axis*' })) { try { $fp = $pr.MainModule.FileName; if ($fp) { [void]$carpetas.Add((Split-Path -Parent $fp)) } } catch {} } } catch {}
         try { foreach ($pe in @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '*Axis*' -and $_.ExecutablePath })) { [void]$carpetas.Add((Split-Path -Parent $pe.ExecutablePath)) } } catch {}
@@ -2296,12 +2369,12 @@ function Registrar-Tiempo([string]$nombre, [double]$ms) {
             $e.lentas = $e.lentas + 1
             $linea = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss") + " | " + [math]::Round($ms) + " ms | " + $nombre
             Write-Host ("[LENTO] " + $linea)
-            $rutaLog = Join-Path $scriptDir "tiempos_lentos.log"
+            $rutaLog = Join-Path $logsDir "tiempos_lentos.log"
             if ((-not (Test-Path -LiteralPath $rutaLog)) -or ((Get-Item -LiteralPath $rutaLog).Length -lt 2000000)) { [System.IO.File]::AppendAllText($rutaLog, $linea + "`r`n", [System.Text.Encoding]::UTF8) }
         }
         if (((Get-Date) - $global:tiemposGuardado).TotalSeconds -ge 60) {
             $global:tiemposGuardado = Get-Date
-            [System.IO.File]::WriteAllText((Join-Path $scriptDir "tiempos_rutas.json"), (Resumen-Tiempos | ConvertTo-Json -Depth 6), (New-Object System.Text.UTF8Encoding($false)))
+            [System.IO.File]::WriteAllText((Join-Path $logsDir "tiempos_rutas.json"), (Resumen-Tiempos | ConvertTo-Json -Depth 6), (New-Object System.Text.UTF8Encoding($false)))
         }
     } catch {}
 }
@@ -2583,7 +2656,7 @@ function Obtener-FirmaCatalogo {
 #    compararla (para no leerla a medias mientras AxisPOS la guarda).
 #  - Se apaga con "cerrarPedidosAuto": false en config_axis.json.
 # ------------------------------------------------------------------
-$axisVentasPath = Join-Path $scriptDir "axis_ventas.json"
+$axisVentasPath = Join-Path $datosDir "axis_ventas.json"
 $global:axisVentasUltimoId = [long]-1
 $global:axisVentasUltima = [datetime]::MinValue
 $global:axisVentasFallos = 0
@@ -2948,7 +3021,7 @@ function Avisar-DiferenciaCaja($p, $pedItems, $venta, [string]$momento, [string]
             [void]$global:mensajesPc.Add($regPc)
             Guardar-MensajesPc
             $lineaLog = $ahora.ToString("yyyy-MM-dd HH:mm:ss") + " | venta AxisPOS #" + $ref + " | hecha por: " + $quien + " | pedido #" + $p.id + " (" + [string]$p.vendedor + ") | pasaron: " + (Texto-VentaCompleta $venta) + " | " + $cambios
-            [System.IO.File]::AppendAllText((Join-Path $scriptDir "diferencias_caja.log"), $lineaLog + "`r`n", [System.Text.Encoding]::UTF8)
+            [System.IO.File]::AppendAllText((Join-Path $logsDir "diferencias_caja.log"), $lineaLog + "`r`n", [System.Text.Encoding]::UTF8)
         } catch {}
     }
     Write-Host ("[" + $ahora.ToString('HH:mm:ss') + "] AxisPOS: aviso a " + [string]$p.vendedor + " - el pedido #" + $p.id + " no coincide con lo de la caja (" + $momento + ")")
@@ -3035,7 +3108,7 @@ function Revisar-BorradoresAxis {
 #    (axis_ventas_dia.json guarda las ultimas 3 dias de ventas leidas).
 # ------------------------------------------------------------------
 $global:ventasAxisDia = New-Object System.Collections.ArrayList
-$axisVentasDiaPath = Join-Path $scriptDir "axis_ventas_dia.json"
+$axisVentasDiaPath = Join-Path $datosDir "axis_ventas_dia.json"
 $global:tareasPedidosUltima = [datetime]::MinValue
 
 function Poner-Prop($o, [string]$n, $v) { $o | Add-Member -NotePropertyName $n -NotePropertyValue $v -Force }
@@ -3281,7 +3354,7 @@ function Avisar-FaltaCobrar($p, [string]$acct, [string]$operador) {
     try { Agregar-AlertaVendedor ([string]$p.vendedor) ("Tu pedido #" + $p.id + ": la caja cobro solo una parte (venta #" + $acct + "). Falta por cobrar: " + $falta + ". Ya se le aviso a la caja.") $p.id "pedido" } catch {}
     try {
         $lineaLog = $ahora.ToString("yyyy-MM-dd HH:mm:ss") + " | venta parcial AxisPOS #" + $acct + " | hecha por: " + $(if ($operador) { $operador } else { "no se sabe" }) + " | pedido #" + $p.id + " (" + [string]$p.vendedor + ") | falta cobrar: " + $falta
-        [System.IO.File]::AppendAllText((Join-Path $scriptDir "diferencias_caja.log"), $lineaLog + "`r`n", [System.Text.Encoding]::UTF8)
+        [System.IO.File]::AppendAllText((Join-Path $logsDir "diferencias_caja.log"), $lineaLog + "`r`n", [System.Text.Encoding]::UTF8)
     } catch {}
     Write-Host ("[" + $ahora.ToString('HH:mm:ss') + "] AxisPOS: venta parcial #" + $acct + " del pedido #" + $p.id + " - falta cobrar: " + $falta)
 }
@@ -3845,7 +3918,7 @@ function Revisar-TareasPedidos {
 # (unidad de red, o una carpeta de OneDrive / Google Drive / Dropbox que sube sola a la nube) tambien se
 # copia alli. Si esa carpeta no esta disponible (red caida) la copia se reintenta sola cada 10 minutos.
 # ------------------------------------------------------------------
-$respaldoCfgPath = Join-Path $scriptDir "respaldo_config.json"
+$respaldoCfgPath = Join-Path $configDir "respaldo_config.json"
 $respaldoDirLocal = Join-Path $scriptDir "respaldos"
 $global:respaldoCfg = [pscustomobject]@{ activo = $true; cadaHoras = 6; conservar = 20; carpetaExtra = ""; ultimo = ""; ultimoOk = $true; ultimoMensaje = ""; pendienteExtra = "" }
 $global:respaldoEnCurso = $false
@@ -4015,7 +4088,7 @@ function Revisar-Respaldo {
 #  - grupos: terminos que significan lo mismo (uno por grupo).
 #  - productos: palabras o codigos extra para un SKU concreto (ej. un codigo viejo del proveedor).
 # ------------------------------------------------------------------
-$sinonimosPath = Join-Path $scriptDir "sinonimos.json"
+$sinonimosPath = Join-Path $configDir "sinonimos.json"
 $global:sinonimos = @{ version = 1; grupos = (New-Object System.Collections.ArrayList); productos = @{} }
 
 function Sinonimos-Limpiar($grupos, $productos) {
@@ -4082,7 +4155,7 @@ Cargar-Sinonimos
 # si se escribe la clave de administrador (la misma que se pone en la PC, menu, PIN de vendedores). La clave da un
 # token que dura 12 horas de uso, se puede cerrar desde el movil y se anula si se cambia la clave.
 # ------------------------------------------------------------------
-$adminRemotoPath = Join-Path $scriptDir "admin_remoto.json"
+$adminRemotoPath = Join-Path $datosDir "admin_remoto.json"
 $global:adminTokens = @{}
 function Guardar-AdminTokens {
     $lista = New-Object System.Collections.ArrayList
@@ -4204,7 +4277,7 @@ function Inyectar-Admin([string]$html) {
 
 
 # ---------- Auditoria: quien hizo que (un renglon JSON por accion, en auditoria.log) ----------
-$auditoriaPath = Join-Path $scriptDir "auditoria.log"
+$auditoriaPath = Join-Path $logsDir "auditoria.log"
 function Registrar-Auditoria([string]$usuario, [string]$accion, [string]$detalle, $pedidoId = $null, $monto = $null, [bool]$alerta = $false, [string]$origen = "") {
     try {
         $reg = [ordered]@{ hora = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss"); usuario = $usuario; origen = $origen; accion = $accion; detalle = $detalle; pedido = $pedidoId; monto = $monto; alerta = $alerta }
@@ -4249,7 +4322,7 @@ function Avisar-PC([string]$origen, [string]$texto) {
 }
 
 # ---------- Costo de reposicion (manual y/o columna de AxisPOS) ----------
-$costosPath = Join-Path $scriptDir "costos.json"
+$costosPath = Join-Path $datosDir "costos.json"
 $global:costos = @{ manual = @{}; axis = @{}; columnaAxis = "PriceIn"; ultimaAxis = "" }
 $global:costosUltimoIntento = [datetime]::MinValue
 function Guardar-Costos {
@@ -4312,7 +4385,7 @@ function Revisar-CostosAxis {
 }
 
 # ---------- Roles (administrador / cajero / vendedor de piso) y limite de descuento ----------
-$rolesPath = Join-Path $scriptDir "roles_vendedores.json"
+$rolesPath = Join-Path $datosDir "roles_vendedores.json"
 $global:rolesVendedores = @{}
 $global:rolesDef = [ordered]@{
     administrador = @{ t = "Administrador"; desc = 100.0; p = @{ crearPedidos = $true; cobrar = $true; cancelar = $true; editar = $true; imprimir = $true; descuentos = $true; verStock = $true; misPedidos = $true; ajustes = $true; modoCliente = $true; asignados = $true; notificaciones = $true; mensajes = $true; venderBajoCosto = $true } }
@@ -4486,7 +4559,7 @@ function Obtener-VentasProductos([int]$dias) {
 }
 
 # ---------- Proveedores (para compras) ----------
-$proveedoresPath = Join-Path $scriptDir "proveedores.json"
+$proveedoresPath = Join-Path $datosDir "proveedores.json"
 $global:proveedores = @{ lista = (New-Object System.Collections.ArrayList); porSku = @{} }
 function Guardar-Proveedores {
     Escribir-ArchivoConReintento -ruta $proveedoresPath -contenido ($global:proveedores | ConvertTo-Json -Depth 4) | Out-Null
@@ -4517,7 +4590,7 @@ function Texto-ADouble($v) { $x = 0.0; [void][double]::TryParse(([string]$v).Rep
 # AxisPOS para ese producto (si es mayor que 0), 3) el minimo general de la app.
 # El nombre de la columna se detecta solo (SHOW COLUMNS) o se escribe a mano en Ajustes.
 # ------------------------------------------------------------------
-$minAxisPath = Join-Path $scriptDir "minimos_axis.json"
+$minAxisPath = Join-Path $datosDir "minimos_axis.json"
 $global:minAxis = @{ usar = $true; columna = "goods.MinQtty"; ultima = ""; error = ""; datos = @{}; maxRef = "goods.NormalQtty" }
 $global:minAxisUltimoIntento = [datetime]::MinValue
 function Guardar-MinAxis {
@@ -4627,7 +4700,7 @@ function Origen-Minimo($p) {
 # NOTAS RAPIDAS (POST-IT) DEL MOSTRADOR
 # Recados del dia que se ven flotando en el Panel de la PC. Se guardan aqui para que no se pierdan al reiniciar.
 # ------------------------------------------------------------------
-$postitsPath = Join-Path $scriptDir "postits.json"
+$postitsPath = Join-Path $datosDir "postits.json"
 $global:postits = @{ siguienteId = 1; notas = (New-Object System.Collections.ArrayList) }
 function Guardar-Postits {
     Escribir-ArchivoConReintento -ruta $postitsPath -contenido ($global:postits | ConvertTo-Json -Depth 5) | Out-Null
@@ -4645,6 +4718,28 @@ function Cargar-Postits {
     } catch {}
 }
 Cargar-Postits
+
+# ---------------- Cuentas y gastos (reemplaza el uso principal de post-its en pantalla) ----------------
+$gastosPath = Join-Path $datosDir "gastos_cuentas.json"
+$global:gastosCuentas = @{ siguienteId = 1; registros = (New-Object System.Collections.ArrayList) }
+function Guardar-GastosCuentas {
+    Escribir-ArchivoConReintento -ruta $gastosPath -contenido ($global:gastosCuentas | ConvertTo-Json -Depth 8) | Out-Null
+}
+function Cargar-GastosCuentas {
+    try {
+        if (Test-Path -LiteralPath $gastosPath) {
+            $raw = Get-Content $gastosPath -Raw -Encoding UTF8
+            if ($raw -and $raw.Trim().Length -gt 2) {
+                $d = $raw | ConvertFrom-Json
+                $global:gastosCuentas.registros = New-Object System.Collections.ArrayList
+                foreach ($r in @($d.registros)) { if ($r) { [void]$global:gastosCuentas.registros.Add($r) } }
+                if ($d.siguienteId) { $global:gastosCuentas.siguienteId = [int]$d.siguienteId }
+            }
+        }
+    } catch { Write-Host "Aviso: no se pudo leer gastos_cuentas.json ($_)." }
+}
+Cargar-GastosCuentas
+
 function Limpiar-TextoPostit($t) {
     $s = [regex]::Replace([string]$t, '[\x00-\x08\x0B\x0C\x0E-\x1F]', '')
     $s = $s.Trim()
@@ -4744,6 +4839,10 @@ function Auditar-DescuentosAsignado($a) {
 function Config-ParaPanel {
     $c = $global:configApp | Select-Object *
     $c | Add-Member -NotePropertyName axisConfigurado -NotePropertyValue ([bool]$global:axisConfigurado) -Force
+    $nomNeg = ""
+    try { $nomNeg = ([string]$global:reciboCfg.nombre).Trim() } catch { $nomNeg = "" }
+    $c | Add-Member -NotePropertyName nombreNegocio -NotePropertyValue $nomNeg -Force
+    $c | Add-Member -NotePropertyName negocioNombre -NotePropertyValue $nomNeg -Force
     return $c
 }
 
@@ -4778,7 +4877,7 @@ function Aplicar-OrigenDatos([switch]$Inicio) {
 #   muestra en el buscador los productos sin existencias.
 # Se cambia desde el Panel de la PC y se recuerda al reiniciar.
 # ------------------------------------------------------------------
-$configAppPath = Join-Path $scriptDir "config_app.json"
+$configAppPath = Join-Path $configDir "config_app.json"
 $global:configApp = [pscustomobject]@{ ocultarSinStock = $false; tasaDolar = 0.0; autoservicioDestino = "pc"; wifiSSID = ""; wifiClave = ""; umbralStockBajo = 3; permitirDescuentos = $false; permitirBorradores = $false; reposPiso = 0; reposOrigen = ""; origenDatos = "axispos"; unirPedidos = $true; unirPedidosMinutos = 3; unirPedidosMax = 4 }
 $global:ipLan = "localhost"
 
@@ -4851,7 +4950,7 @@ function Guardar-ConfigApp {
 # Las imagenes (logo y QR) llegan ya convertidas a puntos blanco/negro desde
 # el navegador y aqui solo se mandan a la impresora (ESC/POS raster).
 # ------------------------------------------------------------------
-$reciboCfgPath = Join-Path $scriptDir "recibo_config.json"
+$reciboCfgPath = Join-Path $configDir "recibo_config.json"
 $global:reciboCfg = [pscustomobject]@{
     nombre                   = [string]$reciboNombre
     nit                      = [string]$reciboNit
@@ -5079,7 +5178,7 @@ function Pedido-Muestra([string]$metodo, [string]$estado) {
 # PIN correcto para crear pedidos o tocar los suyos (metodo/cobrar/cancelar).
 # Se guarda por nombre en minusculas: clave -> PIN (texto, ej. "1234").
 # ------------------------------------------------------------------
-$pinesPath = Join-Path $scriptDir "pines_vendedores.json"
+$pinesPath = Join-Path $datosDir "pines_vendedores.json"
 $global:pinesVendedores = @{}
 
 function Cargar-Pines {
@@ -5135,7 +5234,7 @@ Cargar-ReciboCfg
 # ------------------------------------------------------------------
 $global:appVersion = "1.0"
 $global:diasPrueba = 7
-$instalacionPath = Join-Path $scriptDir "instalacion.json"
+$instalacionPath = Join-Path $configDir "instalacion.json"
 $global:instalacion = [pscustomobject]@{ configurado = $false; bienvenidaVista = $false; impresora = ""; roles = @{} }
 $global:licCache = $null
 $global:licCacheHora = [datetime]::MinValue
@@ -5270,7 +5369,7 @@ function Estado-Instalacion {
         impresora = [string]$nombreImpresora
         ancho = [int]$rc.ancho
         origenDatos = $(if ([bool]$global:configAxis.activo) { "axispos" } else { "excel" })
-        axis = @{ activo = [bool]$global:configAxis.activo; servidor = [string]$global:configAxis.servidor; puerto = [int]$global:configAxis.puerto; usuario = [string]$global:configAxis.usuario; base = [string]$global:configAxis.base }
+        axis = @{ activo = [bool]$global:configAxis.activo; servidor = [string]$global:configAxis.servidor; puerto = [int]$global:configAxis.puerto; usuario = [string]$global:configAxis.usuario; base = [string]$global:configAxis.base; almacenes = @($global:configAxis.almacenes); claveDefinida = (-not [string]::IsNullOrEmpty([string]$global:configAxis.clave)); conexionDirecta = [bool]$global:configAxis.conexionDirecta; forzarConexionDirecta = [bool]($global:configAxis.PSObject.Properties.Name -contains 'forzarConexionDirecta' -and $global:configAxis.forzarConexionDirecta) }
         excelRuta = [string]$global:configExcel.ruta
         vendedores = @($vend)
         roles = @(Roles-Predefinidos)
@@ -5321,6 +5420,8 @@ function Probar-Guardar-Axis($d, [bool]$guardar) {
     $pto = 0; try { $pto = [int]$d.puerto } catch {}
     if (-not $srv) { $srv = "localhost" }
     if ($pto -le 0) { $pto = 3306 }
+    # Si la clave viene vacia y ya habia una guardada, se reutiliza (el formulario no reenvia la clave por seguridad).
+    if ([string]::IsNullOrEmpty($cla) -and -not [string]::IsNullOrEmpty([string]$global:configAxis.clave)) { $cla = [string]$global:configAxis.clave }
     foreach ($t in @($srv, $usr, $bas, $cla)) { if ($t -match '["\r\n]') { throw "Hay caracteres no validos en los datos de AxisPOS." } }
     if (-not $usr -or -not $bas) { throw "Falta el usuario o el nombre de la base de datos." }
     $copia = $global:configAxis | Select-Object *
@@ -5334,6 +5435,13 @@ function Probar-Guardar-Axis($d, [bool]$guardar) {
             $global:configAxis.activo = $true
             $global:axisConfigurado = $true
             $global:configApp.origenDatos = "axispos"
+            if ($d.PSObject.Properties.Name -contains 'almacenes' -and $null -ne $d.almacenes) {
+                $listaAlm = @()
+                foreach ($a in @($d.almacenes)) { $nA = 0; if ([int]::TryParse([string]$a, [ref]$nA) -and $nA -gt 0) { $listaAlm += $nA } }
+                if ($listaAlm.Count -gt 0) { $global:configAxis.almacenes = $listaAlm }
+            }
+            if ($d.PSObject.Properties.Name -contains 'conexionDirecta') { $global:configAxis.conexionDirecta = [bool]$d.conexionDirecta }
+            if ($d.PSObject.Properties.Name -contains 'forzarConexionDirecta') { $global:configAxis.forzarConexionDirecta = [bool]$d.forzarConexionDirecta }
             Escribir-ArchivoConReintento -ruta $configAxisPath -contenido ($global:configAxis | ConvertTo-Json -Depth 5) | Out-Null
             Guardar-ConfigApp
             try { Aplicar-OrigenDatos } catch {}
@@ -5494,7 +5602,7 @@ public class RawPrinterHelper
     {
         IntPtr hPrinter;
         DOCINFOA di = new DOCINFOA();
-        di.pDocName = "Pedido Toto Tools";
+        di.pDocName = "Pedido";
         di.pDataType = "RAW";
         bool exito = false;
 
@@ -5793,6 +5901,145 @@ function Clave-EnvioGuardar([string]$clave, [string]$resp) {
     $global:clavesEnvio[$clave] = @{ t = (Get-Date); resp = $resp }
 }
 
+function Generar-TextoGasto($r) {
+    $rc = $global:reciboCfg
+    $ancho = [int]$rc.ancho
+    if ($ancho -lt 24) { $ancho = 32 }
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $sb = New-Object System.Text.StringBuilder
+    $sep = ("-" * $ancho)
+    $grande = Modo-Impresora 24
+    $normal = Modo-Impresora 0
+    if ($rc.estilo) { [void]$sb.Append(([string][char]27) + "@") }
+    try { Agregar-EncabezadoNegocio $sb $ancho $grande $normal } catch {
+        $nom = [string]$rc.nombre; if (-not $nom) { $nom = "MI NEGOCIO" }
+        [void]$sb.AppendLine((Centrar $nom $ancho))
+    }
+    [void]$sb.AppendLine($sep)
+    [void]$sb.AppendLine($grande + (Centrar "GASTO" $ancho) + $normal)
+    [void]$sb.AppendLine($sep)
+    $fecha = [string]$r.hora
+    try { $fecha = ([datetime]::ParseExact([string]$r.hora, "yyyy-MM-dd HH:mm:ss", $inv)).ToString("d/M/yyyy HH:mm", $inv) } catch {}
+    [void]$sb.AppendLine("Folio: G-$($r.id)")
+    [void]$sb.AppendLine("Fecha: $fecha")
+    if ($r.concepto) { foreach ($l in @(Partir-Texto ("Concepto: " + [string]$r.concepto) $ancho)) { [void]$sb.AppendLine($l) } }
+    if ($r.categoria) { [void]$sb.AppendLine("Categoria: $($r.categoria)") }
+    if ($r.metodo) { [void]$sb.AppendLine("Metodo: $($r.metodo)") }
+    [void]$sb.AppendLine($sep)
+    [void]$sb.AppendLine($grande + (Linea-LR "MONTO:" ("$" + (Formato-Monto ([double]$r.monto))) $ancho) + $normal)
+    [void]$sb.AppendLine($sep)
+    if ($r.realizadoPor) { foreach ($l in @(Partir-Texto ("Realizado por: " + [string]$r.realizadoPor) $ancho)) { [void]$sb.AppendLine($l) } }
+    if ($r.notas) { foreach ($l in @(Partir-Texto ("Notas: " + [string]$r.notas) $ancho)) { [void]$sb.AppendLine($l) } }
+    [void]$sb.AppendLine("")
+    [void]$sb.AppendLine("Firma:")
+    [void]$sb.AppendLine(("_" * [Math]::Max(8, $ancho - 2)))
+    [void]$sb.AppendLine("(Realizado por)")
+    [void]$sb.AppendLine("")
+    [void]$sb.AppendLine((Centrar "Comprobante interno - no fiscal" $ancho))
+    [void]$sb.Append("`n`n`n`n")
+    return $sb.ToString()
+}
+
+function Generar-TextoFiado($r) {
+    $rc = $global:reciboCfg
+    $ancho = [int]$rc.ancho
+    if ($ancho -lt 24) { $ancho = 32 }
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $sb = New-Object System.Text.StringBuilder
+    $sep = ("-" * $ancho)
+    $grande = Modo-Impresora 24
+    $normal = Modo-Impresora 0
+    if ($rc.estilo) { [void]$sb.Append(([string][char]27) + "@") }
+    try { Agregar-EncabezadoNegocio $sb $ancho $grande $normal } catch {
+        $nom = [string]$rc.nombre; if (-not $nom) { $nom = "MI NEGOCIO" }
+        [void]$sb.AppendLine((Centrar $nom $ancho))
+    }
+    [void]$sb.AppendLine($sep)
+    [void]$sb.AppendLine($grande + (Centrar "CUENTA POR COBRAR" $ancho) + $normal)
+    [void]$sb.AppendLine((Centrar "(FIADO)" $ancho))
+    [void]$sb.AppendLine($sep)
+    $fecha = [string]$r.hora
+    try { $fecha = ([datetime]::ParseExact([string]$r.hora, "yyyy-MM-dd HH:mm:ss", $inv)).ToString("d/M/yyyy HH:mm", $inv) } catch {}
+    [void]$sb.AppendLine("Folio: F-$($r.id)")
+    [void]$sb.AppendLine("Fecha: $fecha")
+    if ($r.cliente) { foreach ($l in @(Partir-Texto ("Cliente: " + [string]$r.cliente) $ancho)) { [void]$sb.AppendLine($l) } }
+    if ($r.telefono) { [void]$sb.AppendLine("Telefono: $($r.telefono)") }
+    [void]$sb.AppendLine($sep)
+    [void]$sb.AppendLine("ARTICULOS:")
+    $total = 0.0
+    foreach ($it in @($r.items)) {
+        if (-not $it) { continue }
+        $cant = [double]$it.cantidad
+        $precio = [double]$it.precio
+        $sub = [math]::Round($cant * $precio, 2)
+        $total += $sub
+        $nomIt = [string]$it.nombre
+        foreach ($l in @(Partir-Texto ((Formato-Cantidad $cant) + " x " + $nomIt) $ancho)) { [void]$sb.AppendLine($l) }
+        [void]$sb.AppendLine((Alinear-Der ("$" + (Formato-Monto $sub)) $ancho))
+    }
+    if ([double]$r.monto -gt 0) { $total = [double]$r.monto }
+    [void]$sb.AppendLine($sep)
+    [void]$sb.AppendLine($grande + (Linea-LR "TOTAL FIADO:" ("$" + (Formato-Monto $total)) $ancho) + $normal)
+    $est = [string]$r.estado
+    if (-not $est) { $est = "PENDIENTE" }
+    [void]$sb.AppendLine("Estado: $est")
+    if ($r.vence) { [void]$sb.AppendLine("Vence: $($r.vence)") }
+    if ($r.notas) { foreach ($l in @(Partir-Texto ("Notas: " + [string]$r.notas) $ancho)) { [void]$sb.AppendLine($l) } }
+    [void]$sb.AppendLine("")
+    [void]$sb.AppendLine("Firma cliente:")
+    [void]$sb.AppendLine(("_" * [Math]::Max(8, $ancho - 2)))
+    [void]$sb.AppendLine("")
+    [void]$sb.AppendLine((Centrar "Comprobante interno - no fiscal" $ancho))
+    [void]$sb.Append("`n`n`n`n")
+    return $sb.ToString()
+}
+
+function Generar-TextoPagoFiado($r) {
+    $rc = $global:reciboCfg
+    $ancho = [int]$rc.ancho
+    if ($ancho -lt 24) { $ancho = 32 }
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $sb = New-Object System.Text.StringBuilder
+    $sep = ("-" * $ancho)
+    $grande = Modo-Impresora 24
+    $normal = Modo-Impresora 0
+    if ($rc.estilo) { [void]$sb.Append(([string][char]27) + "@") }
+    try { Agregar-EncabezadoNegocio $sb $ancho $grande $normal } catch {
+        $nom = [string]$rc.nombre; if (-not $nom) { $nom = "MI NEGOCIO" }
+        [void]$sb.AppendLine((Centrar $nom $ancho))
+    }
+    [void]$sb.AppendLine($sep)
+    [void]$sb.AppendLine($grande + (Centrar "PAGO DE FIADO" $ancho) + $normal)
+    [void]$sb.AppendLine($sep)
+    $fecha = (Get-Date).ToString("d/M/yyyy HH:mm", $inv)
+    [void]$sb.AppendLine("Fecha pago: $fecha")
+    [void]$sb.AppendLine("Folio original: F-$($r.id)")
+    if ($r.hora) {
+        $fh = [string]$r.hora
+        try { $fh = ([datetime]::ParseExact([string]$r.hora, "yyyy-MM-dd HH:mm:ss", $inv)).ToString("d/M/yyyy HH:mm", $inv) } catch {}
+        [void]$sb.AppendLine("Fiado del: $fh")
+    }
+    if ($r.cliente) { foreach ($l in @(Partir-Texto ("Cliente: " + [string]$r.cliente) $ancho)) { [void]$sb.AppendLine($l) } }
+    [void]$sb.AppendLine($sep)
+    foreach ($it in @($r.items)) {
+        if (-not $it) { continue }
+        $cant = [double]$it.cantidad
+        $nomIt = [string]$it.nombre
+        foreach ($l in @(Partir-Texto ((Formato-Cantidad $cant) + " x " + $nomIt) $ancho)) { [void]$sb.AppendLine($l) }
+    }
+    [void]$sb.AppendLine($sep)
+    [void]$sb.AppendLine($grande + (Linea-LR "TOTAL PAGADO:" ("$" + (Formato-Monto ([double]$r.monto))) $ancho) + $normal)
+    if ($r.metodoPago) { [void]$sb.AppendLine("Metodo: $($r.metodoPago)") }
+    [void]$sb.AppendLine("Estado: PAGADO")
+    [void]$sb.AppendLine("")
+    [void]$sb.AppendLine("Firma:")
+    [void]$sb.AppendLine(("_" * [Math]::Max(8, $ancho - 2)))
+    [void]$sb.AppendLine("")
+    [void]$sb.AppendLine((Centrar "Comprobante interno - no fiscal" $ancho))
+    [void]$sb.Append("`n`n`n`n")
+    return $sb.ToString()
+}
+
 function Imprimir-Texto([string]$texto) {
     $bytes = Bytes-DesdeTexto $texto
     return [RawPrinterHelper]::EnviarBytes($nombreImpresora, $bytes)
@@ -5808,7 +6055,7 @@ function Resumir-Lista($lista, [int]$max = 4) {
 # ---------------- Permisos por vendedor ----------------
 # Se guardan en permisos_vendedores.json (clave = nombre en minusculas).
 # Un vendedor sin nada guardado tiene TODOS los permisos (como antes).
-$permisosPath = Join-Path $scriptDir "permisos_vendedores.json"
+$permisosPath = Join-Path $datosDir "permisos_vendedores.json"
 $global:permisosVendedores = @{}
 $global:catalogoPermisos = @(
     @{ k = 'crearPedidos';  t = 'Crear pedidos';                   d = 'Puede armar y enviar pedidos desde el movil.' },
@@ -5956,7 +6203,7 @@ function Avisar-CambiosCatalogo($anteriorPorSku, $nuevoLista) {
 }
 
 # ---------------- Reabastecimiento (minimos por producto) ----------------
-$minimosPath = Join-Path $scriptDir "minimos_stock.json"
+$minimosPath = Join-Path $datosDir "minimos_stock.json"
 $global:minimosStock = @{}
 
 function Cargar-Minimos {
@@ -6083,7 +6330,7 @@ function Generar-BytesEtiquetas($items, $o) {
 }
 
 # ---------------- Red: IP fija de la PC (para no cambiarla a mano en cada punto de acceso) ----------------
-$redConfigPath = Join-Path $scriptDir "red_config.json"
+$redConfigPath = Join-Path $configDir "red_config.json"
 $global:redConfig = [pscustomobject]@{ ultimoOcteto = 0; auto = $false }
 
 function Cargar-RedConfig {
@@ -6191,7 +6438,7 @@ function Aplicar-IpFijaAuto([int]$octeto) {
 }
 
 # ---------------- Devoluciones / garantias ----------------
-$devolucionesFile = Join-Path $scriptDir "devoluciones.json"
+$devolucionesFile = Join-Path $datosDir "devoluciones.json"
 $global:devoluciones = New-Object System.Collections.ArrayList
 $global:nextIdDevolucion = 1
 
@@ -6288,8 +6535,8 @@ function Generar-TextoDevolucion($d) {
 # ("Nuevos del Excel"). Si un Excel no trae nada nuevo, la lista anterior se
 # conserva (asi no se pierde por volver a cargar el mismo archivo).
 # La primera vez solo se "aprende" el catalogo: no se marca nada como nuevo.
-$skusConocidosPath = Join-Path $scriptDir "skus_conocidos.json"
-$productosNuevosPath = Join-Path $scriptDir "productos_nuevos.json"
+$skusConocidosPath = Join-Path $datosDir "skus_conocidos.json"
+$productosNuevosPath = Join-Path $datosDir "productos_nuevos.json"
 $global:skusConocidos = @{}
 $global:skusConocidosListos = $false
 $global:productosNuevos = [pscustomobject]@{ fecha = ""; skus = @() }
@@ -6359,7 +6606,7 @@ function Registrar-ProductosNuevos($nuevoLista) {
 # La clave se guarda solo como hash (pos_clave.json). Cada movil activado recibe
 # un token propio (tambien guardado como hash); si se cambia o se quita la
 # clave, todos los tokens se borran y los moviles pierden el modo.
-$posClavePath = Join-Path $scriptDir "pos_clave.json"
+$posClavePath = Join-Path $datosDir "pos_clave.json"
 $global:posClaveHash = ""
 $global:posTokens = @{}
 $global:posIntentos = @{}
@@ -6788,7 +7035,7 @@ function Registrar-DevolucionPos($d, [string]$vendedor) {
 #   de la PC los muestra (si estaba cerrado, los ve al abrirlo).
 # - PC -> movil: un mensaje suelto llega como aviso del movil (campana); si va con un pedido
 #   armado para el vendedor, la nota aparece dentro de ese pedido.
-$mensajesPcPath = Join-Path $scriptDir "mensajes_pc.json"
+$mensajesPcPath = Join-Path $datosDir "mensajes_pc.json"
 $global:mensajesPc = New-Object System.Collections.ArrayList
 $global:nextIdMensaje = 1
 
@@ -6828,7 +7075,7 @@ function Registrar-MensajeSaliente([string]$para, [string]$texto) {
 # Colores de la interfaz (Panel de la PC y app del vendedor): los elige el encargado en Ajustes de la PC.
 # Solo se guardan los colores que se cambiaron; lo demas queda con los colores de siempre.
 # ------------------------------------------------------------------
-$coloresCfgPath = Join-Path $scriptDir "colores_config.json"
+$coloresCfgPath = Join-Path $configDir "colores_config.json"
 $global:coloresCfg = @{ pc = @{}; vendedor = @{} }
 
 function Limpiar-ColoresPanel($obj) {
@@ -6875,7 +7122,7 @@ function Limpiar-TextoMensaje($t) {
 # Se guarda dentro de la propia linea del pedido (items[].series): no hay archivos nuevos ni pasos extra.
 # La garantia corre desde el cobro (o desde el pedido si aun no se cobra). Dias configurables (por defecto 7).
 # ------------------------------------------------------------------
-$garantiaCfgPath = Join-Path $scriptDir "garantia_config.json"
+$garantiaCfgPath = Join-Path $configDir "garantia_config.json"
 $global:garantiaDias = 7
 function Cargar-GarantiaCfg {
     try {
@@ -6997,7 +7244,7 @@ $htmlPC = @'
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Panel de Pedidos - Toto Tools</title>
+<title>Panel de Pedidos</title>
 <link rel="manifest" href="/manifest-pc.json">
 <link rel="icon" href="/icon-pc-192.png">
 <link rel="apple-touch-icon" href="/icon-pc-192.png">
@@ -7200,7 +7447,7 @@ TT.iniciar('pc');
 </head>
 <body>
   <header>
-    <h1>Panel de Pedidos - Toto Tools</h1>
+    <h1>Panel de Pedidos</h1>
     <div class="share">Vendedores conectan en: <b id="shareUrl">...</b></div>
     <button id="btnStockBajo" class="btn-toggle" style="font-size:15px; position:relative;" onclick="togglePanelStockBajo()" title="Avisos: mensajes y stock bajo (Alt+M)">&#128276;<span id="badgeStockBajo" style="display:none; position:absolute; top:-6px; right:-6px; min-width:18px; height:18px; padding:0 4px; border-radius:9px; background:var(--tt-ef4444,#ef4444); color:var(--tt-ffffff,#fff); font-size:11px; font-weight:bold; align-items:center; justify-content:center;">0</span></button>
     <button id="btnMenuPC" class="btn-toggle" style="font-size:15px;" onclick="abrirMenuPC()" title="Atajo: F10 (F1 muestra todos los atajos)">&#9881; Ajustes (F10)</button>
@@ -7297,81 +7544,100 @@ TT.iniciar('pc');
   </style>
 
   <div id="menuPCOverlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); align-items:center; justify-content:center; z-index:58;" onclick="if (event.target === this) cerrarMenuPC()">
-    <div style="background:var(--tt-1e293b,#1e293b); padding:22px; border-radius:12px; max-width:420px; width:92%; max-height:88vh; overflow:auto;">
+    <div style="background:var(--tt-1e293b,#1e293b); padding:22px; border-radius:12px; max-width:440px; width:92%; max-height:88vh; overflow:auto;">
       <h2 style="font-size:17px; margin-bottom:14px; color:var(--tt-ffffff,#fff);">Ajustes</h2>
 
       <div id="resumenHoyMenu" style="font-size:13px; color:var(--tt-cbd5e1,#cbd5e1); background:var(--tt-0f172a,#0f172a); border-radius:8px; padding:10px 12px; margin-bottom:16px;">Cargando resumen de hoy...</div>
 
-      <button class="btn-toggle" style="width:100%; margin-bottom:10px; text-align:left;" onclick="cerrarMenuPC(); abrirConfig();">Cargar / cambiar el Excel del catalogo</button>
-
-      <button class="btn-toggle" style="width:100%; margin-bottom:10px; text-align:left;" onclick="cerrarMenuPC(); abrirConsulta();">Consultar precio y stock (Alt+C)</button>
-
-      <button class="btn-toggle" style="width:100%; margin-bottom:10px; text-align:left;" onclick="cerrarMenuPC(); abrirRepos();">Que bajar del almacen (Alt+B)</button>
-
-      <button class="btn-toggle" style="width:100%; margin-bottom:10px; text-align:left;" onclick="cerrarMenuPC(); if (window.TTAyuda) TTAyuda.abrir();" title="Guia de uso, atajos, licencia y asistente de configuracion">Ayuda (F1)</button>
-
-      <button class="btn-toggle" style="width:100%; margin-bottom:10px; text-align:left;" onclick="cerrarMenuPC(); window.open('/licencia', '_blank');" title="Escribe la licencia nueva. Si todavia te quedan dias, se suman a los de la nueva">Licencia: renovar (se suman los dias que quedan)</button>
-
-      <button class="btn-toggle" style="width:100%; margin-bottom:10px; text-align:left;" onclick="abrirColores()" title="Elige el color de cada cosa del Panel de la PC y de la app del vendedor">Colores de la interfaz...</button>
-
-      <button class="btn-toggle" style="width:100%; margin-bottom:10px; text-align:left;" onclick="cerrarMenuPC(); abrirSeries();" title="Busca un numero de serie y mira si sigue en garantia">Series y garantia de lo vendido</button>
-
-      <label style="font-size:14px; display:flex; align-items:center; gap:8px; margin-bottom:14px;" title="Se imprime como TOTAL USD en los recibos. Deja vacio o 0 para no imprimirlo.">Tasa USD: <input type="number" id="tasaDolar" min="0" step="any" placeholder="0" style="width:90px; padding:6px 8px; border-radius:6px; border:1px solid var(--tt-334155,#334155); background:var(--tt-0f172a,#0f172a); color:var(--tt-e2e8f0,#e2e8f0);" onchange="guardarTasaDolar()"></label>
-
-      <label style="font-size:14px; display:flex; align-items:center; gap:8px; margin-bottom:14px;" title="Cuando un producto queda con esta cantidad o menos, avisa en el Panel y se marca en el buscador de vendedores y clientes. Deja 0 para desactivar el aviso.">Alerta stock bajo (unid.): <input type="number" id="umbralStockBajo" min="0" step="1" placeholder="3" style="width:70px; padding:6px 8px; border-radius:6px; border:1px solid var(--tt-334155,#334155); background:var(--tt-0f172a,#0f172a); color:var(--tt-e2e8f0,#e2e8f0);" onchange="guardarUmbralStockBajo()"></label>
-
-      <button class="btn-toggle" id="btnPermitirDescuentos" style="width:100%; margin-bottom:10px;" onclick="alternarPermitirDescuentos()" title="Cuando esta activado, el vendedor puede editar el precio de cada linea de su pedido (descuento)">Descuentos por producto: ...</button>
-
-      <button class="btn-toggle" id="btnPermitirBorradores" style="width:100%; margin-bottom:10px;" onclick="alternarPermitirBorradores()" title="Cuando esta activado, el vendedor puede guardar el pedido que esta armando como borrador y retomarlo despues (se guarda en su telefono)">Borradores del vendedor: ...</button>
-
-      <button class="btn-toggle" id="btnOrigenDatos" style="width:100%; margin-bottom:10px;" onclick="alternarOrigenDatos()" title="De donde salen los productos, precios y existencias: de la base de datos de AxisPOS (en tiempo real) o del catalogo (Excel)">Datos de productos y stock: ...</button>
-
-      <button class="btn-toggle" id="btnOcultarSinStock" style="width:100%; margin-bottom:10px;" onclick="alternarOcultarSinStock()" title="Cuando esta activado, a los vendedores no les aparecen en el buscador los productos sin existencias">Ocultar sin stock a vendedores: ...</button>
-
-      <button class="btn-toggle" id="btnUnirPedidos" style="width:100%; margin-bottom:10px;" onclick="alternarUnirPedidos()" title="Cuando esta activado, varios pedidos del mismo vendedor enviados con pocos minutos de diferencia se cierran juntos si SUMAN exactamente la misma venta (mismos productos y cantidades) que se cobra en AxisPOS">Unir pedidos del mismo vendedor: ...</button>
-
-      <label style="font-size:14px; display:flex; align-items:center; gap:8px; margin-bottom:14px; flex-wrap:wrap;" title="Maximo de pedidos que se pueden unir y minutos maximos entre el primero y el ultimo">Unir hasta <input type="number" id="unirPedidosMax" min="2" max="8" step="1" placeholder="4" style="width:56px; padding:6px 8px; border-radius:6px; border:1px solid var(--tt-334155,#334155); background:var(--tt-0f172a,#0f172a); color:var(--tt-e2e8f0,#e2e8f0);" onchange="guardarUnirPedidos()"> pedidos en <input type="number" id="unirPedidosMinutos" min="1" max="30" step="1" placeholder="3" style="width:56px; padding:6px 8px; border-radius:6px; border:1px solid var(--tt-334155,#334155); background:var(--tt-0f172a,#0f172a); color:var(--tt-e2e8f0,#e2e8f0);" onchange="guardarUnirPedidos()"> min</label>
-
-      <button class="btn-toggle" id="btnAutoservicioDestino" style="width:100%; margin-bottom:10px;" onclick="alternarAutoservicioDestino()" title="Adonde caen los pedidos que arman los clientes ellos mismos desde el enlace de autoservicio">Pedidos de clientes (autoservicio): ...</button>
-      <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="copiarEnlaceAutoservicio()" title="Enlace para que los clientes vean el catalogo completo y armen su propio pedido desde su telefono">Copiar enlace para clientes</button>
-      <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="mostrarQRCliente()" title="Muestra un codigo QR con el enlace del catalogo para que los clientes lo escaneen con la camara del telefono">Ver QR para clientes</button>
-      <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="mostrarQRVendedor()" title="Muestra un codigo QR con el enlace de la app de vendedor, para que se enlacen escaneandolo con la camara sin escribir la direccion IP">Ver QR para vendedores</button>
-
-      <div style="margin-bottom:10px; padding:10px; background:var(--tt-0f172a,#0f172a); border-radius:8px; border:1px solid var(--tt-334155,#334155);">
-        <label style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); display:block; margin-bottom:4px;">Nombre de la red WiFi (SSID)</label>
-        <input type="text" id="inputWifiSSID" placeholder="Ej: TotoTools" style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--tt-334155,#334155); background:var(--tt-0f172a,#0f172a); color:var(--tt-e2e8f0,#e2e8f0); font-size:13px; margin-bottom:8px;">
-        <label style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); display:block; margin-bottom:4px;">Contraseña del WiFi</label>
-        <input type="text" id="inputWifiClave" placeholder="Dejar vacio si la red es abierta" style="width:100%; padding:8px; border-radius:6px; border:1px solid var(--tt-334155,#334155); background:var(--tt-0f172a,#0f172a); color:var(--tt-e2e8f0,#e2e8f0); font-size:13px; margin-bottom:8px;">
-        <button class="btn-toggle" style="width:100%;" onclick="guardarYMostrarQRWifi()" title="El cliente escanea este QR y su telefono se conecta solo al WiFi, sin ver ni escribir la contraseña">Ver QR para conectarse al WiFi</button>
-        <button class="btn-toggle" style="width:100%; margin-top:8px;" onclick="generarTarjetaImprimir()" title="Genera una hoja con los dos QR (WiFi y catalogo) lista para imprimir o mandar por WhatsApp">Generar tarjeta para imprimir (WiFi + Catalogo)</button>
-        <button class="btn-toggle" style="width:100%; margin-top:8px;" onclick="imprimirTarjetaTermica()" title="Imprime en la termica el QR del WiFi y el QR del catalogo, uno debajo del otro">Imprimir WiFi + Catalogo en la termica</button>
-      </div>
-
-      <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="window.open('/etiquetas', '_blank')">Etiquetas y códigos de barra (F4)</button>
-      <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="window.open('/auditoria', '_blank')">Auditoría de AxisPOS (precios, tasas, alertas)</button>
-      <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="abrirCompras()">Lista de compras (reabastecer) (F6)</button>
-      <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="abrirDevolucion()">Ticket de devolución / garantía (F7)</button>
-      <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="abrirRecibo()" title="Nombre, NIT, logo, textos del ticket y QR de pago para imprimir">Personalizar comprobante y QR</button>
-      <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="abrirPermisos()">Permisos de vendedores</button>
-      <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="abrirRed()">Red / IP fija de la PC</button>
-      <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="cerrarMenuPC(); abrirRespaldo();">Copias de seguridad</button>
-      <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="cerrarMenuPC(); abrirSinonimos();">Sinónimos de búsqueda</button>
-      <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="cerrarMenuPC(); abrirAuditoria();">Auditoría (quién hizo qué)</button>
-      <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="cerrarMenuPC(); abrirCostos();">Costos de reposición</button>
-      <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="cerrarMenuPC(); abrirComprasProv();">Compras a proveedores</button>
-      <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="cerrarMenuPC(); abrirMinAxis();">Stock mínimo de AxisPOS</button>
-      <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="cerrarMenuPC(); abrirEstatico();">Stock estático (baja rotación)</button>
-      <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="window.open('/metricas', '_blank')">Ver metricas (F8)</button>
-
-      <button class="btn-nuevo-pedido" style="width:100%; background:var(--tt-0369a1,#0369a1); margin-bottom:10px;" onclick="cerrarMenuPC(); abrirPines();">PIN de vendedores</button>
-
-      <button class="btn-toggle" id="btnFotosCatalogo" style="width:100%; margin-bottom:10px;" onclick="importarFotosCatalogo()" title="Lee el ultimo backup-catalogo-*.zip de esta carpeta (Copia de seguridad de la app del catalogo) y actualiza las fotos por SKU">Fotos del catalogo: ...</button>
-      <button class="btn-toggle" style="width:100%; margin-bottom:14px;" onclick="document.getElementById('zipFotosPC').click()" title="Elige el .zip de Copia de seguridad del catalogo desde cualquier carpeta de esta PC">Subir .zip de fotos...</button>
+      <h3 style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin:4px 0 8px; text-transform:uppercase; letter-spacing:0.5px;">Catalogo y base de datos</h3>
+      <button class="btn-toggle" id="btnOrigenDatos" style="width:100%; margin-bottom:8px;" onclick="alternarOrigenDatos()" title="De donde salen los productos, precios y existencias">Datos de productos y stock: ...</button>
+      <button class="btn-toggle" style="width:100%; margin-bottom:8px; text-align:left;" onclick="cerrarMenuPC(); abrirConfigAxis();" title="Servidor, puerto, usuario y clave de MariaDB / AxisPOS">Configurar base de datos (AxisPOS)...</button>
+      <button class="btn-toggle" style="width:100%; margin-bottom:8px; text-align:left;" onclick="cerrarMenuPC(); abrirConfig();">Cargar / cambiar el Excel del catalogo</button>
+      <button class="btn-toggle" id="btnFotosCatalogo" style="width:100%; margin-bottom:8px;" onclick="importarFotosCatalogo()" title="Lee el ultimo backup-catalogo-*.zip">Fotos del catalogo: ...</button>
+      <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="document.getElementById('zipFotosPC').click()" title="Elige el .zip de Copia de seguridad del catalogo">Subir .zip de fotos...</button>
       <input type="file" id="zipFotosPC" accept=".zip" style="display:none">
 
+      <h3 style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin:12px 0 8px; text-transform:uppercase; letter-spacing:0.5px;">Consultas rapidas</h3>
+      <button class="btn-toggle" style="width:100%; margin-bottom:8px; text-align:left;" onclick="cerrarMenuPC(); abrirConsulta();">Consultar precio y stock (Alt+C)</button>
+      <button class="btn-toggle" style="width:100%; margin-bottom:8px; text-align:left;" onclick="cerrarMenuPC(); abrirRepos();">Que bajar del almacen (Alt+B)</button>
+      <button class="btn-toggle" style="width:100%; margin-bottom:8px;" onclick="abrirCompras()">Lista de compras (reabastecer) (F6)</button>
+      <button class="btn-toggle" style="width:100%; margin-bottom:8px;" onclick="window.open('/etiquetas', '_blank')">Etiquetas y codigos de barra (F4)</button>
+      <button class="btn-toggle" style="width:100%; margin-bottom:8px;" onclick="abrirDevolucion()">Ticket de devolucion / garantia (F7)</button>
+      <button class="btn-toggle" style="width:100%; margin-bottom:8px; text-align:left;" onclick="cerrarMenuPC(); abrirSeries();">Series y garantia de lo vendido</button>
+      <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="window.open('/metricas', '_blank')">Ver metricas (F8)</button>
+
+      <h3 style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin:12px 0 8px; text-transform:uppercase; letter-spacing:0.5px;">Vendedores y permisos</h3>
+      <button class="btn-nuevo-pedido" style="width:100%; background:var(--tt-0369a1,#0369a1); margin-bottom:8px;" onclick="cerrarMenuPC(); abrirPines();">PIN de vendedores</button>
+      <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="abrirPermisos()">Permisos de vendedores</button>
+
+      <h3 style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin:12px 0 8px; text-transform:uppercase; letter-spacing:0.5px;">Impresion y apariencia</h3>
+      <button class="btn-toggle" style="width:100%; margin-bottom:8px;" onclick="abrirRecibo()" title="Nombre, NIT, logo, textos del ticket y QR de pago">Personalizar comprobante y QR</button>
+      <button class="btn-toggle" style="width:100%; margin-bottom:8px; text-align:left;" onclick="abrirColores()">Colores de la interfaz...</button>
+      <label style="font-size:14px; display:flex; align-items:center; gap:8px; margin-bottom:10px;" title="Se imprime como TOTAL USD en los recibos. Deja vacio o 0 para no imprimirlo.">Tasa USD: <input type="number" id="tasaDolar" min="0" step="any" placeholder="0" style="width:90px; padding:6px 8px; border-radius:6px; border:1px solid var(--tt-334155,#334155); background:var(--tt-0f172a,#0f172a); color:var(--tt-e2e8f0,#e2e8f0);" onchange="guardarTasaDolar()"></label>
+
+      <h3 style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin:12px 0 8px; text-transform:uppercase; letter-spacing:0.5px;">Stock y compras</h3>
+      <label style="font-size:14px; display:flex; align-items:center; gap:8px; margin-bottom:8px;" title="Cuando un producto queda con esta cantidad o menos, avisa en el Panel.">Alerta stock bajo: <input type="number" id="umbralStockBajo" min="0" step="1" placeholder="3" style="width:70px; padding:6px 8px; border-radius:6px; border:1px solid var(--tt-334155,#334155); background:var(--tt-0f172a,#0f172a); color:var(--tt-e2e8f0,#e2e8f0);" onchange="guardarUmbralStockBajo()"></label>
+      <button class="btn-toggle" id="btnOcultarSinStock" style="width:100%; margin-bottom:8px;" onclick="alternarOcultarSinStock()">Ocultar sin stock a vendedores: ...</button>
+      <button class="btn-toggle" style="width:100%; margin-bottom:8px;" onclick="cerrarMenuPC(); abrirMinAxis();">Stock minimo de AxisPOS</button>
+      <button class="btn-toggle" style="width:100%; margin-bottom:8px;" onclick="cerrarMenuPC(); abrirEstatico();">Stock estatico (baja rotacion)</button>
+      <button class="btn-toggle" style="width:100%; margin-bottom:8px;" onclick="cerrarMenuPC(); abrirCostos();">Costos de reposicion</button>
+      <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="cerrarMenuPC(); abrirComprasProv();">Compras a proveedores</button>
+
+      <h3 style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin:12px 0 8px; text-transform:uppercase; letter-spacing:0.5px;">Pedidos y red</h3>
+      <button class="btn-toggle" id="btnUnirPedidos" style="width:100%; margin-bottom:8px;" onclick="alternarUnirPedidos()" title="Varios pedidos del mismo vendedor se cierran juntos si suman la misma venta en AxisPOS">Unir pedidos del mismo vendedor: ...</button>
+      <div style="display:flex; gap:8px; margin-bottom:8px; flex-wrap:wrap;">
+        <label style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); display:flex; align-items:center; gap:4px;">Max pedidos <input type="number" id="unirPedidosMax" min="2" max="8" style="width:52px; padding:4px; border-radius:6px; border:1px solid var(--tt-334155,#334155); background:var(--tt-0f172a,#0f172a); color:var(--tt-e2e8f0,#e2e8f0);" onchange="guardarUnirPedidosParams()"></label>
+        <label style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); display:flex; align-items:center; gap:4px;">Minutos <input type="number" id="unirPedidosMinutos" min="1" max="30" style="width:52px; padding:4px; border-radius:6px; border:1px solid var(--tt-334155,#334155); background:var(--tt-0f172a,#0f172a); color:var(--tt-e2e8f0,#e2e8f0);" onchange="guardarUnirPedidosParams()"></label>
+      </div>
+      <button class="btn-toggle" id="btnPermitirDescuentos" style="width:100%; margin-bottom:8px;" onclick="alternarPermitirDescuentos()">Permitir descuentos en movil: ...</button>
+      <button class="btn-toggle" id="btnPermitirBorradores" style="width:100%; margin-bottom:8px;" onclick="alternarPermitirBorradores()">Permitir borradores en movil: ...</button>
+      <button class="btn-toggle" id="btnAutoservicioDestino" style="width:100%; margin-bottom:8px;" onclick="alternarAutoservicioDestino()">Autoservicio destino: ...</button>
+      <button class="btn-toggle" style="width:100%; margin-bottom:8px;" onclick="abrirRed()">Red / IP fija de la PC</button>
+      <div style="background:var(--tt-0f172a,#0f172a); border-radius:8px; padding:10px; margin-bottom:10px;">
+        <div style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin-bottom:6px;">WiFi para tarjeta / QR de clientes</div>
+        <input id="inputWifiSSID" class="rc-in" placeholder="Nombre de la red WiFi" style="margin-bottom:6px;" onchange="guardarWifiPC()">
+        <input id="inputWifiClave" class="rc-in" type="password" placeholder="Clave WiFi" style="margin-bottom:6px;" onchange="guardarWifiPC()">
+        <button class="btn-toggle" style="width:100%; margin-top:4px;" onclick="generarTarjetaImprimir()">Generar tarjeta para imprimir (WiFi + Catalogo)</button>
+        <button class="btn-toggle" style="width:100%; margin-top:6px;" onclick="imprimirTarjetaTermica()">Imprimir WiFi + Catalogo en la termica</button>
+      </div>
+      <button class="btn-toggle" style="width:100%; margin-bottom:8px;" onclick="cerrarMenuPC(); abrirSinonimos();">Sinonimos de busqueda</button>
+      <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="cerrarMenuPC(); abrirRespaldo();">Copias de seguridad</button>
+
+      <h3 style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin:12px 0 8px; text-transform:uppercase; letter-spacing:0.5px;">Auditoria y sistema</h3>
+      <button class="btn-toggle" style="width:100%; margin-bottom:8px;" onclick="window.open('/auditoria', '_blank')">Auditoria AxisPOS (precios, tasas, alertas)</button>
+      <button class="btn-toggle" style="width:100%; margin-bottom:8px;" onclick="cerrarMenuPC(); abrirAuditoria();">Registro local (quien hizo que)</button>
+      <button class="btn-toggle" style="width:100%; margin-bottom:8px; text-align:left;" onclick="cerrarMenuPC(); if (window.TTAyuda) TTAyuda.abrir();">Ayuda (F1)</button>
+      <button class="btn-toggle" style="width:100%; margin-bottom:8px; text-align:left;" onclick="cerrarMenuPC(); window.open('/licencia', '_blank');">Licencia: renovar</button>
       <button class="btn-cerrar-dia" style="width:100%; margin-bottom:10px;" onclick="cerrarMenuPC(); cerrarDia();">Cerrar el dia (archivar cobrados)</button>
 
       <button class="btn" style="background:var(--tt-475569,#475569);" onclick="cerrarMenuPC()">Cerrar</button>
+    </div>
+  </div>
+
+  <div id="axisCfgOverlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.65); align-items:center; justify-content:center; z-index:62;" onclick="if (event.target === this) cerrarConfigAxis()">
+    <div style="background:var(--tt-1e293b,#1e293b); padding:22px; border-radius:12px; max-width:440px; width:94%; max-height:90vh; overflow:auto;">
+      <h2 style="font-size:17px; margin-bottom:6px; color:var(--tt-ffffff,#fff);">Base de datos AxisPOS</h2>
+      <p style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin-bottom:12px;">Conexion de solo lectura a MariaDB / MySQL de AxisPOS. Prueba primero y luego guarda.</p>
+      <label class="rc-et">Servidor</label>
+      <input id="axisSrv" class="rc-in" placeholder="localhost o IP">
+      <label class="rc-et">Puerto</label>
+      <input id="axisPto" class="rc-in" type="number" min="1" max="65535" placeholder="3306">
+      <label class="rc-et">Usuario</label>
+      <input id="axisUsr" class="rc-in" placeholder="lector" autocomplete="off">
+      <label class="rc-et">Contrase&ntilde;a</label>
+      <input id="axisCla" class="rc-in" type="password" placeholder="Deja vacio para no cambiarla" autocomplete="new-password">
+      <label class="rc-et">Base de datos</label>
+      <input id="axisBas" class="rc-in" placeholder="axispos">
+      <label class="rc-et">Almacenes (IDs separados por coma)</label>
+      <input id="axisAlm" class="rc-in" placeholder="1">
+      <label class="rc-ck" style="margin-top:10px;"><input type="checkbox" id="axisDir" checked> Preferir conexion directa (MySqlConnector.dll)</label>
+      <label class="rc-ck"><input type="checkbox" id="axisForzar"> Forzar conexion directa (si la prueba de igualdad falla)</label>
+      <div id="axisCfgMsg" style="font-size:13px; min-height:20px; margin:10px 0; color:var(--tt-94a3b8,#94a3b8);"></div>
+      <div style="display:flex; gap:8px; flex-wrap:wrap;">
+        <button class="btn" style="flex:1; background:var(--tt-0369a1,#0369a1);" onclick="probarConfigAxis()">Probar conexion</button>
+        <button class="btn" style="flex:1;" onclick="guardarConfigAxis()">Guardar y activar</button>
+      </div>
+      <button class="btn" style="width:100%; margin-top:10px; background:var(--tt-475569,#475569);" onclick="cerrarConfigAxis()">Cerrar</button>
     </div>
   </div>
 
@@ -7617,7 +7883,7 @@ TT.iniciar('pc');
 
       <div id="configPaso1">
         <label style="font-size:13px; display:block; margin-bottom:6px;">Ruta completa del archivo Excel en esta PC:</label>
-        <input type="text" id="inputRuta" placeholder="C:\ToTo Tools\catalogo.xlsx" style="width:100%; padding:9px; border-radius:6px; border:1px solid var(--tt-334155,#334155); background:var(--tt-0f172a,#0f172a); color:var(--tt-e2e8f0,#e2e8f0); font-size:13px; margin-bottom:10px;">
+        <input type="text" id="inputRuta" placeholder="C:\Catalogo\catalogo.xlsx" style="width:100%; padding:9px; border-radius:6px; border:1px solid var(--tt-334155,#334155); background:var(--tt-0f172a,#0f172a); color:var(--tt-e2e8f0,#e2e8f0); font-size:13px; margin-bottom:10px;">
         <button class="btn" onclick="guardarRutaYContinuar()">Continuar</button>
         <div id="configPaso1Error" style="color:var(--tt-fca5a5,#fca5a5); font-size:12px; margin-top:8px;"></div>
       </div>
@@ -7644,7 +7910,7 @@ TT.iniciar('pc');
   </div>
 
   <div id="tarjetaImprimir">
-    <h2 style="text-align:center; margin-bottom:20px;">Toto Tools</h2>
+    <h2 style="text-align:center; margin-bottom:20px;" id="tituloLoginPC">Panel de Pedidos</h2>
     <div style="display:flex; justify-content:space-around; gap:16px; flex-wrap:wrap;">
       <div style="text-align:center; max-width:45%;">
         <p style="font-weight:bold; margin-bottom:8px;">1. Conectate al WiFi</p>
@@ -8708,8 +8974,86 @@ TT.iniciar('pc');
       b.classList.toggle('activo', esAxis);
       b.textContent = 'Datos de productos y stock: ' + (esAxis ? 'BASE DE DATOS DE AXISPOS' : 'CATALOGO (Excel)');
     }
+    function cerrarConfigAxis() {
+      const o = document.getElementById('axisCfgOverlay');
+      if (o) o.style.display = 'none';
+    }
+    async function abrirConfigAxis() {
+      const o = document.getElementById('axisCfgOverlay');
+      if (!o) return;
+      o.style.display = 'flex';
+      const msg = document.getElementById('axisCfgMsg');
+      if (msg) msg.textContent = 'Cargando...';
+      try {
+        const res = await fetch('/api/instalacion');
+        const d = await res.json();
+        const a = (d && d.axis) ? d.axis : {};
+        document.getElementById('axisSrv').value = a.servidor || 'localhost';
+        document.getElementById('axisPto').value = a.puerto || 3306;
+        document.getElementById('axisUsr').value = a.usuario || '';
+        document.getElementById('axisCla').value = '';
+        document.getElementById('axisCla').placeholder = a.claveDefinida ? 'Deja vacio para no cambiarla' : 'Contraseña';
+        document.getElementById('axisBas').value = a.base || 'axispos';
+        document.getElementById('axisAlm').value = (a.almacenes && a.almacenes.length) ? a.almacenes.join(',') : '1';
+        document.getElementById('axisDir').checked = a.conexionDirecta !== false;
+        document.getElementById('axisForzar').checked = !!a.forzarConexionDirecta;
+        if (msg) msg.textContent = a.activo ? 'AxisPOS activo. Puedes probar o cambiar los datos.' : 'AxisPOS no esta activo. Completa los datos y guarda.';
+      } catch (e) {
+        if (msg) msg.textContent = 'No se pudo cargar la configuracion.';
+      }
+    }
+    function leerFormAxis() {
+      const almTxt = (document.getElementById('axisAlm').value || '1').split(/[,;\s]+/).map(function (x) { return parseInt(x, 10); }).filter(function (n) { return n > 0; });
+      return {
+        servidor: (document.getElementById('axisSrv').value || '').trim(),
+        puerto: parseInt(document.getElementById('axisPto').value, 10) || 3306,
+        usuario: (document.getElementById('axisUsr').value || '').trim(),
+        clave: document.getElementById('axisCla').value || '',
+        base: (document.getElementById('axisBas').value || '').trim(),
+        almacenes: almTxt.length ? almTxt : [1],
+        conexionDirecta: !!document.getElementById('axisDir').checked,
+        forzarConexionDirecta: !!document.getElementById('axisForzar').checked
+      };
+    }
+    async function probarConfigAxis() {
+      const msg = document.getElementById('axisCfgMsg');
+      if (msg) msg.textContent = 'Probando...';
+      try {
+        const body = Object.assign({ guardar: false }, leerFormAxis());
+        const res = await fetch('/api/instalacion/axis', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        const d = await res.json();
+        if (d && d.ok) {
+          if (msg) { msg.style.color = '#86efac'; msg.textContent = 'Conexion OK. Productos activos en AxisPOS: ' + (d.productos != null ? d.productos : '?'); }
+        } else {
+          if (msg) { msg.style.color = '#fca5a5'; msg.textContent = (d && d.error) ? d.error : 'No se pudo conectar.'; }
+        }
+      } catch (e) {
+        if (msg) { msg.style.color = '#fca5a5'; msg.textContent = 'Error de red al probar.'; }
+      }
+    }
+    async function guardarConfigAxis() {
+      const msg = document.getElementById('axisCfgMsg');
+      if (msg) msg.textContent = 'Guardando...';
+      try {
+        const body = Object.assign({ guardar: true }, leerFormAxis());
+        const res = await fetch('/api/instalacion/axis', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        const d = await res.json();
+        if (d && d.ok) {
+          axisConfigurado = true;
+          origenDatos = 'axispos';
+          if (typeof pintarBotonOrigen === 'function') pintarBotonOrigen();
+          if (typeof cargarEstadoCatalogo === 'function') cargarEstadoCatalogo();
+          if (msg) { msg.style.color = '#86efac'; msg.textContent = 'Guardado y activado. Productos: ' + (d.productos != null ? d.productos : '?') + '. Reinicia el servidor si cambiaste el conector.'; }
+          if (typeof mostrarBanner === 'function') mostrarBanner('Base de datos AxisPOS configurada');
+        } else {
+          if (msg) { msg.style.color = '#fca5a5'; msg.textContent = (d && d.error) ? d.error : 'No se pudo guardar.'; }
+        }
+      } catch (e) {
+        if (msg) { msg.style.color = '#fca5a5'; msg.textContent = 'Error de red al guardar.'; }
+      }
+    }
     async function alternarOrigenDatos() {
-      if (!axisConfigurado) { alert('AxisPOS no esta configurado en este servidor (revisa config_axis.json).'); return; }
+      if (!axisConfigurado) { alert('AxisPOS no esta configurado. Abre Ajustes → Configurar base de datos (AxisPOS).'); return; }
       const nuevo = (origenDatos === 'catalogo') ? 'axispos' : 'catalogo';
       try {
         const res = await fetch('/api/config', { method:'POST', body: JSON.stringify({ origenDatos: nuevo }) });
@@ -9639,7 +9983,7 @@ TT.iniciar('pc');
       } else if (e.altKey && !e.ctrlKey && !e.metaKey && kl === 'r') {
         pcAtajo(abrirRed);
       } else if (e.altKey && !e.ctrlKey && !e.metaKey && kl === 'n') {
-        postitsPanel();
+        /* postitsPanel removido */
       } else if (e.altKey && !e.ctrlKey && !e.metaKey && kl === 'q') {
         cerrarMenuPC(); pcAtajo(mostrarQRVendedor);
       } else {
@@ -10877,255 +11221,319 @@ TT.iniciar('pc');
       cont.innerHTML = '<div class="np-vacio" style="text-align:left; color:#fde68a;">' + cmdVistaPrevia(c, CMD_PC.base(), carritoNP) + '</div>';
     }
 
-    // ================= Notas rapidas (post-it) flotantes =================
-    // Recados del dia sobre la pantalla (ej. "llamar al proveedor de cemento a las 4 PM"). Se arrastran, se marcan
-    // como hechos y, si tienen hora, avisan cuando llega. Se guardan en el servidor (no se pierden al reiniciar).
-    const POSTIT_COLORES = { amarillo: '#fde047', rosa: '#f9a8d4', verde: '#86efac', azul: '#93c5fd', naranja: '#fdba74' };
-    const POSTIT_ORDEN = ['amarillo', 'rosa', 'verde', 'azul', 'naranja'];
-    let postitsDatos = [];
-    let postitsVisibles = true;
-    let postitsDrag = null;
-    let postitsEditando = false;
-    let postitsColorNuevo = 'amarillo';
-    const postitsAlertando = new Set();
-    function postitHoy() { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
-    function postitAhoraHM() { const d = new Date(); return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); }
-    // "llamar al proveedor a las 4 PM" -> 16:00  (sin AM/PM, de 1 a 7 se toma como tarde)
-    function postitHoraDeTexto(t) {
-      const m = /(?:a\s+las?|para\s+las?|@)\s*(\d{1,2})(?::(\d{2}))?\s*(a\.?\s?m\.?|p\.?\s?m\.?)?/i.exec(String(t || ''));
-      if (!m) return '';
-      let h = parseInt(m[1], 10);
-      const mi = m[2] ? parseInt(m[2], 10) : 0;
-      const suf = (m[3] || '').toLowerCase().replace(/[\s.]/g, '');
-      if (suf === 'pm' && h < 12) h += 12;
-      else if (suf === 'am' && h === 12) h = 0;
-      else if (!suf && h >= 1 && h <= 7) h += 12;
-      if (h > 23 || mi > 59) return '';
-      return String(h).padStart(2, '0') + ':' + String(mi).padStart(2, '0');
-    }
-    async function postitApi(cuerpo) {
-      try {
-        const r = await fetch('/api/postits', { method: 'POST', body: JSON.stringify(cuerpo) });
-        const d = await r.json().catch(function () { return null; });
-        return (r.ok && d && d.ok) ? d : null;
-      } catch (e) { return null; }
-    }
-    function postitBeep() {
-      try {
-        const C = window.AudioContext || window.webkitAudioContext;
-        const ctx = new C();
-        [880, 660, 880].forEach(function (f, i) {
-          const o = ctx.createOscillator(), g = ctx.createGain();
-          o.frequency.value = f; o.connect(g); g.connect(ctx.destination);
-          g.gain.setValueAtTime(0.15, ctx.currentTime + i * 0.22);
-          o.start(ctx.currentTime + i * 0.22); o.stop(ctx.currentTime + i * 0.22 + 0.16);
-        });
-      } catch (e) {}
-    }
-    function postitsCSS() {
-      if (document.getElementById('postitsCSS')) return;
+    // ================= Cuentas y gastos (reemplaza post-its flotantes) =================
+    // Gastos del negocio y cuentas por cobrar (fiado) con historial e impresion termica.
+    let gcRegistros = [];
+    let gcTipo = 'gasto';
+    let gcItems = [];
+
+    function gcCSS() {
+      if (document.getElementById('gcCSS')) return;
       const s = document.createElement('style');
-      s.id = 'postitsCSS';
+      s.id = 'gcCSS';
       s.textContent =
-        '.postit{position:fixed;width:190px;min-height:90px;border-radius:4px;box-shadow:2px 4px 12px rgba(0,0,0,.4);color:#1f2937;font-size:13px;z-index:45;pointer-events:auto;}' +
-        '.postit-barra{cursor:grab;display:flex;justify-content:space-between;align-items:center;padding:2px 4px;background:rgba(0,0,0,.1);touch-action:none;user-select:none;border-radius:4px 4px 0 0;}' +
-        '.postit-barra button{background:none;border:none;cursor:pointer;font-size:13px;padding:0 3px;min-height:0 !important;line-height:1.4;color:#111;}' +
-        '.postit-hora{font-size:11px;font-weight:700;}' +
-        '.postit-texto{padding:6px 8px 10px;white-space:pre-wrap;word-break:break-word;cursor:text;}' +
-        '.postit-texto textarea{width:100%;min-height:60px;font-size:13px;background:rgba(255,255,255,.6);border:1px solid rgba(0,0,0,.3);border-radius:3px;color:#111;}' +
-        '.postit.hecho .postit-texto{text-decoration:line-through;opacity:.55;}' +
-        '.postit.alerta{animation:postitPulso .8s infinite alternate;}' +
-        '@keyframes postitPulso{from{box-shadow:0 0 0 0 rgba(239,68,68,.95);}to{box-shadow:0 0 0 12px rgba(239,68,68,0);}}' +
-        '#postitCapa{position:fixed;inset:0;pointer-events:none;z-index:45;}' +
-        '#postitBtn{position:fixed;right:18px;bottom:18px;width:54px;height:54px;border-radius:50%;border:none;background:var(--tt-fde047,#fde047);color:#111;font-size:26px;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,.5);z-index:46;min-height:0 !important;}' +
-        '#postitBadge{position:absolute;top:-4px;right:-4px;background:#dc2626;color:var(--tt-ffffff,#fff);border-radius:999px;font-size:11px;font-weight:700;min-width:18px;height:18px;line-height:18px;text-align:center;}' +
-        '#postitPanel{position:fixed;right:18px;bottom:82px;width:310px;background:var(--tt-1e293b,#1e293b);border:1px solid var(--tt-475569,#475569);border-radius:12px;padding:10px;z-index:46;display:none;box-shadow:0 8px 24px rgba(0,0,0,.5);color:var(--tt-e2e8f0,#e2e8f0);font-size:12px;}' +
-        '#postitPanel input{width:100%;margin:0 0 6px;}' +
-        '.postit-dot{display:inline-block;width:20px;height:20px;border-radius:50%;border:2px solid transparent;cursor:pointer;margin-right:4px;vertical-align:middle;}' +
-        '.postit-dot.sel{border-color:#fff;}' +
-        '@media (max-width:760px){#postitPanel{right:8px;left:8px;width:auto;}}';
+        '#gcBtn{position:fixed;left:18px;bottom:18px;width:54px;height:54px;border-radius:50%;border:2px solid #fbbf24;background:var(--tt-1e293b,#1e293b);color:#fbbf24;font-size:24px;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,.5);z-index:46;min-height:0 !important;display:flex;align-items:center;justify-content:center;}' +
+        '#gcBtn:hover{background:#0f172a;}' +
+        '#gcOverlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);align-items:center;justify-content:center;z-index:60;}' +
+        '#gcPanel{background:var(--tt-1e293b,#1e293b);border-radius:14px;max-width:560px;width:96%;max-height:92vh;overflow:auto;padding:18px 18px 14px;border:1px solid var(--tt-334155,#334155);}' +
+        '#gcPanel h2{margin:0 0 10px;font-size:17px;color:#fff;}' +
+        '.gc-tabs{display:flex;gap:6px;margin-bottom:12px;}' +
+        '.gc-tab{flex:1;padding:8px;border-radius:8px;border:1px solid var(--tt-334155,#334155);background:var(--tt-0f172a,#0f172a);color:var(--tt-94a3b8,#94a3b8);cursor:pointer;font-size:13px;}' +
+        '.gc-tab.activo{background:#334155;color:#fff;border-color:#fbbf24;}' +
+        '.gc-tipo{display:flex;gap:6px;margin-bottom:12px;}' +
+        '.gc-tipo button{flex:1;padding:8px;border-radius:8px;border:1px solid var(--tt-334155,#334155);background:var(--tt-0f172a,#0f172a);color:var(--tt-cbd5e1,#cbd5e1);cursor:pointer;font-size:13px;}' +
+        '.gc-tipo button.activo{background:#b45309;color:#fff;border-color:#fbbf24;}' +
+        '.gc-et{display:block;font-size:12px;color:var(--tt-94a3b8,#94a3b8);margin:8px 0 3px;}' +
+        '.gc-in{width:100%;padding:8px;border-radius:6px;border:1px solid var(--tt-334155,#334155);background:var(--tt-0f172a,#0f172a);color:var(--tt-e2e8f0,#e2e8f0);font-size:13px;box-sizing:border-box;}' +
+        '.gc-row{display:flex;gap:6px;margin-bottom:6px;align-items:center;}' +
+        '.gc-row input{flex:1;}' +
+        '.gc-hist-item{border:1px solid var(--tt-334155,#334155);border-radius:8px;padding:8px 10px;margin-bottom:8px;background:var(--tt-0f172a,#0f172a);font-size:13px;color:var(--tt-e2e8f0,#e2e8f0);}' +
+        '.gc-badge{display:inline-block;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:700;}' +
+        '.gc-badge.gasto{background:#334155;color:#e2e8f0;}' +
+        '.gc-badge.fiado{background:#7c2d12;color:#fdba74;}' +
+        '.gc-badge.pagado{background:#14532d;color:#86efac;}' +
+        '.gc-msg{font-size:13px;min-height:18px;margin:8px 0;color:var(--tt-94a3b8,#94a3b8);}';
       document.head.appendChild(s);
     }
-    function postitsEnsureUI() {
-      postitsCSS();
-      if (document.getElementById('postitBtn')) return;
-      const capa = document.createElement('div'); capa.id = 'postitCapa'; document.body.appendChild(capa);
+
+    function gcEnsureUI() {
+      if (document.getElementById('gcBtn')) return;
+      gcCSS();
       const btn = document.createElement('button');
-      btn.id = 'postitBtn'; btn.type = 'button'; btn.title = 'Notas rapidas (Alt+N)';
-      btn.innerHTML = '&#128221;<span id="postitBadge" style="display:none;"></span>';
-      btn.onclick = function () { postitsPanel(); };
+      btn.id = 'gcBtn';
+      btn.type = 'button';
+      btn.title = 'Cuentas y gastos (Alt+N)';
+      btn.innerHTML = '&#128176;';
+      btn.onclick = function () { gcAbrir(); };
       document.body.appendChild(btn);
-      const panel = document.createElement('div'); panel.id = 'postitPanel';
-      panel.innerHTML =
-        '<b style="color:var(--tt-ffffff,#fff); font-size:13px;">Notas rápidas</b>' +
-        '<div style="margin:6px 0;"><input id="postitTexto" class="np-input" maxlength="300" placeholder="Recado… (ej: llamar al proveedor a las 4 PM)"></div>' +
-        '<div id="postitColores" style="margin-bottom:6px;"></div>' +
-        '<div style="color:var(--tt-94a3b8,#94a3b8); margin-bottom:6px;">Enter agrega. Si escribes "a las 4 PM" se pone la hora y te avisa.</div>' +
-        '<div style="display:flex; gap:6px; flex-wrap:wrap;"><button type="button" id="postitVer" style="' + PC_BTN + '"></button><button type="button" id="postitLimpiar" style="' + PC_BTN + 'background:var(--tt-475569,#475569);">Quitar las hechas</button><button type="button" id="postitCerrar" style="' + PC_BTN + 'background:var(--tt-475569,#475569);">Cerrar</button></div>';
-      document.body.appendChild(panel);
-      document.getElementById('postitColores').innerHTML = POSTIT_ORDEN.map(function (c) { return '<span class="postit-dot' + (c === postitsColorNuevo ? ' sel' : '') + '" data-color="' + c + '" style="background:' + POSTIT_COLORES[c] + ';"></span>'; }).join('');
-      document.getElementById('postitColores').addEventListener('click', function (e) {
-        const c = e.target && e.target.getAttribute && e.target.getAttribute('data-color');
-        if (!c) return;
-        postitsColorNuevo = c;
-        Array.prototype.forEach.call(document.querySelectorAll('.postit-dot'), function (d) { d.classList.toggle('sel', d.getAttribute('data-color') === c); });
-        document.getElementById('postitTexto').focus();
+      const ov = document.createElement('div');
+      ov.id = 'gcOverlay';
+      ov.onclick = function (e) { if (e.target === ov) gcCerrar(); };
+      ov.innerHTML =
+        '<div id="gcPanel">' +
+          '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">' +
+            '<h2>Cuentas y gastos</h2>' +
+            '<button class="btn-toggle" style="padding:4px 10px;" onclick="gcCerrar()">Cerrar</button>' +
+          '</div>' +
+          '<div class="gc-tabs">' +
+            '<button type="button" class="gc-tab activo" id="gcTabNuevo" onclick="gcTab(\'nuevo\')">Nuevo</button>' +
+            '<button type="button" class="gc-tab" id="gcTabHist" onclick="gcTab(\'hist\')">Historial</button>' +
+          '</div>' +
+          '<div id="gcVistaNuevo">' +
+            '<div class="gc-tipo">' +
+              '<button type="button" id="gcTipoGasto" class="activo" onclick="gcSetTipo(\'gasto\')">Gasto</button>' +
+              '<button type="button" id="gcTipoFiado" onclick="gcSetTipo(\'fiado\')">Cuenta por cobrar (fiado)</button>' +
+            '</div>' +
+            '<div id="gcFormGasto">' +
+              '<label class="gc-et">Concepto</label><input class="gc-in" id="gcConcepto" placeholder="Ej. Pago electricidad local">' +
+              '<label class="gc-et">Categoria</label>' +
+              '<select class="gc-in" id="gcCategoria"><option>Servicios</option><option>Compra mercaderia</option><option>Alquiler</option><option>Transporte</option><option>Otros</option></select>' +
+              '<label class="gc-et">Monto</label><input class="gc-in" id="gcMonto" type="number" min="0" step="any" placeholder="0">' +
+              '<label class="gc-et">Metodo de pago</label>' +
+              '<select class="gc-in" id="gcMetodo"><option>Efectivo</option><option>Transferencia</option><option>Otro</option></select>' +
+              '<label class="gc-et">Realizado por (nombre)</label><input class="gc-in" id="gcRealizado" placeholder="Nombre de quien realiza el gasto">' +
+              '<label class="gc-et">Notas</label><input class="gc-in" id="gcNotasG" placeholder="Opcional">' +
+            '</div>' +
+            '<div id="gcFormFiado" style="display:none;">' +
+              '<label class="gc-et">Cliente (nombre)</label><input class="gc-in" id="gcCliente" placeholder="A quien se le fia">' +
+              '<label class="gc-et">Telefono (opcional)</label><input class="gc-in" id="gcTelefono" placeholder="Telefono">' +
+              '<label class="gc-et">Articulos que se lleva</label>' +
+              '<div id="gcItems"></div>' +
+              '<button type="button" class="btn-toggle" style="width:100%;margin:6px 0;" onclick="gcAddItem()">+ Agregar articulo</button>' +
+              '<div style="font-size:14px;color:#fbbf24;margin:6px 0;" id="gcTotalFiado">Total fiado: $ 0</div>' +
+              '<label class="gc-et">Vence (opcional)</label><input class="gc-in" id="gcVence" type="date">' +
+              '<label class="gc-et">Notas</label><input class="gc-in" id="gcNotasF" placeholder="Opcional">' +
+            '</div>' +
+            '<div class="gc-msg" id="gcMsg"></div>' +
+            '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;">' +
+              '<button type="button" class="btn" style="flex:1;background:var(--tt-475569,#475569);" onclick="gcGuardar(false)">Guardar</button>' +
+              '<button type="button" class="btn" style="flex:1;background:#b45309;" onclick="gcGuardar(true)">Guardar e imprimir</button>' +
+            '</div>' +
+          '</div>' +
+          '<div id="gcVistaHist" style="display:none;">' +
+            '<div id="gcListaHist"></div>' +
+            '<div class="gc-msg" id="gcMsgHist"></div>' +
+          '</div>' +
+        '</div>';
+      document.body.appendChild(ov);
+      document.addEventListener('keydown', function (ev) {
+        if (ev.altKey && (ev.key === 'n' || ev.key === 'N')) { ev.preventDefault(); gcAbrir(); }
       });
-      document.getElementById('postitTexto').addEventListener('keydown', function (e) {
-        if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); postitsAgregar(); }
-        else if (e.key === 'Escape') { e.stopPropagation(); postitsPanel(false); }
+    }
+
+    function gcAbrir() {
+      gcEnsureUI();
+      document.getElementById('gcOverlay').style.display = 'flex';
+      gcTab('nuevo');
+      gcSetTipo(gcTipo);
+      if (!gcItems.length) gcAddItem();
+      document.getElementById('gcMsg').textContent = '';
+    }
+    function gcCerrar() {
+      const o = document.getElementById('gcOverlay');
+      if (o) o.style.display = 'none';
+    }
+    function gcTab(t) {
+      document.getElementById('gcTabNuevo').classList.toggle('activo', t === 'nuevo');
+      document.getElementById('gcTabHist').classList.toggle('activo', t === 'hist');
+      document.getElementById('gcVistaNuevo').style.display = t === 'nuevo' ? '' : 'none';
+      document.getElementById('gcVistaHist').style.display = t === 'hist' ? '' : 'none';
+      if (t === 'hist') gcCargarHist();
+    }
+    function gcSetTipo(t) {
+      gcTipo = t;
+      document.getElementById('gcTipoGasto').classList.toggle('activo', t === 'gasto');
+      document.getElementById('gcTipoFiado').classList.toggle('activo', t === 'fiado');
+      document.getElementById('gcFormGasto').style.display = t === 'gasto' ? '' : 'none';
+      document.getElementById('gcFormFiado').style.display = t === 'fiado' ? '' : 'none';
+    }
+    function gcAddItem() {
+      gcItems.push({ cantidad: 1, nombre: '', precio: 0 });
+      gcRenderItems();
+    }
+    function gcRenderItems() {
+      const box = document.getElementById('gcItems');
+      if (!box) return;
+      box.innerHTML = '';
+      gcItems.forEach(function (it, i) {
+        const row = document.createElement('div');
+        row.className = 'gc-row';
+        row.innerHTML =
+          '<input type="number" min="0" step="any" style="max-width:64px;" value="' + (it.cantidad || '') + '" placeholder="Cant" data-i="' + i + '" data-f="cantidad">' +
+          '<input type="text" value="' + (it.nombre || '').replace(/"/g, '&quot;') + '" placeholder="Articulo" data-i="' + i + '" data-f="nombre">' +
+          '<input type="number" min="0" step="any" style="max-width:90px;" value="' + (it.precio || '') + '" placeholder="Precio" data-i="' + i + '" data-f="precio">' +
+          '<button type="button" class="btn-toggle" style="padding:4px 8px;" data-del="' + i + '">X</button>';
+        box.appendChild(row);
       });
-      document.getElementById('postitVer').onclick = function () { postitsVisibles = !postitsVisibles; try { localStorage.setItem('postitsVisibles', postitsVisibles ? '1' : '0'); } catch (e) {} postitsRender(); };
-      document.getElementById('postitLimpiar').onclick = async function () { await postitApi({ op: 'limpiar' }); postitsCargar(true); };
-      document.getElementById('postitCerrar').onclick = function () { postitsPanel(false); };
-      capa.addEventListener('click', postitsClick);
-      capa.addEventListener('pointerdown', postitsPointerDown);
+      box.querySelectorAll('input').forEach(function (inp) {
+        inp.addEventListener('input', function () {
+          const i = parseInt(inp.getAttribute('data-i'), 10);
+          const f = inp.getAttribute('data-f');
+          if (f === 'nombre') gcItems[i].nombre = inp.value;
+          else gcItems[i][f] = parseFloat(String(inp.value).replace(',', '.')) || 0;
+          gcTotal();
+        });
+      });
+      box.querySelectorAll('[data-del]').forEach(function (b) {
+        b.addEventListener('click', function () {
+          const i = parseInt(b.getAttribute('data-del'), 10);
+          gcItems.splice(i, 1);
+          if (!gcItems.length) gcAddItem();
+          else gcRenderItems();
+          gcTotal();
+        });
+      });
+      gcTotal();
     }
-    function postitsPanel(forzar) {
-      const p = document.getElementById('postitPanel');
-      const abrir = (forzar === undefined) ? (p.style.display !== 'block') : forzar;
-      p.style.display = abrir ? 'block' : 'none';
-      if (abrir) { postitsVisibles = true; try { localStorage.setItem('postitsVisibles', '1'); } catch (e) {} postitsRender(); setTimeout(function () { document.getElementById('postitTexto').focus(); }, 30); }
+    function gcTotal() {
+      let t = 0;
+      gcItems.forEach(function (it) { t += (parseFloat(it.cantidad) || 0) * (parseFloat(it.precio) || 0); });
+      const el = document.getElementById('gcTotalFiado');
+      if (el) el.textContent = 'Total fiado: $ ' + t.toLocaleString('es', { maximumFractionDigits: 2 });
     }
-    async function postitsAgregar() {
-      const inp = document.getElementById('postitTexto');
-      const texto = inp.value.trim();
-      if (!texto) return;
-      const hora = postitHoraDeTexto(texto);
-      const cuerpo = { op: 'add', texto: texto, color: postitsColorNuevo, hora: hora };
-      if (hora && hora <= postitAhoraHM()) cuerpo.avisadoDia = postitHoy();   // la hora ya paso hoy: no avisar de inmediato
-      const d = await postitApi(cuerpo);
-      if (!d) { mostrarBanner('No se pudo guardar la nota.', 3000); return; }
-      inp.value = '';
-      postitsDatos.push(d.nota);
-      postitsRender();
-      if (hora) mostrarBanner('Nota guardada. Te aviso a las ' + hora + '.', 3000);
+    function gcLimpiarForm() {
+      document.getElementById('gcConcepto').value = '';
+      document.getElementById('gcMonto').value = '';
+      document.getElementById('gcRealizado').value = '';
+      document.getElementById('gcNotasG').value = '';
+      document.getElementById('gcCliente').value = '';
+      document.getElementById('gcTelefono').value = '';
+      document.getElementById('gcNotasF').value = '';
+      document.getElementById('gcVence').value = '';
+      gcItems = [];
+      gcAddItem();
     }
-    function postitsPosicion(n, i) {
-      const x = (n.x === null || n.x === undefined) ? Math.max(8, window.innerWidth - 220) : n.x;
-      const y = (n.y === null || n.y === undefined) ? 90 + (i % 5) * 112 : n.y;
-      return { x: Math.min(Math.max(0, x), Math.max(0, window.innerWidth - 60)), y: Math.min(Math.max(0, y), Math.max(0, window.innerHeight - 40)) };
-    }
-    function postitsRender() {
-      postitsEnsureUI();
-      const capa = document.getElementById('postitCapa');
-      const pendientes = postitsDatos.filter(function (n) { return !n.hecho; }).length;
-      const badge = document.getElementById('postitBadge');
-      badge.style.display = pendientes ? 'block' : 'none';
-      badge.textContent = pendientes;
-      document.getElementById('postitVer').textContent = postitsVisibles ? 'Ocultar notas' : 'Mostrar notas';
-      if (postitsDrag || postitsEditando) return;
-      if (!postitsVisibles) { capa.innerHTML = ''; return; }
-      capa.innerHTML = postitsDatos.map(function (n, i) {
-        const p = postitsPosicion(n, i);
-        return '<div class="postit' + (n.hecho ? ' hecho' : '') + (postitsAlertando.has(n.id) ? ' alerta' : '') + '" data-id="' + n.id + '" style="left:' + p.x + 'px; top:' + p.y + 'px; background:' + (POSTIT_COLORES[n.color] || POSTIT_COLORES.amarillo) + ';">' +
-          '<div class="postit-barra" data-drag="1"><span class="postit-hora">' + (n.hora ? '&#9200; ' + escaparHtml(n.hora) : '') + '</span>' +
-          '<span><button type="button" data-acc="hora" title="Hora del aviso">&#9200;</button><button type="button" data-acc="color" title="Cambiar color">&#127912;</button><button type="button" data-acc="hecho" title="Hecho">&#10003;</button><button type="button" data-acc="borrar" title="Borrar">&#10005;</button></span></div>' +
-          '<div class="postit-texto" data-acc="editar">' + escaparHtml(n.texto) + '</div></div>';
-      }).join('');
-    }
-    function postitsPorId(el) {
-      const card = el && el.closest ? el.closest('.postit') : null;
-      return card ? postitsDatos.find(function (n) { return n.id === parseInt(card.getAttribute('data-id'), 10); }) : null;
-    }
-    async function postitsClick(e) {
-      const acc = e.target && e.target.getAttribute && e.target.getAttribute('data-acc');
-      const n = postitsPorId(e.target);
-      if (!n || !acc) return;
-      postitsAlertando.delete(n.id);
-      if (acc === 'hecho') { n.hecho = !n.hecho; postitsRender(); await postitApi({ op: 'update', id: n.id, hecho: n.hecho }); }
-      else if (acc === 'borrar') { postitsDatos = postitsDatos.filter(function (x) { return x.id !== n.id; }); postitsRender(); await postitApi({ op: 'del', id: n.id }); }
-      else if (acc === 'color') { n.color = POSTIT_ORDEN[(POSTIT_ORDEN.indexOf(n.color) + 1) % POSTIT_ORDEN.length]; postitsRender(); await postitApi({ op: 'update', id: n.id, color: n.color }); }
-      else if (acc === 'hora') {
-        const h = prompt('Hora del aviso (ej. 16:30). Vacío = sin aviso:', n.hora || '');
-        if (h === null) return;
-        const hh = h.trim();
-        if (hh && !/^\d{1,2}:\d{2}$/.test(hh)) { mostrarBanner('Escribe la hora así: 16:30', 3000); return; }
-        n.hora = hh; n.avisadoDia = '';
-        postitsRender();
-        await postitApi({ op: 'update', id: n.id, hora: hh });
+    async function gcGuardar(imprimir) {
+      const msg = document.getElementById('gcMsg');
+      msg.style.color = 'var(--tt-94a3b8,#94a3b8)';
+      msg.textContent = 'Guardando...';
+      let body = { op: 'add', imprimir: !!imprimir, tipo: gcTipo };
+      if (gcTipo === 'gasto') {
+        body.concepto = document.getElementById('gcConcepto').value.trim();
+        body.categoria = document.getElementById('gcCategoria').value;
+        body.monto = parseFloat(String(document.getElementById('gcMonto').value).replace(',', '.')) || 0;
+        body.metodo = document.getElementById('gcMetodo').value;
+        body.realizadoPor = document.getElementById('gcRealizado').value.trim();
+        body.notas = document.getElementById('gcNotasG').value.trim();
+      } else {
+        body.cliente = document.getElementById('gcCliente').value.trim();
+        body.telefono = document.getElementById('gcTelefono').value.trim();
+        body.vence = document.getElementById('gcVence').value;
+        body.notas = document.getElementById('gcNotasF').value.trim();
+        body.items = gcItems.filter(function (it) { return (it.nombre || '').trim(); }).map(function (it) {
+          return { nombre: String(it.nombre).trim(), cantidad: parseFloat(it.cantidad) || 1, precio: parseFloat(it.precio) || 0 };
+        });
       }
-      else if (acc === 'editar') postitsEditar(e.target, n);
-    }
-    function postitsEditar(el, n) {
-      postitsEditando = true;
-      const ta = document.createElement('textarea');
-      ta.value = n.texto; ta.maxLength = 300;
-      el.innerHTML = ''; el.appendChild(ta); ta.focus();
-      let fin = false;
-      const guardar = async function (cancelar) {
-        if (fin) return; fin = true;
-        postitsEditando = false;
-        const nuevo = ta.value.trim();
-        if (!cancelar && nuevo && nuevo !== n.texto) { n.texto = nuevo; await postitApi({ op: 'update', id: n.id, texto: nuevo }); }
-        postitsRender();
-      };
-      ta.addEventListener('blur', function () { guardar(false); });
-      ta.addEventListener('keydown', function (ev) {
-        ev.stopPropagation();
-        if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); guardar(false); }
-        else if (ev.key === 'Escape') { ev.preventDefault(); guardar(true); }
-      });
-    }
-    function postitsPointerDown(e) {
-      const barra = e.target && e.target.closest ? e.target.closest('.postit-barra') : null;
-      if (!barra || (e.target.tagName === 'BUTTON')) return;
-      const card = barra.closest('.postit');
-      const n = postitsPorId(card);
-      if (!n) return;
-      const r = card.getBoundingClientRect();
-      postitsDrag = { n: n, card: card, dx: e.clientX - r.left, dy: e.clientY - r.top };
-      try { barra.setPointerCapture(e.pointerId); } catch (er) {}
-      barra.style.cursor = 'grabbing';
-      const mover = function (ev) {
-        if (!postitsDrag) return;
-        const x = Math.min(Math.max(0, ev.clientX - postitsDrag.dx), window.innerWidth - 60);
-        const y = Math.min(Math.max(0, ev.clientY - postitsDrag.dy), window.innerHeight - 40);
-        postitsDrag.card.style.left = x + 'px'; postitsDrag.card.style.top = y + 'px';
-        postitsDrag.x = x; postitsDrag.y = y;
-      };
-      const soltar = async function () {
-        barra.removeEventListener('pointermove', mover);
-        barra.removeEventListener('pointerup', soltar);
-        barra.removeEventListener('pointercancel', soltar);
-        const d = postitsDrag; postitsDrag = null;
-        barra.style.cursor = 'grab';
-        if (d && d.x !== undefined) { d.n.x = Math.round(d.x); d.n.y = Math.round(d.y); await postitApi({ op: 'update', id: d.n.id, x: d.n.x, y: d.n.y }); }
-      };
-      barra.addEventListener('pointermove', mover);
-      barra.addEventListener('pointerup', soltar);
-      barra.addEventListener('pointercancel', soltar);
-    }
-    async function postitsCargar(forzar) {
-      if (postitsDrag || postitsEditando) return;
       try {
-        const r = await fetch('/api/postits');
+        const r = await fetch('/api/gastos-cuentas', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        const d = await r.json().catch(function () { return null; });
+        if (!r.ok || !d || !d.ok) {
+          msg.style.color = '#fca5a5';
+          msg.textContent = (d && d.error) || 'No se pudo guardar.';
+          return;
+        }
+        msg.style.color = '#86efac';
+        let t = 'Guardado.';
+        if (imprimir) t += d.impreso ? ' Impreso en la termica.' : (' No se pudo imprimir' + (d.errorImpresion ? (': ' + d.errorImpresion) : '.'));
+        msg.textContent = t;
+        gcLimpiarForm();
+        if (typeof mostrarBanner === 'function') mostrarBanner(gcTipo === 'gasto' ? 'Gasto registrado' : 'Fiado registrado');
+      } catch (e) {
+        msg.style.color = '#fca5a5';
+        msg.textContent = 'Error de red.';
+      }
+    }
+    async function gcCargarHist() {
+      const box = document.getElementById('gcListaHist');
+      const msg = document.getElementById('gcMsgHist');
+      box.innerHTML = 'Cargando...';
+      msg.textContent = '';
+      try {
+        const r = await fetch('/api/gastos-cuentas');
         const d = await r.json();
-        if (!d || !d.ok) return;
-        const nuevo = d.notas || [];
-        if (forzar || JSON.stringify(nuevo) !== JSON.stringify(postitsDatos)) { postitsDatos = nuevo; postitsRender(); }
-      } catch (e) {}
+        if (!d || !d.ok) { box.innerHTML = ''; msg.textContent = 'No se pudo cargar.'; return; }
+        gcRegistros = d.registros || [];
+        if (!gcRegistros.length) { box.innerHTML = '<div style="color:#94a3b8;font-size:13px;">Todavia no hay registros.</div>'; return; }
+        box.innerHTML = '';
+        gcRegistros.forEach(function (reg) {
+          const div = document.createElement('div');
+          div.className = 'gc-hist-item';
+          const esGasto = reg.tipo === 'gasto';
+          const badge = esGasto ? '<span class="gc-badge gasto">GASTO</span>' : '<span class="gc-badge fiado">FIADO</span>';
+          const est = (reg.estado || '').toUpperCase();
+          const badgeEst = est === 'PAGADO' ? ' <span class="gc-badge pagado">PAGADO</span>' : (est === 'PENDIENTE' ? ' <span class="gc-badge fiado">PENDIENTE</span>' : '');
+          let detalle = '';
+          if (esGasto) {
+            detalle = (reg.concepto || '') + '<br>$ ' + (reg.monto || 0).toLocaleString('es') + ' · ' + (reg.realizadoPor || '');
+          } else {
+            const arts = (reg.items || []).map(function (it) { return (it.cantidad || 1) + 'x ' + it.nombre; }).join(', ');
+            detalle = (reg.cliente || '') + '<br>' + arts + '<br>Total: $ ' + (reg.monto || 0).toLocaleString('es');
+          }
+          div.innerHTML =
+            '<div style="display:flex;justify-content:space-between;gap:8px;margin-bottom:4px;">' +
+              '<span>' + badge + badgeEst + '</span>' +
+              '<span style="font-size:11px;color:#94a3b8;">' + (reg.hora || '') + ' · #' + (esGasto ? 'G' : 'F') + '-' + reg.id + '</span>' +
+            '</div>' +
+            '<div style="margin-bottom:6px;">' + detalle + '</div>' +
+            '<div style="display:flex;gap:6px;flex-wrap:wrap;">' +
+              '<button type="button" class="btn-toggle" style="padding:4px 8px;font-size:12px;" data-imp="' + reg.id + '">Reimprimir</button>' +
+              (!esGasto && est === 'PENDIENTE' ? '<button type="button" class="btn-toggle" style="padding:4px 8px;font-size:12px;background:#15803d;color:#fff;" data-pag="' + reg.id + '" data-print="0">Registrar pago</button>' : '') +
+              (!esGasto && est === 'PENDIENTE' ? '<button type="button" class="btn-toggle" style="padding:4px 8px;font-size:12px;background:#b45309;color:#fff;" data-pag="' + reg.id + '" data-print="1">Cobrar e imprimir</button>' : '') +
+            '</div>';
+          box.appendChild(div);
+        });
+        box.querySelectorAll('[data-imp]').forEach(function (b) {
+          b.onclick = async function () {
+            msg.textContent = 'Imprimiendo...';
+            try {
+              const r = await fetch('/api/gastos-cuentas', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ op: 'imprimir', id: parseInt(b.getAttribute('data-imp'), 10) }) });
+              const d = await r.json().catch(function () { return null; });
+              msg.style.color = (d && d.ok) ? '#86efac' : '#fca5a5';
+              msg.textContent = (d && d.ok) ? 'Impreso.' : ((d && d.error) || 'No se pudo imprimir.');
+            } catch (e) { msg.style.color = '#fca5a5'; msg.textContent = 'Error de red.'; }
+          };
+        });
+        box.querySelectorAll('[data-pag]').forEach(function (b) {
+          b.onclick = async function () {
+            const id = parseInt(b.getAttribute('data-pag'), 10);
+            const imprimir = b.getAttribute('data-print') === '1';
+            const metodo = window.prompt('Metodo de pago (Efectivo / Transferencia / Otro):', 'Efectivo');
+            if (metodo === null) return;
+            if (!window.confirm('Registrar el pago de esta cuenta por cobrar' + (imprimir ? ' e imprimir comprobante' : '') + '?')) return;
+            msg.textContent = imprimir ? 'Registrando pago e imprimiendo...' : 'Registrando pago...';
+            try {
+              const r = await fetch('/api/gastos-cuentas', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ op: 'pagar', id: id, estado: 'PAGADO', metodoPago: (metodo || 'Efectivo'), imprimir: imprimir })
+              });
+              const d = await r.json().catch(function () { return null; });
+              if (!r.ok || !d || !d.ok) {
+                msg.style.color = '#fca5a5';
+                msg.textContent = (d && d.error) || 'No se pudo registrar el pago.';
+                return;
+              }
+              msg.style.color = '#86efac';
+              let t = 'Pago registrado.';
+              if (imprimir) t += d.impreso ? ' Comprobante impreso.' : (' No se pudo imprimir' + (d.errorImpresion ? (': ' + d.errorImpresion) : '.'));
+              msg.textContent = t;
+              if (typeof mostrarBanner === 'function') mostrarBanner('Fiado marcado como pagado');
+              gcCargarHist();
+            } catch (e) {
+              msg.style.color = '#fca5a5';
+              msg.textContent = 'Error de red.';
+            }
+          };
+        });
+      } catch (e) {
+        box.innerHTML = '';
+        msg.textContent = 'Error de red.';
+      }
     }
-    function postitsRevisarAvisos() {
-      const hoy = postitHoy(), ahora = postitAhoraHM();
-      postitsDatos.forEach(function (n) {
-        if (n.hecho || !n.hora || n.avisadoDia === hoy || ahora < n.hora) return;
-        n.avisadoDia = hoy;
-        postitsAlertando.add(n.id);
-        postitBeep();
-        mostrarBanner('\u23F0 ' + n.texto, 9000);
-        postitsRender();
-        postitApi({ op: 'update', id: n.id, avisadoDia: hoy });
-      });
+    function iniciarGastosCuentas() {
+      gcEnsureUI();
     }
-    function iniciarPostits() {
-      try { const v = localStorage.getItem('postitsVisibles'); postitsVisibles = (v === null) ? (window.innerWidth >= 760) : (v === '1'); } catch (e) {}
-      postitsEnsureUI();
-      postitsCargar(true);
-      setInterval(function () { postitsCargar(false); }, 15000);
-      setInterval(postitsRevisarAvisos, 20000);
-    }
-    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', iniciarPostits); else iniciarPostits();
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', iniciarGastosCuentas); else iniciarGastosCuentas();
 
     // ---- Sinonimos de busqueda ----
     async function abrirSinonimos() {
@@ -11969,13 +12377,13 @@ $htmlVendedor = @'
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no, viewport-fit=cover">
-<title>Tomar Pedido - Toto Tools</title>
+<title>Tomar Pedido</title>
 <link rel="manifest" href="/manifest-vendedor.json">
 <link rel="icon" href="/icon-192.png">
 <link rel="apple-touch-icon" href="/icon-192.png">
 <meta name="theme-color" content="#2563eb">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-title" content="Pedidos Toto Tools">
+<meta name="apple-mobile-web-app-title" content="Pedidos" id="metaAppTitle">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <script>
   // Se aplica antes de pintar la pagina para que no haya parpadeo de claro a oscuro.
@@ -12309,7 +12717,7 @@ TT.iniciar('vendedor');
 </head>
 <body>
   <header>
-    <div><h1>Toto Tools - Tomar Pedido</h1><div id="headerVendedor"><span id="puntoRed"></span><span id="textoRed">Conectando...</span><button id="btnReconectar" type="button" title="Reconectar con la PC" onclick="reconectarAhora()">&#8635;</button></div></div>
+    <div><h1 id="tituloAppVendedor">Tomar Pedido</h1><div id="headerVendedor"><span id="puntoRed"></span><span id="textoRed">Conectando...</span><button id="btnReconectar" type="button" title="Reconectar con la PC" onclick="reconectarAhora()">&#8635;</button></div></div>
     <div style="display:flex; align-items:center; gap:8px;">
       <button id="btnTema" onclick="cambiarTema()" title="Cambiar tema">&#127769;</button>
       <button id="btnCampana" onclick="toggleCampana()">&#128276;<span id="badgeCampana" class="badge-campana" style="display:none;">0</span></button>
@@ -12413,7 +12821,7 @@ TT.iniciar('vendedor');
 
   <div id="loginOverlay">
     <div id="loginTarjeta">
-      <div class="login-marca">Toto Tools</div>
+      <div class="login-marca" id="loginMarca">Pedidos</div>
       <div class="login-titulo">Iniciar sesi&oacute;n</div>
 
       <div id="loginPasoNombre">
@@ -12638,6 +13046,52 @@ TT.iniciar('vendedor');
     let origenesAsignadosCarrito = [];
     let ocultarSinStock = false;   // lo decide la PC (/api/config)
     let tasaDolarActual = 0;       // idem, tasa USD configurada en la PC (0 = no mostrar)
+    // Nombre del negocio: espejo de la PC cuando hay conexion; si no, el ultimo guardado en el telefono.
+    var CLAVE_NEGOCIO_LOCAL = 'ttNombreNegocio';
+    function nombreNegocioGuardado() {
+      try { return (localStorage.getItem(CLAVE_NEGOCIO_LOCAL) || '').toString().trim(); } catch (e) { return ''; }
+    }
+    function guardarNombreNegocioLocal(n) {
+      n = (n || '').toString().trim();
+      if (!n) return;
+      try { localStorage.setItem(CLAVE_NEGOCIO_LOCAL, n); } catch (e) {}
+      try { window.TT_NEGOCIO = n; } catch (e) {}
+    }
+    function nombreNegocioActual() {
+      var n = '';
+      try { n = (window.TT_NEGOCIO || '').toString().trim(); } catch (e) {}
+      if (!n) n = nombreNegocioGuardado();
+      return n;
+    }
+    function aplicarMarcaNegocio(nombre, desdeServidor) {
+      var n = (nombre || '').toString().trim();
+      if (!n) n = nombreNegocioActual();
+      // Solo persistimos cuando viene de la PC (conexion real), para no pisar un nombre bueno con vacio offline.
+      if (desdeServidor && n) guardarNombreNegocioLocal(n);
+      var marca = n || 'Pedidos';
+      var titulo = n ? (n + ' - Tomar Pedido') : 'Tomar Pedido';
+      try { if (n) window.TT_NEGOCIO = n; } catch (e) {}
+      var elMarca = document.getElementById('loginMarca');
+      if (elMarca) elMarca.textContent = marca;
+      var elH1 = document.getElementById('tituloAppVendedor');
+      if (elH1) elH1.textContent = titulo;
+      try { document.title = titulo; } catch (e) {}
+      var meta = document.getElementById('metaAppTitle');
+      if (meta) meta.setAttribute('content', marca);
+    }
+    // Al abrir la app: primero lo guardado en el telefono (sirve offline); luego se actualiza si hay PC.
+    function iniciarMarcaNegocio() {
+      aplicarMarcaNegocio(nombreNegocioGuardado() || nombreNegocioActual(), false);
+      // Si la pagina la sirvio la PC, TT_NEGOCIO ya viene inyectado: es espejo fiable.
+      try {
+        var inyectado = (window.TT_NEGOCIO || '').toString().trim();
+        if (inyectado) aplicarMarcaNegocio(inyectado, true);
+      } catch (e) {}
+    }
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', iniciarMarcaNegocio);
+    } else { iniciarMarcaNegocio(); }
+
     let permitirDescuentosActual = false; // idem, lo activa la PC en Ajustes (por defecto no se pueden editar precios)
     let permitirBorradoresActual = false; // idem, lo activa la PC en Ajustes (guardar el pedido a medias como borrador)
     let umbralStockBajoActual = 0; // idem, marca en el buscador cuando queda poco (0 = desactivado)
@@ -12747,6 +13201,12 @@ TT.iniciar('vendedor');
         b.className = 'ok';
         b.textContent = '✔ Conexión con la PC restablecida';
         setTimeout(() => { if (!diagRed.caido) b.className = ''; }, 4000);
+        // Al recuperar la PC, espejar de nuevo nombre del negocio y ajustes.
+        try {
+          fetch('/api/config', { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (cfg) {
+            if (cfg && (cfg.nombreNegocio || cfg.negocioNombre)) aplicarMarcaNegocio(cfg.nombreNegocio || cfg.negocioNombre, true);
+          }).catch(function () {});
+        } catch (e) {}
       } else {
         b.className = 'mal';
         b.textContent = navigator.onLine === false
@@ -13207,6 +13667,9 @@ TT.iniciar('vendedor');
           if (resCfg.ok) {
             const cfg = await resCfg.json();
             ocultarSinStock = !!cfg.ocultarSinStock;
+            if (cfg.nombreNegocio || cfg.negocioNombre) {
+              aplicarMarcaNegocio(cfg.nombreNegocio || cfg.negocioNombre, true);
+            }
             const tasaNueva = parseFloat(cfg.tasaDolar) || 0;
             if (tasaNueva !== tasaDolarActual) { tasaDolarActual = tasaNueva; renderCarrito(); }
             umbralStockBajoActual = parseInt(cfg.umbralStockBajo, 10) || 0;
@@ -16038,7 +16501,7 @@ TT.iniciar('vendedor');
       const tb = pluginNativo('TotoBg');
       if (tb && typeof tb.start === 'function') {
         try {
-          await tb.start({ title: 'Toto Tools', text: 'Esperando pedidos y avisos de la caja' });
+          await tb.start({ title: (nombreNegocioActual() || 'Pedidos'), text: 'Esperando pedidos y avisos de la caja' });
           segundoPlanoActivo = true; segundoPlanoError = '';
           return true;
         } catch (e) { segundoPlanoError = String((e && e.message) || e); }
@@ -16049,7 +16512,7 @@ TT.iniciar('vendedor');
       try {
         if (typeof bg.requestNotificationsPermission === 'function') { try { await bg.requestNotificationsPermission(); } catch (e) {} }
         if (typeof bg.setSettings === 'function') {
-          try { await bg.setSettings({ title: 'Toto Tools', text: 'Esperando pedidos y avisos de la caja', subText: 'Conectado', channelName: 'Toto Tools en segundo plano', channelDescription: 'Mantiene la app despierta para recibir pedidos', silent: false, hidden: false, resume: true }); } catch (e) {}
+          try { await bg.setSettings({ title: (nombreNegocioActual() || 'Pedidos'), text: 'Esperando pedidos y avisos de la caja', subText: 'Conectado', channelName: ((nombreNegocioActual() || 'Pedidos') + ' en segundo plano'), channelDescription: 'Mantiene la app despierta para recibir pedidos', silent: false, hidden: false, resume: true }); } catch (e) {}
         }
         if (typeof bg.enable === 'function') await bg.enable();
         if (typeof bg.disableWebViewOptimizations === 'function') { try { await bg.disableWebViewOptimizations(); } catch (e) {} }
@@ -16121,7 +16584,7 @@ TT.iniciar('vendedor');
         st.textContent = (okNoti ? 'Avisos del teléfono activados. ' : 'Falta permitir las notificaciones para esta app en los ajustes de Android. ') +
           (okBg ? 'La app sigue recibiendo pedidos con la pantalla apagada (deja la notificación fija y, si Android lo pide, elige "Permitir" / sin restricción de batería). ' : ('No se pudo activar el segundo plano' + (segundoPlanoError ? ': ' + segundoPlanoError : ' (esta APK no lo trae: recompílala)') + '. ')) +
           '[' + diagnosticoPlugins() + ']';
-        if (okNoti) mostrarNotificacionSistema('Toto Tools', 'Avisos activados en este teléfono.');
+        if (okNoti) mostrarNotificacionSistema((nombreNegocioActual() || 'Pedidos'), 'Avisos activados en este teléfono.');
         return;
       }
       if (!('Notification' in window)) {
@@ -16134,7 +16597,7 @@ TT.iniciar('vendedor');
       }
       const r = await Notification.requestPermission();
       st.textContent = r === 'granted' ? 'Avisos del teléfono activados.' : 'Los avisos están bloqueados: actívalos en los ajustes del navegador para este sitio.';
-      if (r === 'granted') mostrarNotificacionSistema('Toto Tools', 'Avisos activados en este teléfono.');
+      if (r === 'granted') mostrarNotificacionSistema((nombreNegocioActual() || 'Pedidos'), 'Avisos activados en este teléfono.');
     }
     // ================= DESCARGAR LO QUE VA QUEDANDO (stock actual) =================
     // Baja un Excel con el catalogo y la cantidad que queda de cada producto (ya descontadas
@@ -16593,7 +17056,7 @@ $htmlAuditoria = @'
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Auditoría de AxisPOS - Toto Tools</title>
+<title>Auditoría de AxisPOS</title>
 <style>
   * { box-sizing: border-box; font-family: 'Segoe UI', system-ui, Tahoma, Arial, sans-serif; }
   body { margin:0; background:#0f172a; color:#e2e8f0; }
@@ -16856,7 +17319,7 @@ $htmlEtiquetas = @'
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Etiquetas y códigos de barra - Toto Tools</title>
+<title>Etiquetas y códigos de barra</title>
 <style id="pageStyle"></style>
 <style>
   * { box-sizing: border-box; font-family: 'Segoe UI', system-ui, Tahoma, Arial, sans-serif; }
@@ -19614,7 +20077,7 @@ $htmlMetricas = @'
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Metricas - Toto Tools</title>
+<title>Métricas</title>
 <style>
   * { box-sizing:border-box; margin:0; padding:0; font-family: 'Segoe UI', system-ui, Tahoma, Arial, sans-serif; }
   body { background:#0f172a; color:#e2e8f0; padding:18px; }
@@ -19644,7 +20107,7 @@ $htmlMetricas = @'
 </style>
 </head>
 <body>
-  <h1>Metricas - Toto Tools</h1>
+  <h1>Métricas</h1>
   <div class="tabs">
     <button id="tabHoy" onclick="cambiarRango(1)">Hoy</button>
     <button id="btnFuenteHoy" onclick="alternarFuenteHoy()" style="display:none;"></button>
@@ -19914,6 +20377,24 @@ $global:extrasHtml = @'
 .ttx-bienv .ttx-mc{background:rgba(255,255,255,.14);border-radius:10px;padding:9px 12px;font-size:13px;display:flex;justify-content:space-between;gap:8px}
 .ttx-bienv .ttx-mc b{font-weight:700}
 .ttx-bienv .ttx-der{flex:1;padding:26px 28px;display:flex;flex-direction:column;min-width:0}
+.ttx-bienv .ttx-sub-izq{margin:0 0 14px;font-size:13px;opacity:.9}
+.ttx-bienv .ttx-feat{display:flex;align-items:center;gap:10px;font-size:13px;margin:6px 0;opacity:.95}
+.ttx-bienv .ttx-feat-i{width:28px;height:28px;border-radius:8px;background:rgba(255,255,255,.18);display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0}
+.ttx-bots-col{flex-direction:column;align-items:stretch;gap:8px}
+.ttx-bots-col .ttx-b{width:100%}
+.ttx-wiz-title{margin:0 0 4px;font-size:18px;font-weight:700;color:#0f172a;text-align:center}
+.ttx-pts{display:flex;flex-wrap:wrap;gap:6px;justify-content:center;margin:10px 0 12px}
+.ttx-step{display:flex;flex-direction:column;align-items:center;gap:2px;min-width:72px;opacity:.45;font-size:10px;color:#64748b}
+.ttx-step b{width:26px;height:26px;border-radius:50%;background:#e2e8f0;color:#475569;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700}
+.ttx-step em{font-style:normal;max-width:90px;text-align:center;line-height:1.2}
+.ttx-step.ttx-on{opacity:1;color:#1d4ed8}
+.ttx-step.ttx-on b{background:#1d4ed8;color:#fff}
+.ttx-step.ttx-ok{opacity:.85;color:#15803d}
+.ttx-step.ttx-ok b{background:#16a34a;color:#fff}
+.ttx-step i{display:none}
+
+.ttx-wiz-sub{margin:0 0 14px;font-size:13px;color:#64748b;text-align:center}
+
 .ttx-mini-t{font-size:11px;letter-spacing:3px;color:#64748b;text-transform:uppercase;margin-bottom:6px}
 .ttx-der h2{margin:0 0 4px;font-size:25px;color:#1d4ed8;font-weight:600}
 .ttx-der .ttx-gr{margin:0 0 14px;color:#64748b;font-size:14px}
@@ -20398,25 +20879,50 @@ function acercaDe() {
 }
 
 // ---------- Bienvenida ----------
+// Si aún no hay nombre de negocio, se muestra un título genérico (no la marca del producto).
+// Solo se muestra el nombre cuando el encargado ya lo configuró.
 function bienvenida(info, alAceptar) {
   var l = (info && info.licencia) || null; var tl = textoLicencia(l);
   var fin = l && l.modo === 'prueba' ? l.vence : '';
+  var nombreNeg = '';
+  try {
+    if (info && info.negocio && info.negocio.nombre) nombreNeg = String(info.negocio.nombre).trim();
+  } catch (e1) {}
+  if (!nombreNeg && NEGOCIO) nombreNeg = String(NEGOCIO).trim();
+  // Título del panel izquierdo: solo el negocio si existe; si no, texto genérico (sin marca del producto).
+  var tituloIzq = nombreNeg || (MODO === 'etiquetas' ? 'Etiquetas' : 'Panel de Pedidos');
+  var subIzq = nombreNeg
+    ? (MODO === 'etiquetas' ? 'Generador de etiquetas' : 'Servidor de Pedidos')
+    : (MODO === 'etiquetas' ? 'Prepara e imprime tus etiquetas' : 'Configuración inicial');
   var lista = MODO === 'etiquetas'
-    ? ['Etiquetas con nombre, precio y código de barras', 'Imprime en la térmica o en una hoja A4', 'Estilos, tamaños y letras a tu gusto']
-    : ['Pedidos de tus vendedores en tiempo real', 'Cobro, recibos y etiquetas desde la caja', 'Stock y compras conectados a AxisPOS o a tu Excel'];
-  var d = nodo('<div class="ttx-card ttx-bienv"><div class="ttx-izq"><div class="ttx-logo">P</div><h3>' + esc(NEGOCIO || APP) + '</h3>' +
-    '<p>' + (MODO === 'etiquetas' ? 'Prepara e imprime tus etiquetas de precios.' : 'Todo lo del mostrador en un solo lugar.') + '</p>' +
-    (MODO === 'etiquetas' ? '' : '<div class="ttx-mc"><span>Pedido #12</span><b>Cobrado</b></div><div class="ttx-mc"><span>Pedido #13</span><b>Pendiente</b></div>') + '</div>' +
-    '<div class="ttx-der"><div class="ttx-mini-t">' + esc(MODO === 'etiquetas' ? 'Generador de etiquetas' : APP) + '</div>' +
-    '<h2>¡Bienvenido!</h2><p class="ttx-gr">Gracias por usarlo.</p><ul class="ttx-lista">' + lista.map(function (x) { return '<li>' + esc(x) + '</li>'; }).join('') + '</ul>' +
-    '<div class="ttx-pill ' + tl.clase + '">' + esc(tl.t) + '</div>' +
-    '<p class="ttx-peq">' + (l && l.modo === 'prueba' ? 'Cuando quieras activar la licencia, entra a <b>Acerca de</b> o a la Ayuda. La prueba sigue disponible hasta el ' + esc(fin) + '.' : (l && l.modo === 'licencia' ? 'Tu licencia está al día.' : '')) + '</p>' +
-    '<div class="ttx-bots"><button class="ttx-b ttx-g" data-a="acerca">Acerca de</button><button class="ttx-b ttx-g" data-a="ayuda">Ayuda</button><button class="ttx-b" data-a="ok" id="ttxBienOk">Aceptar y continuar</button></div>' +
-    '<div class="ttx-ver-t">Versión ' + esc((l && l.version) || '') + '</div></div></div>', 'ttx-dlg');
+    ? [{ i: '🏷️', t: 'Etiquetas con precio y código' }, { i: '🖨️', t: 'Impresión térmica o A4' }, { i: '✨', t: 'Estilos y tamaños a tu gusto' }]
+    : [{ i: '📱', t: 'Pedidos en el móvil' }, { i: '🖨️', t: 'Impresión térmica' }, { i: '🗄️', t: 'Conexión AxisPOS o Excel' }];
+  var feats = lista.map(function (x) {
+    return '<div class="ttx-feat"><span class="ttx-feat-i">' + x.i + '</span><span>' + esc(x.t) + '</span></div>';
+  }).join('');
+  var d = nodo(
+    '<div class="ttx-card ttx-bienv">' +
+      '<div class="ttx-izq">' +
+        '<div class="ttx-logo">P</div>' +
+        '<h3>' + esc(tituloIzq) + '</h3>' +
+        '<p class="ttx-sub-izq">' + esc(subIzq) + '</p>' +
+        feats +
+      '</div>' +
+      '<div class="ttx-der">' +
+        '<h2>Bienvenido</h2>' +
+        '<p class="ttx-gr">Vamos a configurar tu negocio en unos minutos.</p>' +
+        '<div class="ttx-pill ' + tl.clase + '">' + esc(tl.t) + '</div>' +
+        '<p class="ttx-peq">' + (l && l.modo === 'prueba' ? 'Puedes probar el programa ahora. La prueba sigue disponible hasta el ' + esc(fin) + '. La licencia se activa cuando quieras desde Ayuda.' : (l && l.modo === 'licencia' ? 'Tu licencia está al día.' : '')) + '</p>' +
+        '<div class="ttx-bots ttx-bots-col">' +
+          '<button class="ttx-b" data-a="ok" id="ttxBienOk">Aceptar y continuar</button>' +
+          '<button class="ttx-b ttx-g" data-a="ayuda">Ayuda</button>' +
+        '</div>' +
+        '<div class="ttx-ver-t">Versión ' + esc((l && l.version) || '') + '</div>' +
+      '</div>' +
+    '</div>', 'ttx-dlg');
   d.onclick = function (e) {
     var a = e.target && e.target.getAttribute && e.target.getAttribute('data-a');
-    if (a === 'acerca') acercaDe();
-    else if (a === 'ayuda') TTAyuda.abrir();
+    if (a === 'ayuda') TTAyuda.abrir();
     else if (a === 'ok') { quitar(d); if (alAceptar) alAceptar(); }
   };
   setTimeout(function () { var b = $('ttxBienOk'); if (b) b.focus(); }, 60);
@@ -20497,7 +21003,7 @@ window.TTAyuda = TTAyuda;
 // ===================== ASISTENTE DE CONFIGURACION (solo PC) =====================
 var TTAsistente = (function () {
   var raiz = null, info = null, paso = 0, W = null;
-  var PASOS = ['Tu negocio', 'Impresora y papel', 'Productos', 'Vendedores y roles', 'Clave de administrador', 'Listo'];
+  var PASOS = ['Tu negocio', 'Impresora y papel', 'Productos / base de datos', 'Vendedores', 'Clave admin', 'Listo'];
   function rolDesc(id) { var r = (info.roles || []).filter(function (x) { return x.id === id; })[0]; return r ? r.desc : ''; }
   function permisosDe(id) { var r = (info.roles || []).filter(function (x) { return x.id === id; })[0]; var h = {}; (info.claves || []).forEach(function (c) { h[c.k] = !!(r && r.permisos.indexOf(c.k) >= 0); }); return h; }
   function iniciarEstado() {
@@ -20576,9 +21082,12 @@ var TTAsistente = (function () {
         '<p class="ttx-peq">Ahora enlaza los móviles: en Ajustes toca <b>Ver QR para vendedores</b> y que lo escaneen con la cámara. Si algo no está claro, la <b>Ayuda</b> (F1) lo explica.</p>' +
         '<div style="display:flex;gap:8px;flex-wrap:wrap"><button class="ttx-b ttx-g" data-w="qr">Ver QR para vendedores</button><button class="ttx-b ttx-g" data-w="ayuda">Abrir la Ayuda</button></div>';
     }
-    var pts = PASOS.map(function (p, i) { return '<i class="' + (i < paso ? 'ttx-ok' : (i === paso ? 'ttx-on' : '')) + '"></i>'; }).join('');
+    var pts = PASOS.map(function (p, i) {
+      var cls = i < paso ? 'ttx-ok' : (i === paso ? 'ttx-on' : '');
+      return '<span class="ttx-step ' + cls + '"><i></i><b>' + (i + 1) + '</b><em>' + esc(p) + '</em></span>';
+    }).join('');
     var ult = (paso === PASOS.length - 1);
-    var cont = '<div class="ttx-card"><div class="ttx-wh"><div class="ttx-pa">Configuración inicial · Paso ' + (paso + 1) + ' de ' + PASOS.length + '</div><h2>' + esc(PASOS[paso]) + '</h2><div class="ttx-pts">' + pts + '</div></div>' +
+    var cont = '<div class="ttx-card"><div class="ttx-wh"><div class="ttx-wiz-title">Configuración inicial</div><div class="ttx-wiz-sub">Configuremos tu panel paso a paso para comenzar.</div><div class="ttx-pts">' + pts + '</div><h2>' + esc(PASOS[paso]) + '</h2></div>' +
       '<div class="ttx-wb" id="ttxWb">' + h + '</div><div class="ttx-wf">' +
       (paso > 0 && !ult ? '<button class="ttx-b ttx-g" data-w="atras">Atrás</button>' : '') +
       (!ult ? '<button class="ttx-b ttx-link" data-w="omitir">Omitir este paso</button>' : '') + '<span class="ttx-sp"></span>' +
@@ -21364,7 +21873,7 @@ try {
 }
 
 try {
-    $reglaNombre = "ServidorPedidosTotoTools"
+    $reglaNombre = "ServidorPedidos"
     # Se recrea siempre: asi se corrigen reglas viejas que solo valian para red Privada
     Get-NetFirewallRule -DisplayName $reglaNombre -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue
     New-NetFirewallRule -DisplayName $reglaNombre -Direction Inbound -Protocol TCP -LocalPort $port -Action Allow -Profile Any -Enabled True | Out-Null
@@ -21897,7 +22406,7 @@ while ($listener.IsListening) {
 
         } elseif ($path -eq "/api/etiquetas/datos" -and ($method -eq "GET" -or $method -eq "POST")) {
             # Plantillas "Mis etiquetas" y precios de referencia (aviso de precios cambiados): se guardan en esta PC.
-            $rutaEtqDatos = Join-Path $scriptDir "etiquetas_datos.json"
+            $rutaEtqDatos = Join-Path $datosDir "etiquetas_datos.json"
             if (-not (Es-PeticionPC $request)) {
                 Enviar-Json $context @{ ok = $false; error = "Solo desde la PC." } 403
             } elseif ($method -eq "GET") {
@@ -22987,6 +23496,143 @@ while ($listener.IsListening) {
                 Enviar-Json $context @{ ok = $true; quitadas = $hechas.Count } 200
             } else {
                 Enviar-Json $context @{ ok = $false; error = "Operacion no valida." } 400
+            }
+
+        } elseif ($method -eq "GET" -and $path -eq "/api/gastos-cuentas") {
+            if (-not (Es-PeticionPC $request)) {
+                Enviar-Json $context @{ ok = $false; error = "Solo desde la PC." } 403
+            } else {
+                $listaG = @($global:gastosCuentas.registros | Sort-Object { try { [datetime]::ParseExact([string]$_.hora, "yyyy-MM-dd HH:mm:ss", $null) } catch { [datetime]::MinValue } } -Descending)
+                Enviar-Json $context @{ ok = $true; registros = @($listaG) } 200 6
+            }
+
+        } elseif ($method -eq "POST" -and $path -eq "/api/gastos-cuentas") {
+            if (-not (Es-PeticionPC $request)) {
+                Enviar-Json $context @{ ok = $false; error = "Solo desde la PC." } 403
+            } else {
+                $dataG = Leer-CuerpoJson $request
+                $opG = if ($dataG) { [string]$dataG.op } else { "" }
+                if ($opG -eq "add") {
+                    $tipoG = ([string]$dataG.tipo).ToLowerInvariant()
+                    $errG = ""
+                    $regG = $null
+                    $horaG = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+                    $idG = [int]$global:gastosCuentas.siguienteId
+                    if ($tipoG -ne "gasto" -and $tipoG -ne "fiado") {
+                        $errG = "Tipo invalido (gasto o fiado)."
+                    } elseif ($tipoG -eq "gasto") {
+                        $conceptoG = ([string]$dataG.concepto).Trim()
+                        $montoG = 0.0; try { $montoG = [double]$dataG.monto } catch { $montoG = 0 }
+                        $realG = ([string]$dataG.realizadoPor).Trim()
+                        if (-not $conceptoG) { $errG = "Escribe el concepto del gasto." }
+                        elseif ($montoG -le 0) { $errG = "El monto debe ser mayor a 0." }
+                        elseif (-not $realG) { $errG = "Indica quien realiza el gasto." }
+                        else {
+                            $regG = [pscustomobject]@{
+                                id = $idG; tipo = "gasto"; hora = $horaG
+                                concepto = $conceptoG
+                                categoria = ([string]$dataG.categoria).Trim()
+                                monto = [math]::Round($montoG, 2)
+                                metodo = ([string]$dataG.metodo).Trim()
+                                realizadoPor = $realG
+                                notas = ([string]$dataG.notas).Trim()
+                                estado = "registrado"
+                            }
+                        }
+                    } else {
+                        $cliG = ([string]$dataG.cliente).Trim()
+                        if (-not $cliG) { $errG = "Escribe el nombre del cliente." }
+                        else {
+                            $itemsG = New-Object System.Collections.ArrayList
+                            $totalG = 0.0
+                            foreach ($it in @($dataG.items)) {
+                                if (-not $it) { continue }
+                                $nomI = ([string]$it.nombre).Trim()
+                                if (-not $nomI) { continue }
+                                $cantI = 0.0; try { $cantI = [double]$it.cantidad } catch { $cantI = 0 }
+                                $preI = 0.0; try { $preI = [double]$it.precio } catch { $preI = 0 }
+                                if ($cantI -le 0) { $cantI = 1 }
+                                $subI = [math]::Round($cantI * $preI, 2)
+                                $totalG += $subI
+                                [void]$itemsG.Add([pscustomobject]@{ nombre = $nomI; cantidad = $cantI; precio = [math]::Round($preI, 2) })
+                            }
+                            if ($itemsG.Count -eq 0) { $errG = "Agrega al menos un articulo." }
+                            else {
+                                $regG = [pscustomobject]@{
+                                    id = $idG; tipo = "fiado"; hora = $horaG
+                                    cliente = $cliG
+                                    telefono = ([string]$dataG.telefono).Trim()
+                                    items = @($itemsG)
+                                    monto = [math]::Round($totalG, 2)
+                                    vence = ([string]$dataG.vence).Trim()
+                                    notas = ([string]$dataG.notas).Trim()
+                                    estado = "PENDIENTE"
+                                }
+                            }
+                        }
+                    }
+                    if ($errG) {
+                        Enviar-Json $context @{ ok = $false; error = $errG } 400
+                    } elseif ($null -eq $regG) {
+                        Enviar-Json $context @{ ok = $false; error = "Datos incompletos." } 400
+                    } else {
+                        $global:gastosCuentas.siguienteId = $idG + 1
+                        if ($global:gastosCuentas.registros.Count -ge 500) { $global:gastosCuentas.registros.RemoveAt(0) }
+                        [void]$global:gastosCuentas.registros.Add($regG)
+                        Guardar-GastosCuentas
+                        $impresoG = $false
+                        $errImpG = ""
+                        if ([bool]$dataG.imprimir) {
+                            try {
+                                if ($regG.tipo -eq "gasto") { $impresoG = [bool](Imprimir-Texto (Generar-TextoGasto $regG)) }
+                                else { $impresoG = [bool](Imprimir-Texto (Generar-TextoFiado $regG)) }
+                            } catch { $errImpG = "$($_.Exception.Message)" }
+                        }
+                        Enviar-Json $context @{ ok = $true; registro = $regG; impreso = $impresoG; errorImpresion = $errImpG } 200 6
+                    }
+                } elseif ($opG -eq "estado" -or $opG -eq "pagar") {
+                    $regG = $global:gastosCuentas.registros | Where-Object { [int]$_.id -eq [int]$dataG.id } | Select-Object -First 1
+                    if (-not $regG) { Enviar-Json $context @{ ok = $false; error = "No existe ese registro." } 404 }
+                    else {
+                        $estN = ([string]$dataG.estado).Trim().ToUpperInvariant()
+                        if ($opG -eq "pagar") { $estN = "PAGADO" }
+                        if ($estN -notin @('PENDIENTE','PAGADO','ANULADO','REGISTRADO')) { Enviar-Json $context @{ ok = $false; error = "Estado no valido." } 400 }
+                        else {
+                            $regG.estado = $estN
+                            if ($estN -eq "PAGADO") {
+                                $regG | Add-Member -NotePropertyName "pagadoHora" -NotePropertyValue ((Get-Date).ToString("yyyy-MM-dd HH:mm:ss")) -Force
+                                if ($dataG.PSObject.Properties.Name -contains 'metodoPago' -and [string]$dataG.metodoPago) {
+                                    $regG | Add-Member -NotePropertyName "metodoPago" -NotePropertyValue ([string]$dataG.metodoPago).Trim() -Force
+                                }
+                            }
+                            Guardar-GastosCuentas
+                            $impresoP = $false
+                            $errImpP = ""
+                            if ($estN -eq "PAGADO" -and [bool]$dataG.imprimir -and [string]$regG.tipo -eq "fiado") {
+                                try { $impresoP = [bool](Imprimir-Texto (Generar-TextoPagoFiado $regG)) } catch { $errImpP = "$($_.Exception.Message)" }
+                            }
+                            Enviar-Json $context @{ ok = $true; registro = $regG; impreso = $impresoP; errorImpresion = $errImpP } 200 4
+                        }
+                    }
+                } elseif ($opG -eq "imprimir") {
+                    $regG = $global:gastosCuentas.registros | Where-Object { [int]$_.id -eq [int]$dataG.id } | Select-Object -First 1
+                    if (-not $regG) { Enviar-Json $context @{ ok = $false; error = "No existe ese registro." } 404 }
+                    else {
+                        try {
+                            $okI = $false
+                            if ([string]$regG.tipo -eq "gasto") { $okI = [bool](Imprimir-Texto (Generar-TextoGasto $regG)) }
+                            else { $okI = [bool](Imprimir-Texto (Generar-TextoFiado $regG)) }
+                            if ($okI) { Enviar-Json $context @{ ok = $true } }
+                            else { Enviar-Json $context @{ ok = $false; error = "Windows no confirmo la impresion." } 500 }
+                        } catch { Enviar-Json $context @{ ok = $false; error = "$($_.Exception.Message)" } 500 }
+                    }
+                } elseif ($opG -eq "del") {
+                    $regG = $global:gastosCuentas.registros | Where-Object { [int]$_.id -eq [int]$dataG.id } | Select-Object -First 1
+                    if ($regG) { [void]$global:gastosCuentas.registros.Remove($regG); Guardar-GastosCuentas }
+                    Enviar-Json $context @{ ok = $true }
+                } else {
+                    Enviar-Json $context @{ ok = $false; error = "Operacion no valida." } 400
+                }
             }
 
         } elseif ($method -eq "GET" -and $path -eq "/api/respaldo") {
