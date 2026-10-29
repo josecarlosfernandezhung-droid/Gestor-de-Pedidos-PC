@@ -1842,6 +1842,7 @@ $global:configAxis = [pscustomobject]@{
     stockCadaSegundos = 4
     conectorDll = ""
     conexionDirecta = $true
+    forzarConexionDirecta = $false
     cerrarPedidosAuto = $true
     ventasCadaSegundos = 5
     reservaMinutos = 180
@@ -1867,7 +1868,7 @@ function Cargar-ConfigAxis {
         $raw = Get-Content $configAxisPath -Raw -Encoding UTF8
         if ($raw -and $raw.Trim().Length -gt 0) {
             $d = $raw | ConvertFrom-Json
-            foreach ($k in @('activo','servidor','puerto','usuario','clave','base','clienteMysql','almacenes','columnaPrecio','columnaSku','cadaSegundos','stockCadaSegundos','conectorDll','conexionDirecta','cerrarPedidosAuto','ventasCadaSegundos','reservaMinutos','avisoPedidoMinutos','cuadreEsperaMinutos','socioTransferencia')) {
+            foreach ($k in @('activo','servidor','puerto','usuario','clave','base','clienteMysql','almacenes','columnaPrecio','columnaSku','cadaSegundos','stockCadaSegundos','conectorDll','conexionDirecta','forzarConexionDirecta','cerrarPedidosAuto','ventasCadaSegundos','reservaMinutos','avisoPedidoMinutos','cuadreEsperaMinutos','socioTransferencia')) {
                 if (($d.PSObject.Properties.Name -contains $k) -and ($d.$k -ne $null)) { $global:configAxis.$k = $d.$k }
             }
         }
@@ -2034,7 +2035,7 @@ $global:axisHiloGuion = {
             while ($rd.Read()) {
                 $celdas = New-Object System.Collections.ArrayList
                 for ($i = 0; $i -lt $rd.FieldCount; $i++) {
-                    if ($rd.IsDBNull($i)) { [void]$celdas.Add('NULL'); continue }
+                    if ($rd.IsDBNull($i)) { [void]$celdas.Add('\N'); continue }
                     $v = $rd.GetValue($i)
                     if ($v -is [datetime]) { $t = $v.ToString('yyyy-MM-dd HH:mm:ss', $inv) }
                     elseif ($v -is [decimal] -or $v -is [double] -or $v -is [single]) { $t = [string]::Format($inv, '{0}', $v) }
@@ -2084,12 +2085,26 @@ public static class TotoResolvedor {
                 }
                 if (-not $script:directoProbado) {
                     $script:directoProbado = $true
-                    $ok = $true
-                    foreach ($q in @("SELECT ID, Code, Name, Deleted FROM goods ORDER BY ID LIMIT 20", "SELECT ID, Message, UserRealTime FROM applicationlog ORDER BY ID LIMIT 5", "SELECT ID, Qtty, Sign, Timestamp FROM operations ORDER BY ID LIMIT 5")) {
-                        if ((Run-Directo $c $q) -ne (Run-Exe $c $q)) { $ok = $false; break }
+                    if ($c.forzarDirecto) {
+                        Aviso "Conexion directa a MariaDB activa (forzada en config_axis.json; sin comparar con mariadb.exe)."
+                    } else {
+                        $ok = $true
+                        # Normaliza formato (NULL/\N, saltos de linea, espacios finales) antes de comparar
+                        # con mariadb.exe -B -N, para no desactivar la conexion directa por detalles cosmeticos.
+                        function Texto-AxisNorm([string]$t) {
+                            if ($null -eq $t) { return '' }
+                            $t = $t -replace "`r`n", "`n" -replace "`r", "`n"
+                            $t = $t -replace '(?m)(^|\t)NULL(\t|\n|$)', '$1\N$2'
+                            return $t.TrimEnd()
+                        }
+                        foreach ($q in @("SELECT ID, Code, Name, Deleted FROM goods ORDER BY ID LIMIT 20", "SELECT ID, Message, UserRealTime FROM applicationlog ORDER BY ID LIMIT 5", "SELECT ID, Qtty, Sign, Timestamp FROM operations ORDER BY ID LIMIT 5")) {
+                            $td = Texto-AxisNorm (Run-Directo $c $q)
+                            $te = Texto-AxisNorm (Run-Exe $c $q)
+                            if ($td -ne $te) { $ok = $false; break }
+                        }
+                        if (-not $ok) { $h.directo = $false; Aviso "Conexion directa a MariaDB: el resultado no coincide con el de mariadb.exe; se sigue con mariadb.exe."; return (Run-Exe $c $sql) }
+                        Aviso "Conexion directa a MariaDB activa (comprobada contra mariadb.exe)."
                     }
-                    if (-not $ok) { $h.directo = $false; Aviso "Conexion directa a MariaDB: el resultado no coincide con el de mariadb.exe; se sigue con mariadb.exe."; return (Run-Exe $c $sql) }
-                    Aviso "Conexion directa a MariaDB activa (comprobada contra mariadb.exe)."
                 }
                 return (Run-Directo $c $sql)
             } catch {
@@ -2214,7 +2229,7 @@ $global:axisHiloCfgCache = $null
 $global:axisHiloCfgHora = [datetime]::MinValue
 function Config-HiloAxis {
     $c = $global:configAxis
-    return @{ servidor = [string]$c.servidor; puerto = [int]$c.puerto; usuario = [string]$c.usuario; clave = [string]$c.clave; base = [string]$c.base; exe = (Buscar-ClienteMysql); dll = (Buscar-ConectorDll); carpetas = @($global:axisConectorBuscado) }
+    return @{ servidor = [string]$c.servidor; puerto = [int]$c.puerto; usuario = [string]$c.usuario; clave = [string]$c.clave; base = [string]$c.base; exe = (Buscar-ClienteMysql); dll = (Buscar-ConectorDll); carpetas = @($global:axisConectorBuscado); forzarDirecto = [bool]($c.PSObject.Properties.Name -contains 'forzarConexionDirecta' -and $c.forzarConexionDirecta) }
 }
 
 # Lectura periodica en segundo plano. Devuelve el texto del ultimo resultado listo y deja $global:axisSinNueva = $true
