@@ -1,0 +1,80 @@
+================================================================================
+PANEL DE PEDIDOS / SERVIDOR DE PEDIDOS
+Desarrollado por: José Carlos Fernández
+================================================================================
+
+Al instalar este software usted debe aceptar los Términos y condiciones y la
+Política de privacidad que se reproducen a continuación. Si no está de acuerdo,
+pulse «Cancelar» y no continúe la instalación.
+
+
+--------------------------------------------------------------------------------
+TÉRMINOS Y CONDICIONES DE USO
+--------------------------------------------------------------------------------
+
+1. LICENCIA DE USO
+Este software se le concede bajo licencia para uso en su negocio. No se le vende
+el código fuente. La licencia y el periodo de prueba se rigen por lo acordado
+con el desarrollador o su proveedor autorizado.
+
+2. USO PERMITIDO
+Puede instalar y usar el programa en los equipos de su punto de venta para
+gestionar pedidos, catálogo, impresión y funciones relacionadas. Usted es
+responsable del uso correcto, de los precios, de las ventas y del cumplimiento
+de la normativa aplicable.
+
+3. RESTRICCIONES
+No está permitido redistribuir, alquilar, sublicenciar, modificar para reventa a
+terceros ni eludir los mecanismos de licencia, salvo autorización escrita del
+desarrollador.
+
+4. LIMITACIÓN DE RESPONSABILIDAD
+El software se entrega «tal cual». En la máxima medida permitida por la ley, el
+desarrollador no será responsable de lucro cesante, pérdida de datos,
+interrupciones del negocio ni daños indirectos derivados del uso o la
+imposibilidad de uso del programa.
+
+5. ACTUALIZACIONES Y SOPORTE
+Las actualizaciones y el soporte se prestarán según lo pactado con el
+desarrollador. El uso continuado tras una actualización implica la aceptación de
+las condiciones vigentes.
+
+6. ACEPTACIÓN
+Al marcar que acepta los términos e instalar el software, declara haber leído y
+aceptado estos Términos y la Política de privacidad.
+
+
+--------------------------------------------------------------------------------
+POLÍTICA DE PRIVACIDAD
+--------------------------------------------------------------------------------
+
+1. QUÉ DATOS SE TRATAN
+El programa puede almacenar en su equipo (y, si usted lo configura, en su base
+de datos AxisPOS o archivos Excel) información de pedidos, catálogo, vendedores
+(nombre y PIN), configuración del negocio e impresoras.
+
+2. DÓNDE SE GUARDAN
+Los datos se guardan principalmente en la PC donde se instala el programa y en
+los sistemas que usted conecte (MariaDB/AxisPOS o Excel). El uso en red local no
+exige enviar sus datos de ventas a un servidor en la nube del desarrollador.
+
+3. RED LOCAL
+La comunicación entre la PC y los teléfonos se realiza en su red Wi‑Fi o LAN.
+Usted debe proteger el acceso a esa red.
+
+4. FINALIDAD
+Los datos se usan exclusivamente para el funcionamiento del punto de venta.
+
+5. CESIÓN A TERCEROS
+No se venden datos personales de clientes o vendedores a terceros con fines
+publicitarios.
+
+6. RESPONSABILIDADES DEL USUARIO
+Como responsable del punto de venta, debe cumplir la legislación de protección
+de datos aplicable a su actividad.
+
+7. CONTACTO DEL DESARROLLADOR
+José Carlos Fernández
+
+8. ACEPTACIÓN
+Si no está de acuerdo, no instale el software.
