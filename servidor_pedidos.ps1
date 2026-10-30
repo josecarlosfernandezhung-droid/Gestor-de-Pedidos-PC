@@ -7584,7 +7584,7 @@ TT.iniciar('pc');
         <div class="sm-cuerpo">
           <button class="btn-toggle" id="btnOrigenDatos" onclick="alternarOrigenDatos()" title="De donde salen los productos, precios y existencias">Datos de productos y stock: ...</button>
           <button class="btn-toggle" onclick="cerrarMenuPC(); abrirConfigAxis();" title="Servidor, puerto, usuario y clave de MariaDB / AxisPOS">Configurar base de datos (AxisPOS)...</button>
-          <button class="btn-toggle" onclick="cerrarMenuPC(); abrirConfig();">Cargar / cambiar el Excel del catalogo</button>
+          <button class="btn-toggle" id="btnExcelCatalogoPC" onclick="cerrarMenuPC(); abrirConfig();">Cargar / cambiar el Excel del catalogo</button>
           <button class="btn-toggle" id="btnFotosCatalogo" onclick="importarFotosCatalogo()" title="Lee el ultimo backup-catalogo-*.zip">Fotos del catalogo: ...</button>
           <button class="btn-toggle" onclick="document.getElementById('zipFotosPC').click()" title="Elige el .zip de Copia de seguridad del catalogo">Subir .zip de fotos...</button>
           <input type="file" id="zipFotosPC" accept=".zip" style="display:none">
@@ -9045,6 +9045,8 @@ TT.iniciar('pc');
       const esAxis = axisConfigurado && origenDatos !== 'catalogo';
       b.classList.toggle('activo', esAxis);
       b.textContent = 'Datos de productos y stock: ' + (esAxis ? 'BASE DE DATOS DE AXISPOS' : 'CATALOGO (Excel)');
+      const bx = document.getElementById('btnExcelCatalogoPC');
+      if (bx) bx.style.display = esAxis ? 'none' : '';
     }
     function cerrarConfigAxis() {
       const o = document.getElementById('axisCfgOverlay');
@@ -12965,10 +12967,12 @@ TT.iniciar('vendedor');
         <h2>Catalogo de productos</h2>
         <div id="estadoCatalogo">Cargando catalogo...</div>
         <button class="btn btn-secundario" onclick="cargarCatalogo()">Actualizar catalogo</button>
+        <div id="bloqueExcelMovil">
         <button class="btn btn-secundario" style="margin-top:8px;" onclick="document.getElementById('archivoExcelMovil').click()">Subir Excel desde el movil</button>
         <input type="file" id="archivoExcelMovil" accept=".xlsx,.xls" style="display:none">
         <div id="estadoSubidaExcel" style="font-size:12px; color:#64748b; margin-top:6px;"></div>
         <button class="btn btn-secundario" style="margin-top:8px;" onclick="descargarExcelCatalogo()">Descargar el Excel de la PC</button>
+        </div>
         <button class="btn btn-secundario" id="btnDescargarStock" style="margin-top:8px;" onclick="descargarStockActual()">Descargar lo que va quedando (stock actual)</button>
         <div id="estadoDescargaExcel" style="font-size:12px; color:#64748b; margin-top:6px;"></div>
       </div>
@@ -13778,6 +13782,11 @@ TT.iniciar('vendedor');
           if (resCfg.ok) {
             const cfg = await resCfg.json();
             ocultarSinStock = !!cfg.ocultarSinStock;
+            try {
+              const usaAxis = !!cfg.axisConfigurado && cfg.origenDatos !== 'catalogo';
+              const bxm = document.getElementById('bloqueExcelMovil');
+              if (bxm) bxm.style.display = usaAxis ? 'none' : '';
+            } catch (e) {}
             if (cfg.nombreNegocio || cfg.negocioNombre) {
               aplicarMarcaNegocio(cfg.nombreNegocio || cfg.negocioNombre, true);
             }
@@ -15010,52 +15019,163 @@ TT.iniciar('vendedor');
         return base + '/vendedor';
       } catch (e) { return ''; }
     }
-        async function escanearCodigoUnaVez() {
-      // Mismo camino que el escáner de productos (TotoBg.scan sin parámetros),
-      // que en la APK sí abre la cámara.
-      try {
-        if (typeof escanerGoogle === 'function') {
-          const r = await escanerGoogle();
-          if (r && r.tipo === 'codigo' && r.valor) return String(r.valor);
-          if (r && r.tipo === 'cancelado') return '';
-          // si es error o sin-plugin, sigue abajo
+    let motivoEscaneoQR = '';
+    function textoErrEscaneo(e) { return String((e && (e.message || e.errorMessage)) || e || '').trim(); }
+
+    // Camara con el navegador del telefono (sin plugins): getUserMedia + BarcodeDetector.
+    function escanearQrWeb() {
+      return new Promise(function (resolve, reject) {
+        if (!('BarcodeDetector' in window) || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          reject(new Error('este telefono no permite leer QR desde la pagina')); return;
         }
-      } catch (e) {}
-      // TotoBg directo (por si escanerGoogle aún no está definida en este punto del script)
-      try {
-        const tb = pluginNativo('TotoBg');
-        if (tb && typeof tb.scan === 'function') {
-          const r = await tb.scan();
-          if (r && r.cancelled) return '';
-          const v = r && r.value ? String(r.value) : '';
-          if (v) return v;
+        let det;
+        try { det = new BarcodeDetector({ formats: ['qr_code'] }); } catch (e) { reject(e); return; }
+        let stream = null, timer = null, fin = false;
+        const ov = document.createElement('div');
+        ov.style.cssText = 'position:fixed; inset:0; z-index:100000; background:#000; display:flex; flex-direction:column;';
+        const vid = document.createElement('video');
+        vid.setAttribute('playsinline', ''); vid.muted = true; vid.autoplay = true;
+        vid.style.cssText = 'flex:1; width:100%; min-height:0; object-fit:cover;';
+        const bar = document.createElement('div');
+        bar.style.cssText = 'padding:12px 14px calc(env(safe-area-inset-bottom,0px) + 14px); background:#0f172a; color:#e2e8f0; text-align:center; font-size:15px;';
+        bar.innerHTML = '<div style="margin-bottom:10px;">Apunta al QR de la PC (Alt+Q)</div>';
+        const cancelar = document.createElement('button');
+        cancelar.type = 'button'; cancelar.textContent = 'Cancelar';
+        cancelar.style.cssText = 'background:#2563eb; color:#fff; border:none; border-radius:8px; padding:10px 22px; font-weight:600; font-size:15px;';
+        bar.appendChild(cancelar); ov.appendChild(vid); ov.appendChild(bar); document.body.appendChild(ov);
+        function cerrar(valor, err) {
+          if (fin) return; fin = true;
+          if (timer) clearInterval(timer);
+          try { if (stream) stream.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {}
+          try { ov.remove(); } catch (e) {}
+          if (err) reject(err); else resolve(valor || '');
         }
-      } catch (e) {}
-      // ML Kit BarcodeScanner (mismo flujo que abrirEscaner)
+        cancelar.onclick = function () { cerrar(''); };
+        navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false }).then(function (s) {
+          if (fin) { s.getTracks().forEach(function (t) { t.stop(); }); return; }
+          stream = s; vid.srcObject = s;
+          try { vid.play(); } catch (e) {}
+          let ocupado = false;
+          timer = setInterval(function () {
+            if (ocupado || fin || vid.readyState < 2) return;
+            ocupado = true;
+            det.detect(vid).then(function (r) {
+              ocupado = false;
+              if (r && r.length && r[0].rawValue) cerrar(String(r[0].rawValue));
+            }).catch(function () { ocupado = false; });
+          }, 250);
+        }).catch(function (e) { cerrar('', new Error('camara: ' + (textoErrEscaneo(e) || 'sin permiso'))); });
+      });
+    }
+
+    // Foto del QR (por si la camara en vivo no esta disponible): abre la camara del telefono y lee la foto.
+    function escanearQrFoto() {
+      return new Promise(function (resolve, reject) {
+        if (!('BarcodeDetector' in window)) { reject(new Error('no se puede leer la foto')); return; }
+        const inp = document.createElement('input');
+        inp.type = 'file'; inp.accept = 'image/*'; inp.setAttribute('capture', 'environment'); inp.style.display = 'none';
+        let listo = false;
+        inp.onchange = async function () {
+          listo = true;
+          try {
+            const f = inp.files && inp.files[0];
+            if (!f) { resolve(''); return; }
+            const bmp = await createImageBitmap(f);
+            const r = await new BarcodeDetector({ formats: ['qr_code'] }).detect(bmp);
+            resolve(r && r.length ? String(r[0].rawValue || '') : '');
+          } catch (e) { reject(e); }
+          try { inp.remove(); } catch (e) {}
+        };
+        document.body.appendChild(inp);
+        inp.click();
+      });
+    }
+
+    // ML Kit (plugin BarcodeScanner): los codigos llegan por el evento barcodesScanned, igual que en el escaner de productos.
+    async function escanearQrMlKit(ml) {
+      if (escanerActivo) throw new Error('el escaner ya esta abierto');
+      escanerActivo = true;
+      let handle = null, valor = '', error = '', hechoHistorial = false;
+      try {
+        const perm = await ml.requestPermissions();
+        if (perm && perm.camera && perm.camera !== 'granted' && perm.camera !== 'limited') throw new Error('Permiso de camara denegado. Activalo en Ajustes > Apps > esta app > Permisos.');
+        const ov = escanerCrearPantalla();
+        const titulo = ov.querySelector('strong'); if (titulo) titulo.textContent = 'Escanear QR del servidor';
+        escanerEstado('Apunta al QR de la PC (Alt+Q)', null);
+        const fin = new Promise(function (resolve) { escanerCerrar = resolve; });
+        const alAtras = function () { if (escanerCerrar) escanerCerrar(); };
+        const alOcultar = function () { if (document.visibilityState === 'hidden' && escanerCerrar) escanerCerrar(); };
+        document.getElementById('escanerNatListo').onclick = function () { if (escanerCerrar) escanerCerrar(); };
+        document.getElementById('escanerNatLuz').onclick = function () { try { ml.toggleTorch(); } catch (e) {} };
+        handle = await ml.addListener('barcodesScanned', function (ev) {
+          const b = ev && ev.barcodes && ev.barcodes[0];
+          const v = b ? String(b.rawValue || b.displayValue || '') : '';
+          if (v && !valor) { valor = v; if (escanerCerrar) escanerCerrar(); }
+        });
+        try { history.pushState({ escaner: 1 }, ''); hechoHistorial = true; } catch (e) {}
+        window.addEventListener('popstate', alAtras);
+        document.addEventListener('visibilitychange', alOcultar);
+        document.documentElement.classList.add('escaner-nat'); document.body.classList.add('escaner-nat');
+        ov.style.display = 'flex';
+        try {
+          await ml.startScan({ lensFacing: 'BACK', formats: ['QrCode'] });
+        } catch (e) { error = textoErrEscaneo(e) || 'error desconocido'; if (escanerCerrar) escanerCerrar(); }
+        await fin;
+        window.removeEventListener('popstate', alAtras);
+        document.removeEventListener('visibilitychange', alOcultar);
+        ov.style.display = 'none';
+        if (titulo) titulo.textContent = 'Escanear codigos';
+      } catch (e) {
+        error = textoErrEscaneo(e) || 'error desconocido';
+      }
+      try { await ml.stopScan(); } catch (e) {}
+      try { if (handle && handle.remove) await handle.remove(); } catch (e) {}
+      try { if (typeof ml.removeAllListeners === 'function') await ml.removeAllListeners(); } catch (e) {}
+      document.documentElement.classList.remove('escaner-nat'); document.body.classList.remove('escaner-nat');
+      try { if (hechoHistorial && history.state && history.state.escaner) history.back(); } catch (e) {}
+      escanerCerrar = null; escanerActivo = false;
+      if (!valor && error) throw new Error(error);
+      return valor;
+    }
+
+    // Prueba una camara tras otra hasta leer algo. Devuelve el texto leido o '' (y deja el motivo en motivoEscaneoQR).
+    async function escanearCodigoUnaVez() {
+      motivoEscaneoQR = '';
+      const motivos = [];
+      // 1) Escaner de Google (TotoBg), el mismo del escaner de productos.
+      try {
+        const r = await escanerGoogle();
+        if (r && r.tipo === 'codigo' && r.valor) return String(r.valor);
+        if (r && r.tipo === 'cancelado') { motivoEscaneoQR = 'Escaneo cancelado.'; return ''; }
+        if (r && r.tipo === 'error') motivos.push('Google: ' + r.msg);
+        if (r && r.tipo === 'sin-plugin') motivos.push('Google: no disponible');
+      } catch (e) { motivos.push('Google: ' + textoErrEscaneo(e)); }
+      // 2) ML Kit.
       const ml = pluginNativo('BarcodeScanner');
       if (ml && typeof ml.startScan === 'function') {
         try {
-          const perm = await ml.requestPermissions();
-          if (perm && perm.camera && perm.camera !== 'granted' && perm.camera !== 'limited') {
-            throw new Error('Permiso de cámara denegado. Actívalo en Ajustes > Apps.');
-          }
-          if (typeof ml.hideBackground === 'function') await ml.hideBackground();
-          document.body.style.background = 'transparent';
-          const res = await ml.startScan();
-          if (typeof ml.showBackground === 'function') await ml.showBackground();
-          document.body.style.background = '';
-          if (typeof ml.stopScan === 'function') try { await ml.stopScan(); } catch (e2) {}
-          const v = (res && (res.content || res.rawValue || res.value || res.text)) || '';
-          if (v) return String(v);
-        } catch (e) {
-          try { if (ml && typeof ml.showBackground === 'function') await ml.showBackground(); } catch (e3) {}
-          document.body.style.background = '';
-          try { if (ml && typeof ml.stopScan === 'function') await ml.stopScan(); } catch (e4) {}
-        }
+          const v = await escanearQrMlKit(ml);
+          if (v) return v;
+          motivoEscaneoQR = 'Escaneo cancelado.'; return '';
+        } catch (e) { motivos.push('ML Kit: ' + textoErrEscaneo(e)); }
       }
-      // Fallback manual (solo si no hay plugins de cámara)
-      const manual = window.prompt('No se pudo abrir el escáner. Pega el enlace del QR de la PC (ej. http://192.168.1.10:8080/vendedor):', '');
-      return manual ? String(manual).trim() : '';
+      // 3) Camara del navegador.
+      try {
+        const v = await escanearQrWeb();
+        if (v) return v;
+        motivoEscaneoQR = 'Escaneo cancelado.'; return '';
+      } catch (e) { motivos.push('Camara: ' + textoErrEscaneo(e)); }
+      // 4) Foto.
+      try {
+        const v = await escanearQrFoto();
+        if (v) return v;
+        motivos.push('la foto no tenia un QR legible');
+      } catch (e) { motivos.push('Foto: ' + textoErrEscaneo(e)); }
+      // 5) Manual.
+      motivoEscaneoQR = motivos.join(' | ');
+      const manual = window.prompt('No se pudo abrir la camara. Pega el enlace del QR de la PC (ej. http://192.168.1.10:8080/vendedor):', '');
+      if (manual && String(manual).trim()) { motivoEscaneoQR = ''; return String(manual).trim(); }
+      return '';
     }
 
     async function escanearQRServidor() {
@@ -15066,7 +15186,7 @@ TT.iniciar('vendedor');
       try {
         const bruto = await escanearCodigoUnaVez();
         if (!bruto) {
-          if (err) { err.style.display = 'block'; err.textContent = 'No se leyó ningún código.'; }
+          if (err) { err.style.display = 'block'; err.textContent = 'No se leyó ningún código.' + (motivoEscaneoQR ? ' (' + motivoEscaneoQR + ')' : ''); }
           return;
         }
         await aplicarEnlaceServidor(bruto, err);
@@ -15114,7 +15234,7 @@ TT.iniciar('vendedor');
     async function escanearQRServidorDesdeAjustes() {
       try {
         const bruto = await escanearCodigoUnaVez();
-        if (!bruto) { alert('No se leyó ningún código.'); return; }
+        if (!bruto) { alert('No se leyó ningún código.' + (motivoEscaneoQR ? ' (' + motivoEscaneoQR + ')' : '')); return; }
         await aplicarEnlaceServidor(bruto, null);
       } catch (e) {
         alert((e && e.message) ? e.message : 'No se pudo abrir la cámara.');
