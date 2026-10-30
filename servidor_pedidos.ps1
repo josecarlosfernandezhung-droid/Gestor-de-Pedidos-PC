@@ -5235,12 +5235,22 @@ Cargar-ReciboCfg
 $global:appVersion = "1.0"
 $global:diasPrueba = 7
 $instalacionPath = Join-Path $configDir "instalacion.json"
-$global:instalacion = [pscustomobject]@{ configurado = $false; bienvenidaVista = $false; impresora = ""; roles = @{} }
+$global:instalacion = [pscustomobject]@{ configurado = $false; bienvenidaVista = $false; terminosAceptados = $false; terminosFecha = ""; impresora = ""; roles = @{} }
 $global:licCache = $null
 $global:licCacheHora = [datetime]::MinValue
+# Credito del desarrollador (se muestra en Acerca de y en la pantalla de terminos).
+$global:desarrolladorNombre = "José Carlos Fernández"
+$global:desarrolladorContacto = ""
 
 function Guardar-Instalacion {
-    $o = [pscustomobject]@{ configurado = [bool]$global:instalacion.configurado; bienvenidaVista = [bool]$global:instalacion.bienvenidaVista; impresora = [string]$global:instalacion.impresora; roles = $global:instalacion.roles }
+    $o = [pscustomobject]@{
+        configurado = [bool]$global:instalacion.configurado
+        bienvenidaVista = [bool]$global:instalacion.bienvenidaVista
+        terminosAceptados = [bool]$global:instalacion.terminosAceptados
+        terminosFecha = [string]$global:instalacion.terminosFecha
+        impresora = [string]$global:instalacion.impresora
+        roles = $global:instalacion.roles
+    }
     Escribir-ArchivoConReintento -ruta $instalacionPath -contenido ($o | ConvertTo-Json -Depth 4) | Out-Null
 }
 function Cargar-Instalacion {
@@ -5251,6 +5261,8 @@ function Cargar-Instalacion {
                 $d = $raw | ConvertFrom-Json
                 if ($null -ne $d.configurado) { $global:instalacion.configurado = [bool]$d.configurado }
                 if ($null -ne $d.bienvenidaVista) { $global:instalacion.bienvenidaVista = [bool]$d.bienvenidaVista }
+                if ($null -ne $d.terminosAceptados) { $global:instalacion.terminosAceptados = [bool]$d.terminosAceptados }
+                if ($d.terminosFecha) { $global:instalacion.terminosFecha = [string]$d.terminosFecha }
                 if ($d.impresora) { $global:instalacion.impresora = [string]$d.impresora }
                 $h = @{}
                 if ($d.roles) { foreach ($p in $d.roles.PSObject.Properties) { $h[[string]$p.Name] = [string]$p.Value } }
@@ -5259,7 +5271,10 @@ function Cargar-Instalacion {
         } catch { Write-Host "Aviso: no se pudo leer instalacion.json." }
     } else {
         # Una instalacion que ya venia funcionando (tiene comprobante o vendedores) no pasa por el asistente.
-        if ((Test-Path -LiteralPath $reciboCfgPath) -or (Test-Path -LiteralPath $pinesPath)) { $global:instalacion.configurado = $true }
+        if ((Test-Path -LiteralPath $reciboCfgPath) -or (Test-Path -LiteralPath $pinesPath)) {
+            $global:instalacion.configurado = $true
+            $global:instalacion.terminosAceptados = $true
+        }
         try { Guardar-Instalacion } catch {}
     }
 }
@@ -5365,6 +5380,9 @@ function Estado-Instalacion {
         ok = $true
         configurado = [bool]$global:instalacion.configurado
         bienvenidaVista = [bool]$global:instalacion.bienvenidaVista
+        terminosAceptados = [bool]$global:instalacion.terminosAceptados
+        terminosFecha = [string]$global:instalacion.terminosFecha
+        desarrollador = @{ nombre = [string]$global:desarrolladorNombre; contacto = [string]$global:desarrolladorContacto }
         negocio = @{ nombre = [string]$rc.nombre; nit = [string]$rc.nit; direccion = [string]$rc.direccion; telefono = [string]$rc.telefono }
         impresora = [string]$nombreImpresora
         ancho = [int]$rc.ancho
@@ -14992,26 +15010,38 @@ TT.iniciar('vendedor');
         return base + '/vendedor';
       } catch (e) { return ''; }
     }
-    async function escanearCodigoUnaVez() {
-      // 1) Plugin nativo TotoBg.scan
-      if (pluginNativo('TotoBg') && typeof pluginNativo('TotoBg').scan === 'function') {
-        try {
-          const r = await pluginNativo('TotoBg').scan({ title: 'QR del servidor', message: 'Apunta al QR de la PC' });
-          const v = (r && (r.value || r.codigo || r.text || r.rawValue)) || '';
-          if (v) return String(v);
-        } catch (e) { /* sigue con ML Kit */ }
-      }
-      // 2) BarcodeScanner (ML Kit)
+        async function escanearCodigoUnaVez() {
+      // Mismo camino que el escáner de productos (TotoBg.scan sin parámetros),
+      // que en la APK sí abre la cámara.
+      try {
+        if (typeof escanerGoogle === 'function') {
+          const r = await escanerGoogle();
+          if (r && r.tipo === 'codigo' && r.valor) return String(r.valor);
+          if (r && r.tipo === 'cancelado') return '';
+          // si es error o sin-plugin, sigue abajo
+        }
+      } catch (e) {}
+      // TotoBg directo (por si escanerGoogle aún no está definida en este punto del script)
+      try {
+        const tb = pluginNativo('TotoBg');
+        if (tb && typeof tb.scan === 'function') {
+          const r = await tb.scan();
+          if (r && r.cancelled) return '';
+          const v = r && r.value ? String(r.value) : '';
+          if (v) return v;
+        }
+      } catch (e) {}
+      // ML Kit BarcodeScanner (mismo flujo que abrirEscaner)
       const ml = pluginNativo('BarcodeScanner');
       if (ml && typeof ml.startScan === 'function') {
         try {
           const perm = await ml.requestPermissions();
           if (perm && perm.camera && perm.camera !== 'granted' && perm.camera !== 'limited') {
-            throw new Error('Permiso de cámara denegado.');
+            throw new Error('Permiso de cámara denegado. Actívalo en Ajustes > Apps.');
           }
           if (typeof ml.hideBackground === 'function') await ml.hideBackground();
           document.body.style.background = 'transparent';
-          const res = await ml.startScan({ formats: ['QR_CODE', 'CODE_128', 'EAN_13', 'EAN_8'] });
+          const res = await ml.startScan();
           if (typeof ml.showBackground === 'function') await ml.showBackground();
           document.body.style.background = '';
           if (typeof ml.stopScan === 'function') try { await ml.stopScan(); } catch (e2) {}
@@ -15021,13 +15051,13 @@ TT.iniciar('vendedor');
           try { if (ml && typeof ml.showBackground === 'function') await ml.showBackground(); } catch (e3) {}
           document.body.style.background = '';
           try { if (ml && typeof ml.stopScan === 'function') await ml.stopScan(); } catch (e4) {}
-          throw e;
         }
       }
-      // 3) Fallback: pegar enlace a mano
-      const manual = window.prompt('No hay cámara disponible. Pega el enlace del QR (ej. http://192.168.1.10:8080/vendedor):', '');
+      // Fallback manual (solo si no hay plugins de cámara)
+      const manual = window.prompt('No se pudo abrir el escáner. Pega el enlace del QR de la PC (ej. http://192.168.1.10:8080/vendedor):', '');
       return manual ? String(manual).trim() : '';
     }
+
     async function escanearQRServidor() {
       const err = document.getElementById('loginError');
       const btn = document.getElementById('btnEscanearQRServidor');
@@ -21136,20 +21166,104 @@ function splash(cb) {
 }
 
 // ---------- Acerca de ----------
+var DESARROLLADOR = { nombre: 'José Carlos Fernández', contacto: '' };
 function acercaDe() {
-  api('/api/licencia').then(function (r) {
-    var l = r.d || {}; var tl = textoLicencia(l);
+  api('/api/instalacion').then(function (ri) {
+    if (ri.ok && ri.d && ri.d.desarrollador && ri.d.desarrollador.nombre) DESARROLLADOR = ri.d.desarrollador;
+    return api('/api/licencia');
+  }).then(function (r) {
+    var l = (r && r.d) || {}; var tl = textoLicencia(l);
+    var dev = (DESARROLLADOR && DESARROLLADOR.nombre) ? DESARROLLADOR.nombre : 'José Carlos Fernández';
     var d = nodo('<div class="ttx-card" style="width:min(460px,100%);padding:24px;text-align:center"><div class="ttx-logo" style="width:70px;height:70px;font-size:42px;border-radius:18px">P</div>' +
       '<h2 style="margin:0;color:#1e3a8a">' + esc(APP) + '</h2><p style="margin:2px 0 10px;color:#64748b;font-size:13px">Versión ' + esc(l.version || '') + (NEGOCIO ? ' · ' + esc(NEGOCIO) : '') + '</p>' +
+      '<p style="margin:0 0 10px;font-size:13px;color:#334155">Desarrollado por <b>' + esc(dev) + '</b></p>' +
       '<div class="ttx-pill ' + tl.clase + '">' + esc(tl.t) + '</div>' +
       '<p class="ttx-peq">ID de este equipo: <b style="font-size:15px;color:#1d4ed8">' + esc(l.idEquipo || '') + '</b><br>Para activar la licencia envía este código a tu proveedor y escribe la clave que te dé.</p>' +
-      '<div class="ttx-bots" style="justify-content:center"><button class="ttx-b ttx-g" data-a="lic">Activar licencia</button><button class="ttx-b" data-a="ok">Cerrar</button></div></div>', 'ttx-dlg');
+      '<div class="ttx-bots" style="justify-content:center;flex-wrap:wrap;gap:8px"><button class="ttx-b ttx-g" data-a="term">Términos y privacidad</button><button class="ttx-b ttx-g" data-a="lic">Activar licencia</button><button class="ttx-b" data-a="ok">Cerrar</button></div></div>', 'ttx-dlg');
     d.onclick = function (e) {
       var a = e.target && e.target.getAttribute && e.target.getAttribute('data-a');
       if (a === 'ok' || e.target === d) quitar(d);
       if (a === 'lic') window.open('/licencia', '_blank');
+      if (a === 'term') { quitar(d); mostrarTerminos(null, true); }
     };
   });
+}
+
+// ---------- Términos y política de privacidad (obligatorio en la primera instalación) ----------
+function textoTerminosYPrivacidad() {
+  return (
+    '<h3 style="margin:12px 0 6px;font-size:14px;color:#1e3a8a">Términos y condiciones</h3>' +
+    '<ol style="margin:0 0 12px 18px;padding:0;font-size:12px;line-height:1.45;color:#334155;text-align:left">' +
+    '<li>Este software (Panel de Pedidos / servidor de pedidos) se licencia para uso en su negocio. No se vende el código fuente.</li>' +
+    '<li>Usted es responsable del uso correcto, de las ventas registradas, de los precios y del cumplimiento de la normativa local.</li>' +
+    '<li>El programa se entrega «tal cual». En la medida permitida por la ley, el desarrollador no responde por lucro cesante, pérdida de datos o daños indirectos.</li>' +
+    '<li>La licencia de uso y el periodo de prueba se gestionan según el contrato o clave que le entregue su proveedor.</li>' +
+    '<li>Queda prohibido redistribuir, alquilar o modificar el programa para terceros sin autorización escrita.</li>' +
+    '</ol>' +
+    '<h3 style="margin:12px 0 6px;font-size:14px;color:#1e3a8a">Política de privacidad</h3>' +
+    '<ol style="margin:0 0 8px 18px;padding:0;font-size:12px;line-height:1.45;color:#334155;text-align:left">' +
+    '<li>Los datos (pedidos, catálogo, PINs, configuración) se guardan <b>en esta PC y, si aplica, en su base AxisPOS / Excel</b>. El servidor de pedidos no exige una nube del desarrollador.</li>' +
+    '<li>La comunicación entre la PC y los móviles es por su red local (Wi‑Fi/LAN). Debe proteger esa red.</li>' +
+    '<li>No se venden datos personales de sus clientes ni de sus vendedores a terceros con fines publicitarios.</li>' +
+    '<li>Usted debe informar a su personal y clientes según la ley aplicable sobre el tratamiento de datos en su punto de venta.</li>' +
+    '<li>Para ejercer derechos sobre datos almacenados en su equipo, contacte al administrador del sistema en su negocio o al desarrollador si corresponde a la licencia.</li>' +
+    '</ol>'
+  );
+}
+
+// soloLectura = true: solo consulta (desde Acerca de). false/null: primera instalación, exige aceptar.
+function mostrarTerminos(alAceptar, soloLectura) {
+  var dev = (DESARROLLADOR && DESARROLLADOR.nombre) ? DESARROLLADOR.nombre : 'José Carlos Fernández';
+  var pie = soloLectura
+    ? '<div class="ttx-bots" style="justify-content:center"><button class="ttx-b" data-a="ok" id="ttxTermOk">Cerrar</button></div>'
+    : '<label style="display:flex;gap:10px;align-items:flex-start;text-align:left;font-size:13px;color:#0f172a;margin:10px 0 12px;cursor:pointer">' +
+        '<input type="checkbox" id="ttxTermCheck" style="margin-top:3px;width:18px;height:18px;flex-shrink:0">' +
+        '<span>He leído y acepto los <b>Términos y condiciones</b> y la <b>Política de privacidad</b>.</span></label>' +
+      '<div class="ttx-bots" style="justify-content:center;gap:8px">' +
+        '<button class="ttx-b ttx-g" data-a="no">No acepto</button>' +
+        '<button class="ttx-b" data-a="si" id="ttxTermOk" disabled style="opacity:.5">Acepto y continuar</button>' +
+      '</div>';
+  var d = nodo(
+    '<div class="ttx-card" style="width:min(560px,96vw);max-height:92vh;display:flex;flex-direction:column;padding:0;overflow:hidden">' +
+      '<div style="padding:16px 18px 8px;border-bottom:1px solid #e2e8f0;flex:0 0 auto">' +
+        '<h2 style="margin:0 0 4px;font-size:18px;color:#1e3a8a;text-align:center">Instalación — Términos y privacidad</h2>' +
+        '<p style="margin:0;font-size:12px;color:#64748b;text-align:center">Desarrollado por <b>' + esc(dev) + '</b></p>' +
+      '</div>' +
+      '<div style="padding:12px 18px;overflow:auto;flex:1 1 auto;min-height:0">' + textoTerminosYPrivacidad() + '</div>' +
+      '<div style="padding:12px 18px 16px;border-top:1px solid #e2e8f0;flex:0 0 auto">' + pie + '</div>' +
+    '</div>', 'ttx-dlg');
+  function syncBtn() {
+    if (soloLectura) return;
+    var c = document.getElementById('ttxTermCheck');
+    var b = document.getElementById('ttxTermOk');
+    if (!c || !b) return;
+    b.disabled = !c.checked;
+    b.style.opacity = c.checked ? '1' : '.5';
+  }
+  d.addEventListener('change', function (e) {
+    if (e.target && e.target.id === 'ttxTermCheck') syncBtn();
+  });
+  d.onclick = function (e) {
+    var a = e.target && e.target.getAttribute && e.target.getAttribute('data-a');
+    if (a === 'ok' || (soloLectura && e.target === d)) { quitar(d); return; }
+    if (a === 'no') {
+      alert('Debe aceptar los términos y la política de privacidad para usar el programa.');
+      return;
+    }
+    if (a === 'si') {
+      var c = document.getElementById('ttxTermCheck');
+      if (!c || !c.checked) { alert('Marque la casilla de aceptación para continuar.'); return; }
+      api('/api/instalacion/completar', { terminos: true }).then(function () {
+        quitar(d);
+        if (alAceptar) alAceptar();
+      });
+    }
+  };
+  setTimeout(function () {
+    var c = document.getElementById('ttxTermCheck');
+    if (c) c.focus();
+    syncBtn();
+  }, 50);
 }
 
 // ---------- Bienvenida ----------
@@ -21541,14 +21655,26 @@ function arrancar() {
   api('/api/instalacion').then(function (r) {
     if (!r.ok) return;
     var info = r.d; if (info.negocio && info.negocio.nombre) NEGOCIO = info.negocio.nombre;
-    if (info.bienvenidaVista) return;
-    if (info.configurado) { api('/api/instalacion/completar', { bienvenida: true }); return; }
+    if (info.desarrollador && info.desarrollador.nombre) DESARROLLADOR = info.desarrollador;
+    // Ya aceptó términos y ya configuró / ya vio el flujo: no molestar.
+    if (info.terminosAceptados && info.bienvenidaVista) return;
+    if (info.terminosAceptados && info.configurado) {
+      api('/api/instalacion/completar', { bienvenida: true });
+      return;
+    }
     api('/api/licencia').then(function (rl) {
       info.licencia = rl.d;
       splash(function () {
-        // Solo el asistente de configuración inicial (sin pantalla de bienvenida aparte).
-        api('/api/instalacion/completar', { bienvenida: true });
-        if (MODO === 'pc' && window.TTAsistente) TTAsistente.abrir();
+        function seguirConfig() {
+          api('/api/instalacion/completar', { bienvenida: true });
+          if (MODO === 'pc' && window.TTAsistente) TTAsistente.abrir();
+        }
+        // Primera instalación: términos y privacidad obligatorios antes del asistente.
+        if (!info.terminosAceptados) {
+          mostrarTerminos(seguirConfig, false);
+        } else {
+          seguirConfig();
+        }
       });
     });
   });
@@ -22665,8 +22791,12 @@ while ($listener.IsListening) {
             } else {
                 if ($dInC -and $dInC.PSObject.Properties.Name -contains 'configurado') { $global:instalacion.configurado = [bool]$dInC.configurado }
                 if ($dInC -and $dInC.PSObject.Properties.Name -contains 'bienvenida') { $global:instalacion.bienvenidaVista = [bool]$dInC.bienvenida }
+                if ($dInC -and $dInC.PSObject.Properties.Name -contains 'terminos' -and [bool]$dInC.terminos) {
+                    $global:instalacion.terminosAceptados = $true
+                    $global:instalacion.terminosFecha = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+                }
                 Guardar-Instalacion
-                Enviar-Json $context @{ ok = $true }
+                Enviar-Json $context @{ ok = $true; terminosAceptados = [bool]$global:instalacion.terminosAceptados; terminosFecha = [string]$global:instalacion.terminosFecha }
             }
 
         } elseif ($method -eq "GET" -and $path -eq "/api/etiquetas/extra") {
