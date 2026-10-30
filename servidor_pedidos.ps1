@@ -7547,68 +7547,110 @@ TT.iniciar('pc');
     <div style="background:var(--tt-1e293b,#1e293b); padding:22px; border-radius:12px; max-width:440px; width:92%; max-height:88vh; overflow:auto;">
       <h2 style="font-size:17px; margin-bottom:14px; color:var(--tt-ffffff,#fff);">Ajustes</h2>
 
-      <div id="resumenHoyMenu" style="font-size:13px; color:var(--tt-cbd5e1,#cbd5e1); background:var(--tt-0f172a,#0f172a); border-radius:8px; padding:10px 12px; margin-bottom:16px;">Cargando resumen de hoy...</div>
+      <div id="resumenHoyMenu" style="font-size:13px; color:var(--tt-cbd5e1,#cbd5e1); background:var(--tt-0f172a,#0f172a); border-radius:8px; padding:10px 12px; margin-bottom:12px;">Cargando resumen de hoy...</div>
 
-      <h3 style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin:4px 0 8px; text-transform:uppercase; letter-spacing:0.5px;">Catalogo y base de datos</h3>
-      <button class="btn-toggle" id="btnOrigenDatos" style="width:100%; margin-bottom:8px;" onclick="alternarOrigenDatos()" title="De donde salen los productos, precios y existencias">Datos de productos y stock: ...</button>
-      <button class="btn-toggle" style="width:100%; margin-bottom:8px; text-align:left;" onclick="cerrarMenuPC(); abrirConfigAxis();" title="Servidor, puerto, usuario y clave de MariaDB / AxisPOS">Configurar base de datos (AxisPOS)...</button>
-      <button class="btn-toggle" style="width:100%; margin-bottom:8px; text-align:left;" onclick="cerrarMenuPC(); abrirConfig();">Cargar / cambiar el Excel del catalogo</button>
-      <button class="btn-toggle" id="btnFotosCatalogo" style="width:100%; margin-bottom:8px;" onclick="importarFotosCatalogo()" title="Lee el ultimo backup-catalogo-*.zip">Fotos del catalogo: ...</button>
-      <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="document.getElementById('zipFotosPC').click()" title="Elige el .zip de Copia de seguridad del catalogo">Subir .zip de fotos...</button>
-      <input type="file" id="zipFotosPC" accept=".zip" style="display:none">
+      <style>
+        .sm-sec{border:1px solid var(--tt-334155,#334155);border-radius:10px;margin-bottom:8px;overflow:hidden;background:var(--tt-0f172a,#0f172a)}
+        .sm-cab{width:100%;display:flex;justify-content:space-between;align-items:center;padding:11px 12px;border:none;background:transparent;color:var(--tt-e2e8f0,#e2e8f0);font-size:13px;font-weight:700;cursor:pointer;text-align:left}
+        .sm-cab:hover{background:rgba(51,65,85,.45)}
+        .sm-cab .sm-flecha{transition:transform .2s;color:var(--tt-94a3b8,#94a3b8);font-size:12px}
+        .sm-sec.abierto .sm-flecha{transform:rotate(90deg)}
+        .sm-cuerpo{display:none;padding:4px 8px 10px}
+        .sm-sec.abierto .sm-cuerpo{display:block}
+        .sm-cuerpo .btn-toggle,.sm-cuerpo .btn-nuevo-pedido,.sm-cuerpo .btn-cerrar-dia{width:100%;margin-bottom:6px;text-align:left}
+        .sm-cuerpo label{display:flex}
+      </style>
 
-      <h3 style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin:12px 0 8px; text-transform:uppercase; letter-spacing:0.5px;">Consultas rapidas</h3>
-      <button class="btn-toggle" style="width:100%; margin-bottom:8px; text-align:left;" onclick="cerrarMenuPC(); abrirConsulta();">Consultar precio y stock (Alt+C)</button>
-      <button class="btn-toggle" style="width:100%; margin-bottom:8px; text-align:left;" onclick="cerrarMenuPC(); abrirRepos();">Que bajar del almacen (Alt+B)</button>
-      <button class="btn-toggle" style="width:100%; margin-bottom:8px;" onclick="abrirCompras()">Lista de compras (reabastecer) (F6)</button>
-      <button class="btn-toggle" style="width:100%; margin-bottom:8px;" onclick="window.open('/etiquetas', '_blank')">Etiquetas y codigos de barra (F4)</button>
-      <button class="btn-toggle" style="width:100%; margin-bottom:8px;" onclick="abrirDevolucion()">Ticket de devolucion / garantia (F7)</button>
-      <button class="btn-toggle" style="width:100%; margin-bottom:8px; text-align:left;" onclick="cerrarMenuPC(); abrirSeries();">Series y garantia de lo vendido</button>
-      <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="window.open('/metricas', '_blank')">Ver metricas (F8)</button>
-
-      <h3 style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin:12px 0 8px; text-transform:uppercase; letter-spacing:0.5px;">Vendedores y permisos</h3>
-      <button class="btn-nuevo-pedido" style="width:100%; background:var(--tt-0369a1,#0369a1); margin-bottom:8px;" onclick="cerrarMenuPC(); abrirPines();">PIN de vendedores</button>
-      <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="abrirPermisos()">Permisos de vendedores</button>
-
-      <h3 style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin:12px 0 8px; text-transform:uppercase; letter-spacing:0.5px;">Impresion y apariencia</h3>
-      <button class="btn-toggle" style="width:100%; margin-bottom:8px;" onclick="abrirRecibo()" title="Nombre, NIT, logo, textos del ticket y QR de pago">Personalizar comprobante y QR</button>
-      <button class="btn-toggle" style="width:100%; margin-bottom:8px; text-align:left;" onclick="abrirColores()">Colores de la interfaz...</button>
-      <label style="font-size:14px; display:flex; align-items:center; gap:8px; margin-bottom:10px;" title="Se imprime como TOTAL USD en los recibos. Deja vacio o 0 para no imprimirlo.">Tasa USD: <input type="number" id="tasaDolar" min="0" step="any" placeholder="0" style="width:90px; padding:6px 8px; border-radius:6px; border:1px solid var(--tt-334155,#334155); background:var(--tt-0f172a,#0f172a); color:var(--tt-e2e8f0,#e2e8f0);" onchange="guardarTasaDolar()"></label>
-
-      <h3 style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin:12px 0 8px; text-transform:uppercase; letter-spacing:0.5px;">Stock y compras</h3>
-      <label style="font-size:14px; display:flex; align-items:center; gap:8px; margin-bottom:8px;" title="Cuando un producto queda con esta cantidad o menos, avisa en el Panel.">Alerta stock bajo: <input type="number" id="umbralStockBajo" min="0" step="1" placeholder="3" style="width:70px; padding:6px 8px; border-radius:6px; border:1px solid var(--tt-334155,#334155); background:var(--tt-0f172a,#0f172a); color:var(--tt-e2e8f0,#e2e8f0);" onchange="guardarUmbralStockBajo()"></label>
-      <button class="btn-toggle" id="btnOcultarSinStock" style="width:100%; margin-bottom:8px;" onclick="alternarOcultarSinStock()">Ocultar sin stock a vendedores: ...</button>
-      <button class="btn-toggle" style="width:100%; margin-bottom:8px;" onclick="cerrarMenuPC(); abrirMinAxis();">Stock minimo de AxisPOS</button>
-      <button class="btn-toggle" style="width:100%; margin-bottom:8px;" onclick="cerrarMenuPC(); abrirEstatico();">Stock estatico (baja rotacion)</button>
-      <button class="btn-toggle" style="width:100%; margin-bottom:8px;" onclick="cerrarMenuPC(); abrirCostos();">Costos de reposicion</button>
-      <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="cerrarMenuPC(); abrirComprasProv();">Compras a proveedores</button>
-
-      <h3 style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin:12px 0 8px; text-transform:uppercase; letter-spacing:0.5px;">Pedidos y red</h3>
-      <button class="btn-toggle" id="btnUnirPedidos" style="width:100%; margin-bottom:8px;" onclick="alternarUnirPedidos()" title="Varios pedidos del mismo vendedor se cierran juntos si suman la misma venta en AxisPOS">Unir pedidos del mismo vendedor: ...</button>
-      <div style="display:flex; gap:8px; margin-bottom:8px; flex-wrap:wrap;">
-        <label style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); display:flex; align-items:center; gap:4px;">Max pedidos <input type="number" id="unirPedidosMax" min="2" max="8" style="width:52px; padding:4px; border-radius:6px; border:1px solid var(--tt-334155,#334155); background:var(--tt-0f172a,#0f172a); color:var(--tt-e2e8f0,#e2e8f0);" onchange="guardarUnirPedidosParams()"></label>
-        <label style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); display:flex; align-items:center; gap:4px;">Minutos <input type="number" id="unirPedidosMinutos" min="1" max="30" style="width:52px; padding:4px; border-radius:6px; border:1px solid var(--tt-334155,#334155); background:var(--tt-0f172a,#0f172a); color:var(--tt-e2e8f0,#e2e8f0);" onchange="guardarUnirPedidosParams()"></label>
+      <div class="sm-sec abierto" data-sm="catalogo">
+        <button type="button" class="sm-cab" onclick="toggleSubmenu(this)">Catálogo y base de datos <span class="sm-flecha">&#9654;</span></button>
+        <div class="sm-cuerpo">
+          <button class="btn-toggle" id="btnOrigenDatos" onclick="alternarOrigenDatos()" title="De donde salen los productos, precios y existencias">Datos de productos y stock: ...</button>
+          <button class="btn-toggle" onclick="cerrarMenuPC(); abrirConfigAxis();" title="Servidor, puerto, usuario y clave de MariaDB / AxisPOS">Configurar base de datos (AxisPOS)...</button>
+          <button class="btn-toggle" onclick="cerrarMenuPC(); abrirConfig();">Cargar / cambiar el Excel del catalogo</button>
+          <button class="btn-toggle" id="btnFotosCatalogo" onclick="importarFotosCatalogo()" title="Lee el ultimo backup-catalogo-*.zip">Fotos del catalogo: ...</button>
+          <button class="btn-toggle" onclick="document.getElementById('zipFotosPC').click()" title="Elige el .zip de Copia de seguridad del catalogo">Subir .zip de fotos...</button>
+          <input type="file" id="zipFotosPC" accept=".zip" style="display:none">
+        </div>
       </div>
-      <button class="btn-toggle" id="btnPermitirDescuentos" style="width:100%; margin-bottom:8px;" onclick="alternarPermitirDescuentos()">Permitir descuentos en movil: ...</button>
-      <button class="btn-toggle" id="btnPermitirBorradores" style="width:100%; margin-bottom:8px;" onclick="alternarPermitirBorradores()">Permitir borradores en movil: ...</button>
-      <button class="btn-toggle" id="btnAutoservicioDestino" style="width:100%; margin-bottom:8px;" onclick="alternarAutoservicioDestino()">Autoservicio destino: ...</button>
-      <button class="btn-toggle" style="width:100%; margin-bottom:8px;" onclick="abrirRed()">Red / IP fija de la PC</button>
-      <div style="background:var(--tt-0f172a,#0f172a); border-radius:8px; padding:10px; margin-bottom:10px;">
-        <div style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin-bottom:6px;">WiFi para tarjeta / QR de clientes</div>
-        <input id="inputWifiSSID" class="rc-in" placeholder="Nombre de la red WiFi" style="margin-bottom:6px;" onchange="guardarWifiPC()">
-        <input id="inputWifiClave" class="rc-in" type="password" placeholder="Clave WiFi" style="margin-bottom:6px;" onchange="guardarWifiPC()">
-        <button class="btn-toggle" style="width:100%; margin-top:4px;" onclick="generarTarjetaImprimir()">Generar tarjeta para imprimir (WiFi + Catalogo)</button>
-        <button class="btn-toggle" style="width:100%; margin-top:6px;" onclick="imprimirTarjetaTermica()">Imprimir WiFi + Catalogo en la termica</button>
-      </div>
-      <button class="btn-toggle" style="width:100%; margin-bottom:8px;" onclick="cerrarMenuPC(); abrirSinonimos();">Sinonimos de busqueda</button>
-      <button class="btn-toggle" style="width:100%; margin-bottom:10px;" onclick="cerrarMenuPC(); abrirRespaldo();">Copias de seguridad</button>
 
-      <h3 style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin:12px 0 8px; text-transform:uppercase; letter-spacing:0.5px;">Auditoria y sistema</h3>
-      <button class="btn-toggle" style="width:100%; margin-bottom:8px;" onclick="window.open('/auditoria', '_blank')">Auditoria AxisPOS (precios, tasas, alertas)</button>
-      <button class="btn-toggle" style="width:100%; margin-bottom:8px;" onclick="cerrarMenuPC(); abrirAuditoria();">Registro local (quien hizo que)</button>
-      <button class="btn-toggle" style="width:100%; margin-bottom:8px; text-align:left;" onclick="cerrarMenuPC(); if (window.TTAyuda) TTAyuda.abrir();">Ayuda (F1)</button>
-      <button class="btn-toggle" style="width:100%; margin-bottom:8px; text-align:left;" onclick="cerrarMenuPC(); window.open('/licencia', '_blank');">Licencia: renovar</button>
-      <button class="btn-cerrar-dia" style="width:100%; margin-bottom:10px;" onclick="cerrarMenuPC(); cerrarDia();">Cerrar el dia (archivar cobrados)</button>
+      <div class="sm-sec" data-sm="consultas">
+        <button type="button" class="sm-cab" onclick="toggleSubmenu(this)">Consultas rápidas <span class="sm-flecha">&#9654;</span></button>
+        <div class="sm-cuerpo">
+          <button class="btn-toggle" onclick="cerrarMenuPC(); abrirConsulta();">Consultar precio y stock (Alt+C)</button>
+          <button class="btn-toggle" onclick="cerrarMenuPC(); abrirRepos();">Que bajar del almacen (Alt+B)</button>
+          <button class="btn-toggle" onclick="abrirCompras()">Lista de compras (reabastecer) (F6)</button>
+          <button class="btn-toggle" onclick="window.open('/etiquetas', '_blank')">Etiquetas y codigos de barra (F4)</button>
+          <button class="btn-toggle" onclick="abrirDevolucion()">Ticket de devolucion / garantia (F7)</button>
+          <button class="btn-toggle" onclick="cerrarMenuPC(); abrirSeries();">Series y garantia de lo vendido</button>
+          <button class="btn-toggle" onclick="window.open('/metricas', '_blank')">Ver metricas (F8)</button>
+        </div>
+      </div>
+
+      <div class="sm-sec" data-sm="vendedores">
+        <button type="button" class="sm-cab" onclick="toggleSubmenu(this)">Vendedores y permisos <span class="sm-flecha">&#9654;</span></button>
+        <div class="sm-cuerpo">
+          <button class="btn-nuevo-pedido" style="background:var(--tt-0369a1,#0369a1);" onclick="cerrarMenuPC(); abrirPines();">PIN de vendedores</button>
+          <button class="btn-toggle" onclick="abrirPermisos()">Permisos de vendedores</button>
+        </div>
+      </div>
+
+      <div class="sm-sec" data-sm="impresion">
+        <button type="button" class="sm-cab" onclick="toggleSubmenu(this)">Impresión y apariencia <span class="sm-flecha">&#9654;</span></button>
+        <div class="sm-cuerpo">
+          <button class="btn-toggle" onclick="abrirRecibo()" title="Nombre, NIT, logo, textos del ticket y QR de pago">Personalizar comprobante y QR</button>
+          <button class="btn-toggle" onclick="abrirColores()">Colores de la interfaz...</button>
+          <label style="font-size:14px; align-items:center; gap:8px; margin-bottom:8px; color:var(--tt-e2e8f0,#e2e8f0);" title="Se imprime como TOTAL USD en los recibos.">Tasa USD: <input type="number" id="tasaDolar" min="0" step="any" placeholder="0" style="width:90px; padding:6px 8px; border-radius:6px; border:1px solid var(--tt-334155,#334155); background:var(--tt-0f172a,#0f172a); color:var(--tt-e2e8f0,#e2e8f0);" onchange="guardarTasaDolar()"></label>
+        </div>
+      </div>
+
+      <div class="sm-sec" data-sm="stock">
+        <button type="button" class="sm-cab" onclick="toggleSubmenu(this)">Stock y compras <span class="sm-flecha">&#9654;</span></button>
+        <div class="sm-cuerpo">
+          <label style="font-size:14px; align-items:center; gap:8px; margin-bottom:8px; color:var(--tt-e2e8f0,#e2e8f0);">Alerta stock bajo: <input type="number" id="umbralStockBajo" min="0" step="1" placeholder="3" style="width:70px; padding:6px 8px; border-radius:6px; border:1px solid var(--tt-334155,#334155); background:var(--tt-0f172a,#0f172a); color:var(--tt-e2e8f0,#e2e8f0);" onchange="guardarUmbralStockBajo()"></label>
+          <button class="btn-toggle" id="btnOcultarSinStock" onclick="alternarOcultarSinStock()">Ocultar sin stock a vendedores: ...</button>
+          <button class="btn-toggle" onclick="cerrarMenuPC(); abrirMinAxis();">Stock minimo de AxisPOS</button>
+          <button class="btn-toggle" onclick="cerrarMenuPC(); abrirEstatico();">Stock estatico (baja rotacion)</button>
+          <button class="btn-toggle" onclick="cerrarMenuPC(); abrirCostos();">Costos de reposicion</button>
+          <button class="btn-toggle" onclick="cerrarMenuPC(); abrirComprasProv();">Compras a proveedores</button>
+        </div>
+      </div>
+
+      <div class="sm-sec" data-sm="pedidos">
+        <button type="button" class="sm-cab" onclick="toggleSubmenu(this)">Pedidos y red <span class="sm-flecha">&#9654;</span></button>
+        <div class="sm-cuerpo">
+          <button class="btn-toggle" id="btnUnirPedidos" onclick="alternarUnirPedidos()" title="Varios pedidos del mismo vendedor se cierran juntos si suman la misma venta en AxisPOS">Unir pedidos del mismo vendedor: ...</button>
+          <div style="display:flex; gap:8px; margin-bottom:8px; flex-wrap:wrap;">
+            <label style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); display:flex; align-items:center; gap:4px;">Max pedidos <input type="number" id="unirPedidosMax" min="2" max="8" style="width:52px; padding:4px; border-radius:6px; border:1px solid var(--tt-334155,#334155); background:var(--tt-0f172a,#0f172a); color:var(--tt-e2e8f0,#e2e8f0);" onchange="guardarUnirPedidosParams()"></label>
+            <label style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); display:flex; align-items:center; gap:4px;">Minutos <input type="number" id="unirPedidosMinutos" min="1" max="30" style="width:52px; padding:4px; border-radius:6px; border:1px solid var(--tt-334155,#334155); background:var(--tt-0f172a,#0f172a); color:var(--tt-e2e8f0,#e2e8f0);" onchange="guardarUnirPedidosParams()"></label>
+          </div>
+          <button class="btn-toggle" id="btnPermitirDescuentos" onclick="alternarPermitirDescuentos()">Permitir descuentos en movil: ...</button>
+          <button class="btn-toggle" id="btnPermitirBorradores" onclick="alternarPermitirBorradores()">Permitir borradores en movil: ...</button>
+          <button class="btn-toggle" id="btnAutoservicioDestino" onclick="alternarAutoservicioDestino()">Autoservicio destino: ...</button>
+          <button class="btn-toggle" onclick="abrirRed()">Red / IP fija de la PC</button>
+          <div style="background:var(--tt-1e293b,#1e293b); border-radius:8px; padding:10px; margin-bottom:8px;">
+            <div style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin-bottom:6px;">WiFi para tarjeta / QR de clientes</div>
+            <input id="inputWifiSSID" class="rc-in" placeholder="Nombre de la red WiFi" style="margin-bottom:6px;" onchange="guardarWifiPC()">
+            <input id="inputWifiClave" class="rc-in" type="password" placeholder="Clave WiFi" style="margin-bottom:6px;" onchange="guardarWifiPC()">
+            <button class="btn-toggle" style="width:100%; margin-top:4px;" onclick="generarTarjetaImprimir()">Generar tarjeta para imprimir (WiFi + Catalogo)</button>
+            <button class="btn-toggle" style="width:100%; margin-top:6px;" onclick="imprimirTarjetaTermica()">Imprimir WiFi + Catalogo en la termica</button>
+          </div>
+          <button class="btn-toggle" style="background:var(--tt-0369a1,#0369a1);color:#fff;" onclick="cerrarMenuPC(); mostrarQRVendedor();" title="Los vendedores escanean este codigo para entrar sin escribir la IP">Ver QR para vendedores (Alt+Q)</button>
+          <button class="btn-toggle" onclick="cerrarMenuPC(); mostrarQRCliente();" title="Enlace del catalogo para clientes (autoservicio)">Ver QR para clientes</button>
+          <button class="btn-toggle" onclick="cerrarMenuPC(); abrirSinonimos();">Sinonimos de busqueda</button>
+          <button class="btn-toggle" onclick="cerrarMenuPC(); abrirRespaldo();">Copias de seguridad</button>
+        </div>
+      </div>
+
+      <div class="sm-sec" data-sm="sistema">
+        <button type="button" class="sm-cab" onclick="toggleSubmenu(this)">Auditoría y sistema <span class="sm-flecha">&#9654;</span></button>
+        <div class="sm-cuerpo">
+          <button class="btn-toggle" onclick="window.open('/auditoria', '_blank')">Auditoria AxisPOS (precios, tasas, alertas)</button>
+          <button class="btn-toggle" onclick="cerrarMenuPC(); abrirAuditoria();">Registro local (quien hizo que)</button>
+          <button class="btn-toggle" onclick="cerrarMenuPC(); if (window.TTAyuda) TTAyuda.abrir();">Ayuda (F1)</button>
+          <button class="btn-toggle" onclick="cerrarMenuPC(); window.open('/licencia', '_blank');">Licencia: renovar</button>
+          <button class="btn-cerrar-dia" onclick="cerrarMenuPC(); cerrarDia();">Cerrar el dia (archivar cobrados)</button>
+        </div>
+      </div>
 
       <button class="btn" style="background:var(--tt-475569,#475569);" onclick="cerrarMenuPC()">Cerrar</button>
     </div>
@@ -7898,13 +7940,15 @@ TT.iniciar('pc');
     </div>
   </div>
 
-  <div id="qrOverlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); align-items:center; justify-content:center; z-index:50;" onclick="cerrarQRCliente()">
-    <div style="background:var(--tt-1e293b,#1e293b); padding:24px; border-radius:12px; max-width:340px; width:88%; text-align:center;" onclick="event.stopPropagation()">
-      <h2 id="qrTituloModal" style="font-size:16px; margin-bottom:14px; color:var(--tt-ffffff,#fff);">QR para clientes</h2>
-      <div id="qrCodeBox" style="background:#fff; padding:12px; border-radius:8px; display:inline-block; min-width:200px; min-height:200px;"></div>
-      <div id="qrEnlaceTexto" style="font-size:11px; color:var(--tt-94a3b8,#94a3b8); margin-top:12px; word-break:break-all;"></div>
+  <div id="qrOverlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.65); align-items:center; justify-content:center; z-index:70;" onclick="cerrarQRCliente()">
+    <div style="background:var(--tt-1e293b,#1e293b); padding:22px; border-radius:12px; max-width:360px; width:92%; text-align:center;" onclick="event.stopPropagation()">
+      <h2 id="qrTituloModal" style="font-size:17px; margin-bottom:6px; color:var(--tt-ffffff,#fff);">QR para vendedores</h2>
+      <p id="qrInstruccion" style="font-size:12px; color:var(--tt-94a3b8,#94a3b8); margin:0 0 12px; line-height:1.4;">El vendedor escanea este codigo con la camara del telefono. Asi entra a la app sin escribir la IP.</p>
+      <div id="qrCodeBox" style="background:#fff; padding:12px; border-radius:8px; display:inline-block; min-width:220px; min-height:220px;"></div>
+      <div id="qrEnlaceTexto" style="font-size:12px; color:var(--tt-cbd5e1,#cbd5e1); margin-top:12px; word-break:break-all; font-weight:600;"></div>
       <button id="qrBotonCopiar" class="btn" style="margin-top:14px; width:100%;" onclick="copiarEnlaceQRActual()">Copiar enlace</button>
       <button id="qrBotonTermica" class="btn" style="background:var(--tt-0369a1,#0369a1); margin-top:8px; width:100%;" onclick="imprimirQRActualTermica()">Imprimir en la termica</button>
+      <button type="button" class="btn-toggle" style="width:100%; margin-top:8px;" onclick="mostrarQRVendedor();">Actualizar (IP nueva)</button>
       <button class="btn" style="background:var(--tt-475569,#475569); margin-top:8px; width:100%;" onclick="cerrarQRCliente()">Cerrar</button>
     </div>
   </div>
@@ -8296,6 +8340,16 @@ TT.iniciar('pc');
       cargarResumenHoyMenu();
     }
     function cerrarMenuPC() { document.getElementById('menuPCOverlay').style.display = 'none'; }
+    function toggleSubmenu(btn) {
+      var sec = btn && btn.closest ? btn.closest('.sm-sec') : null;
+      if (!sec) return;
+      var abrir = !sec.classList.contains('abierto');
+      // Un solo submenú abierto a la vez (más claro en pantallas pequeñas)
+      document.querySelectorAll('#menuPCOverlay .sm-sec.abierto').forEach(function (s) {
+        if (s !== sec) s.classList.remove('abierto');
+      });
+      if (abrir) sec.classList.add('abierto'); else sec.classList.remove('abierto');
+    }
 
     async function cargarResumenHoyMenu() {
       const el = document.getElementById('resumenHoyMenu');
@@ -9236,26 +9290,42 @@ TT.iniciar('pc');
     }
 
     let enlaceVendedorCache = null;
-    async function obtenerEnlaceVendedor() {
-      if (enlaceVendedorCache) return enlaceVendedorCache;
+    async function obtenerEnlaceVendedor(forzar) {
+      if (!forzar && enlaceVendedorCache) return enlaceVendedorCache;
       let base = location.origin;
       try {
-        const res = await fetch('/api/ip');
+        const res = await fetch('/api/ip?t=' + Date.now(), { cache: 'no-store' });
         const info = await res.json();
-        if (info && info.ip) base = 'http://' + info.ip + ':' + info.puerto;
-      } catch (e) { /* si falla, se usa location.origin (sirve solo en esta PC) */ }
+        if (info && info.ip && info.ip !== 'localhost' && info.ip !== '127.0.0.1') {
+          base = 'http://' + info.ip + ':' + (info.puerto || location.port || 8080);
+        } else if (info && info.ip) {
+          // localhost solo sirve en esta PC; se avisa en el texto del modal
+          base = 'http://' + info.ip + ':' + (info.puerto || location.port || 8080);
+        }
+      } catch (e) { /* si falla, se usa location.origin */ }
       enlaceVendedorCache = base + '/vendedor';
       return enlaceVendedorCache;
     }
     async function mostrarQRVendedor() {
-      const enlace = await obtenerEnlaceVendedor();
-      enlaceQRActual = enlace;
-      qrActualDatos = { titulo: 'APP DE VENDEDORES', instruccion: 'Escanea para entrar a la app', texto: enlace, pie: enlace };
-      dibujarQREnBox(enlace, document.getElementById('qrCodeBox'));
-      document.getElementById('qrTituloModal').textContent = 'QR para vendedores';
-      document.getElementById('qrEnlaceTexto').textContent = enlace;
-      document.getElementById('qrBotonCopiar').style.display = 'block';
+      const box = document.getElementById('qrCodeBox');
+      if (box) box.innerHTML = '<div style="padding:40px 12px;color:#64748b;font-size:13px;">Generando QR...</div>';
       document.getElementById('qrOverlay').style.display = 'flex';
+      document.getElementById('qrTituloModal').textContent = 'QR para vendedores';
+      const inst = document.getElementById('qrInstruccion');
+      if (inst) inst.textContent = 'El vendedor escanea este codigo con la camara del telefono. Asi entra a la app sin escribir la IP.';
+      try {
+        const enlace = await obtenerEnlaceVendedor(true);
+        enlaceQRActual = enlace;
+        qrActualDatos = { titulo: 'APP DE VENDEDORES', instruccion: 'Escanea para entrar a la app', texto: enlace, pie: enlace };
+        dibujarQREnBox(enlace, box);
+        document.getElementById('qrEnlaceTexto').textContent = enlace;
+        document.getElementById('qrBotonCopiar').style.display = 'block';
+        if (inst && (enlace.indexOf('localhost') >= 0 || enlace.indexOf('127.0.0.1') >= 0)) {
+          inst.textContent = 'Atencion: la PC no detecto una IP de red. Conecta el Wi-Fi o revisa Ajustes → Red. Este enlace solo funciona en esta PC.';
+        }
+      } catch (e) {
+        if (box) box.innerHTML = '<div style="padding:20px;color:#fca5a5;font-size:13px;">No se pudo generar el QR.</div>';
+      }
     }
     function copiarEnlaceQRActual() {
       const enlace = enlaceQRActual;
@@ -12833,6 +12903,8 @@ TT.iniciar('vendedor');
         <div id="loginSugerencias" role="listbox"></div>
         <p class="login-ayuda">Elige tu nombre de la lista (o escribelo) y entra con tu PIN</p>
         <button type="button" class="btn" onclick="loginContinuar()">Continuar</button>
+        <button type="button" class="btn" id="btnEscanearQRServidor" onclick="escanearQRServidor()" style="margin-top:10px; background:var(--tt-0f172a,#0f172a); border:1px solid var(--acento); color:var(--acento);">Escanear QR del servidor</button>
+        <p class="login-ayuda" style="margin-top:8px;">Si no conecta con la PC: pide el QR en la caja (Alt+Q) y escanéalo aquí.</p>
       </div>
 
       <div id="loginPasoPin" style="display:none;">
@@ -14877,6 +14949,106 @@ TT.iniciar('vendedor');
       } catch (e) {}
       return null;
     }
+
+    // ---- Escanear QR del servidor (login): enlaza el telefono con la IP de la PC ----
+    function normalizarEnlaceServidor(texto) {
+      var t = String(texto || '').trim();
+      if (!t) return '';
+      // Si es solo host:puerto
+      if (/^\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?$/.test(t)) t = 'http://' + t;
+      if (/^https?:\/\//i.test(t) === false && /^[\w.-]+:\d+/.test(t)) t = 'http://' + t;
+      try {
+        var u = new URL(t);
+        if (!/^https?:$/i.test(u.protocol)) return '';
+        // Acepta /vendedor, / o cualquier ruta del mismo servidor
+        var base = u.origin;
+        var path = (u.pathname || '/').replace(/\/+$/, '');
+        if (path.indexOf('/vendedor') >= 0 || path === '' || path === '/') {
+          return base + '/vendedor' + (u.search || '');
+        }
+        // Otros QR del mismo sistema (clientes, etc.): igual lleva al servidor de pedidos
+        if (path.indexOf('/etiquetas') >= 0 || path.indexOf('/metricas') >= 0) return base + '/vendedor';
+        return base + '/vendedor';
+      } catch (e) { return ''; }
+    }
+    async function escanearCodigoUnaVez() {
+      // 1) Plugin nativo TotoBg.scan
+      if (pluginNativo('TotoBg') && typeof pluginNativo('TotoBg').scan === 'function') {
+        try {
+          const r = await pluginNativo('TotoBg').scan({ title: 'QR del servidor', message: 'Apunta al QR de la PC' });
+          const v = (r && (r.value || r.codigo || r.text || r.rawValue)) || '';
+          if (v) return String(v);
+        } catch (e) { /* sigue con ML Kit */ }
+      }
+      // 2) BarcodeScanner (ML Kit)
+      const ml = pluginNativo('BarcodeScanner');
+      if (ml && typeof ml.startScan === 'function') {
+        try {
+          const perm = await ml.requestPermissions();
+          if (perm && perm.camera && perm.camera !== 'granted' && perm.camera !== 'limited') {
+            throw new Error('Permiso de cámara denegado.');
+          }
+          if (typeof ml.hideBackground === 'function') await ml.hideBackground();
+          document.body.style.background = 'transparent';
+          const res = await ml.startScan({ formats: ['QR_CODE', 'CODE_128', 'EAN_13', 'EAN_8'] });
+          if (typeof ml.showBackground === 'function') await ml.showBackground();
+          document.body.style.background = '';
+          if (typeof ml.stopScan === 'function') try { await ml.stopScan(); } catch (e2) {}
+          const v = (res && (res.content || res.rawValue || res.value || res.text)) || '';
+          if (v) return String(v);
+        } catch (e) {
+          try { if (ml && typeof ml.showBackground === 'function') await ml.showBackground(); } catch (e3) {}
+          document.body.style.background = '';
+          try { if (ml && typeof ml.stopScan === 'function') await ml.stopScan(); } catch (e4) {}
+          throw e;
+        }
+      }
+      // 3) Fallback: pegar enlace a mano
+      const manual = window.prompt('No hay cámara disponible. Pega el enlace del QR (ej. http://192.168.1.10:8080/vendedor):', '');
+      return manual ? String(manual).trim() : '';
+    }
+    async function escanearQRServidor() {
+      const err = document.getElementById('loginError');
+      const btn = document.getElementById('btnEscanearQRServidor');
+      if (err) { err.style.display = 'none'; err.textContent = ''; }
+      if (btn) { btn.disabled = true; btn.textContent = 'Abriendo cámara...'; }
+      try {
+        const bruto = await escanearCodigoUnaVez();
+        if (!bruto) {
+          if (err) { err.style.display = 'block'; err.textContent = 'No se leyó ningún código.'; }
+          return;
+        }
+        const enlace = normalizarEnlaceServidor(bruto);
+        if (!enlace) {
+          if (err) { err.style.display = 'block'; err.textContent = 'Ese QR no es del servidor de pedidos. En la PC usa Alt+Q (QR para vendedores).'; }
+          return;
+        }
+        // Recordar en el teléfono (sirve si la app vuelve a abrir sin red)
+        try {
+          const u = new URL(enlace);
+          localStorage.setItem('ttNombreNegocio', localStorage.getItem('ttNombreNegocio') || '');
+          localStorage.setItem('ttServidorBase', u.origin);
+        } catch (e) {}
+        if (err) { err.style.display = 'block'; err.style.color = '#166534'; err.textContent = 'Servidor encontrado. Abriendo...'; }
+        // Si ya estamos en esa misma dirección, solo recarga
+        try {
+          if (location.href.split('#')[0].replace(/\/+$/, '') === enlace.replace(/\/+$/, '')) {
+            location.reload();
+            return;
+          }
+        } catch (e) {}
+        location.href = enlace;
+      } catch (e) {
+        if (err) {
+          err.style.display = 'block';
+          err.style.color = '';
+          err.textContent = (e && e.message) ? e.message : 'No se pudo abrir la cámara.';
+        }
+      } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Escanear QR del servidor'; }
+      }
+    }
+
 
     // ================= Escaner de codigos de barras =================
     // Usa el modelo de ML Kit que viene DENTRO de la APK: abre al instante, sin descargas ni Google Play Services.
@@ -20409,12 +20581,27 @@ $global:extrasHtml = @'
 .ttx-b:hover{filter:brightness(1.1)}.ttx-b.ttx-g{background:#e2e8f0;color:#334155}.ttx-b.ttx-v{background:#15803d}.ttx-b[disabled]{opacity:.5;cursor:default}
 .ttx-b.ttx-link{background:none;color:#64748b;font-weight:600;padding:10px 6px;text-decoration:underline}
 .ttx-ver-t{font-size:11px;color:#94a3b8;margin-top:10px;text-align:right}
-.ttx-wiz{z-index:55;background:rgba(2,6,23,.82)}
-.ttx-wiz .ttx-card{width:min(680px,100%);padding:0;display:flex;flex-direction:column}
-.ttx-wh{padding:18px 24px 12px;border-bottom:1px solid #e2e8f0}
-.ttx-wh .ttx-pa{font-size:12px;color:#64748b}.ttx-wh h2{margin:2px 0 8px;font-size:20px;color:#1e3a8a}
-.ttx-pts{display:flex;gap:6px}.ttx-pts i{flex:1;height:5px;border-radius:3px;background:#e2e8f0}.ttx-pts i.ttx-on{background:#2563eb}.ttx-pts i.ttx-ok{background:#16a34a}
-.ttx-wb{padding:16px 24px;overflow:auto;min-height:260px}
+.ttx-wiz{z-index:55;background:rgba(2,6,23,.82);align-items:center;justify-content:center;padding:12px}
+.ttx-wiz .ttx-card{width:min(720px,96vw);max-height:min(96vh,900px);height:auto;padding:0;display:flex;flex-direction:column;overflow:hidden}
+.ttx-wh{padding:12px 18px 8px;border-bottom:1px solid #e2e8f0;flex:0 0 auto}
+.ttx-wh .ttx-pa{font-size:11px;color:#64748b}.ttx-wh h2{margin:2px 0 6px;font-size:17px;color:#1e3a8a}
+.ttx-wiz-title{margin:0 0 2px;font-size:16px !important}
+.ttx-wiz-sub{margin:0 0 8px !important;font-size:12px !important}
+.ttx-pts{display:flex;gap:4px;flex-wrap:wrap;justify-content:center;margin:6px 0 8px !important}
+.ttx-pts i{flex:1;height:4px;border-radius:3px;background:#e2e8f0;min-width:24px}.ttx-pts i.ttx-on{background:#2563eb}.ttx-pts i.ttx-ok{background:#16a34a}
+.ttx-step{min-width:56px !important}
+.ttx-step b{width:22px !important;height:22px !important;font-size:11px !important}
+.ttx-step em{font-size:9px !important;max-width:70px !important}
+.ttx-wb{padding:10px 18px;overflow:auto;flex:1 1 auto;min-height:0;max-height:none}
+.ttx-wiz .ttx-wf{flex:0 0 auto;padding:10px 18px;border-top:1px solid #e2e8f0}
+.ttx-wiz .ttx-f{margin-bottom:8px}
+.ttx-wiz .ttx-f label{margin-bottom:2px;font-size:12px}
+.ttx-wiz .ttx-f input,.ttx-wiz .ttx-f select{padding:7px 9px;font-size:13px}
+.ttx-wiz .ttx-nota{font-size:12px;margin:0 0 8px;padding:8px 10px}
+.ttx-wiz .ttx-2{gap:8px}
+.ttx-wiz .ttx-op{gap:8px;margin-bottom:8px}
+.ttx-wiz .ttx-op label{padding:8px 10px}
+.ttx-wiz .ttx-vrow{padding:8px;margin-bottom:6px}
 .ttx-wf{padding:12px 24px 16px;border-top:1px solid #e2e8f0;display:flex;gap:10px;align-items:center}
 .ttx-wf .ttx-sp{flex:1}
 .ttx-f{margin-bottom:11px}.ttx-f label{display:block;font-size:12px;font-weight:600;color:#475569;margin-bottom:3px}
@@ -20452,6 +20639,15 @@ $global:extrasHtml = @'
 .ttx-ay-cu mark{background:#fde68a;border-radius:3px}
 .ttx-ay-pie{padding:8px 16px;border-top:1px solid #e2e8f0;display:flex;gap:8px;flex-wrap:wrap;background:#f8fafc;align-items:center}
 .ttx-ay-pie small{color:#64748b;margin-right:auto}
+@media(max-height:720px){
+.ttx-wiz .ttx-card{max-height:98vh}
+.ttx-wh{padding:8px 14px 6px}
+.ttx-wiz-sub{display:none !important}
+.ttx-step em{display:none}
+.ttx-wb{padding:8px 14px}
+.ttx-wiz .ttx-wf{padding:8px 14px}
+.ttx-wiz .ttx-nota{display:none}
+}
 @media(max-width:720px){.ttx-bienv{flex-direction:column}.ttx-bienv .ttx-izq{flex:0 0 auto;padding:16px}.ttx-bienv .ttx-mc,.ttx-bienv .ttx-izq p{display:none}.ttx-ay-c{flex-direction:column}.ttx-ay-toc{flex:0 0 auto;max-height:130px;border-right:none;border-bottom:1px solid #e2e8f0}.ttx-perm{grid-template-columns:1fr}.ttx-op{flex-direction:column}.ttx-2{flex-direction:column;gap:0}}
 </style><style id="ttx-estilos">
 .ttx-back{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;padding:14px;font-family:'Segoe UI',system-ui,Tahoma,Arial,sans-serif;box-sizing:border-box;color:#e2e8f0}
@@ -20494,12 +20690,27 @@ $global:extrasHtml = @'
 .ttx-b:hover{filter:brightness(1.1)}.ttx-b.ttx-g{background:#e2e8f0;color:#334155}.ttx-b.ttx-v{background:#15803d}.ttx-b[disabled]{opacity:.5;cursor:default}
 .ttx-b.ttx-link{background:none;color:#64748b;font-weight:600;padding:10px 6px;text-decoration:underline}
 .ttx-ver-t{font-size:11px;color:#94a3b8;margin-top:10px;text-align:right}
-.ttx-wiz{z-index:55;background:rgba(2,6,23,.82)}
-.ttx-wiz .ttx-card{width:min(680px,100%);padding:0;display:flex;flex-direction:column}
-.ttx-wh{padding:18px 24px 12px;border-bottom:1px solid #e2e8f0}
-.ttx-wh .ttx-pa{font-size:12px;color:#64748b}.ttx-wh h2{margin:2px 0 8px;font-size:20px;color:#1e3a8a}
-.ttx-pts{display:flex;gap:6px}.ttx-pts i{flex:1;height:5px;border-radius:3px;background:#e2e8f0}.ttx-pts i.ttx-on{background:#2563eb}.ttx-pts i.ttx-ok{background:#16a34a}
-.ttx-wb{padding:16px 24px;overflow:auto;min-height:260px}
+.ttx-wiz{z-index:55;background:rgba(2,6,23,.82);align-items:center;justify-content:center;padding:12px}
+.ttx-wiz .ttx-card{width:min(720px,96vw);max-height:min(96vh,900px);height:auto;padding:0;display:flex;flex-direction:column;overflow:hidden}
+.ttx-wh{padding:12px 18px 8px;border-bottom:1px solid #e2e8f0;flex:0 0 auto}
+.ttx-wh .ttx-pa{font-size:11px;color:#64748b}.ttx-wh h2{margin:2px 0 6px;font-size:17px;color:#1e3a8a}
+.ttx-wiz-title{margin:0 0 2px;font-size:16px !important}
+.ttx-wiz-sub{margin:0 0 8px !important;font-size:12px !important}
+.ttx-pts{display:flex;gap:4px;flex-wrap:wrap;justify-content:center;margin:6px 0 8px !important}
+.ttx-pts i{flex:1;height:4px;border-radius:3px;background:#e2e8f0;min-width:24px}.ttx-pts i.ttx-on{background:#2563eb}.ttx-pts i.ttx-ok{background:#16a34a}
+.ttx-step{min-width:56px !important}
+.ttx-step b{width:22px !important;height:22px !important;font-size:11px !important}
+.ttx-step em{font-size:9px !important;max-width:70px !important}
+.ttx-wb{padding:10px 18px;overflow:auto;flex:1 1 auto;min-height:0;max-height:none}
+.ttx-wiz .ttx-wf{flex:0 0 auto;padding:10px 18px;border-top:1px solid #e2e8f0}
+.ttx-wiz .ttx-f{margin-bottom:8px}
+.ttx-wiz .ttx-f label{margin-bottom:2px;font-size:12px}
+.ttx-wiz .ttx-f input,.ttx-wiz .ttx-f select{padding:7px 9px;font-size:13px}
+.ttx-wiz .ttx-nota{font-size:12px;margin:0 0 8px;padding:8px 10px}
+.ttx-wiz .ttx-2{gap:8px}
+.ttx-wiz .ttx-op{gap:8px;margin-bottom:8px}
+.ttx-wiz .ttx-op label{padding:8px 10px}
+.ttx-wiz .ttx-vrow{padding:8px;margin-bottom:6px}
 .ttx-wf{padding:12px 24px 16px;border-top:1px solid #e2e8f0;display:flex;gap:10px;align-items:center}
 .ttx-wf .ttx-sp{flex:1}
 .ttx-f{margin-bottom:11px}.ttx-f label{display:block;font-size:12px;font-weight:600;color:#475569;margin-bottom:3px}
@@ -20537,6 +20748,15 @@ $global:extrasHtml = @'
 .ttx-ay-cu mark{background:#fde68a;border-radius:3px}
 .ttx-ay-pie{padding:8px 16px;border-top:1px solid #e2e8f0;display:flex;gap:8px;flex-wrap:wrap;background:#f8fafc;align-items:center}
 .ttx-ay-pie small{color:#64748b;margin-right:auto}
+@media(max-height:720px){
+.ttx-wiz .ttx-card{max-height:98vh}
+.ttx-wh{padding:8px 14px 6px}
+.ttx-wiz-sub{display:none !important}
+.ttx-step em{display:none}
+.ttx-wb{padding:8px 14px}
+.ttx-wiz .ttx-wf{padding:8px 14px}
+.ttx-wiz .ttx-nota{display:none}
+}
 @media(max-width:720px){.ttx-bienv{flex-direction:column}.ttx-bienv .ttx-izq{flex:0 0 auto;padding:16px}.ttx-bienv .ttx-mc,.ttx-bienv .ttx-izq p{display:none}.ttx-ay-c{flex-direction:column}.ttx-ay-toc{flex:0 0 auto;max-height:130px;border-right:none;border-bottom:1px solid #e2e8f0}.ttx-perm{grid-template-columns:1fr}.ttx-op{flex-direction:column}.ttx-2{flex-direction:column;gap:0}}
 </style>
 <script id="ttx-pdf">
@@ -21272,10 +21492,9 @@ function arrancar() {
     api('/api/licencia').then(function (rl) {
       info.licencia = rl.d;
       splash(function () {
-        bienvenida(info, function () {
-          api('/api/instalacion/completar', { bienvenida: true });
-          if (MODO === 'pc') TTAsistente.abrir();
-        });
+        // Solo el asistente de configuración inicial (sin pantalla de bienvenida aparte).
+        api('/api/instalacion/completar', { bienvenida: true });
+        if (MODO === 'pc' && window.TTAsistente) TTAsistente.abrir();
       });
     });
   });
