@@ -12927,7 +12927,7 @@ TT.iniciar('vendedor');
     </div>
   </div>
 
-  <div id="menuOverlay" style="display:none; position:fixed; inset:0; background:rgba(15,23,42,0.55); z-index:45;" onclick="if (event.target === this) cerrarMenu()">
+  <div id="menuOverlay" style="display:none; position:fixed; inset:0; background:rgba(15,23,42,0.55); z-index:200;" onclick="if (event.target === this) cerrarMenu()">
     <div style="background:var(--tt-f1f5f9,#f1f5f9); border-radius:0 0 16px 16px; max-height:92vh; overflow:auto; padding-bottom:6px;">
       <div style="display:flex; justify-content:space-between; align-items:center; padding:14px 16px; background:var(--tt-1e293b,#1e293b); color:var(--tt-ffffff,#fff);">
         <strong style="font-size:16px;">Ajustes</strong>
@@ -12992,7 +12992,11 @@ TT.iniciar('vendedor');
           <span id="barrasRed" class="n0" onclick="abrirDiagnostico()" style="transform:scale(1.7); transform-origin:left bottom; margin:0 22px 4px 4px;"><i></i><i></i><i></i><i></i></span>
           <span id="msRed" onclick="abrirDiagnostico()" style="font-size:14px; color:#64748b;"></span>
         </div>
+        <p id="infoServidorMovil" style="font-size:12px; color:#64748b; margin:6px 0 8px; word-break:break-all;">Servidor: ...</p>
         <button class="btn btn-secundario" onclick="abrirDiagnostico()">Ver diagn&oacute;stico de la se&ntilde;al</button>
+        <button class="btn btn-secundario" style="margin-top:8px;" onclick="reconectarAhora()">Reconectar ahora</button>
+        <button class="btn btn-secundario" style="margin-top:8px; border:1px solid var(--tt-2563eb,#2563eb); color:var(--tt-2563eb,#2563eb);" onclick="escanearQRServidorDesdeAjustes()">Escanear QR del servidor</button>
+        <button class="btn btn-secundario" style="margin-top:8px;" onclick="cambiarIPServidorManual()">Escribir IP / enlace del servidor</button>
       </div>
 
       <div class="section" id="secPOS">
@@ -13414,7 +13418,16 @@ TT.iniciar('vendedor');
       poner(ok ? '\u2714' : '\u2716', true);
       setTimeout(() => { poner('\u21bb', false); reconectando = false; }, 2000);
     }
-    function abrirMenu() { document.getElementById('menuOverlay').style.display = 'block'; }
+    function abrirMenu() {
+      try {
+        // Nunca bloquear Ajustes aunque la red este caída
+        var ov = document.getElementById('menuOverlay');
+        if (!ov) return;
+        ov.style.display = 'block';
+        ov.style.zIndex = '200';
+        try { pintarInfoServidorMovil(); } catch (e) {}
+      } catch (e) { try { alert('Ajustes'); } catch (e2) {} }
+    }
     function activarModoCliente() { cerrarMenu(); document.body.classList.add('modoCliente'); document.getElementById('buscador').value=''; buscar(); document.getElementById('buscador').focus(); }
     // Salir del modo cliente = el vendedor vuelve a usar su telefono: se pide el
     // PIN para verificar su identidad. Se valida contra la PC (el PIN puesto
@@ -13727,15 +13740,23 @@ TT.iniciar('vendedor');
     }
 
     // ---- Catalogo (centralizado en la PC) ----
+    async function fetchConTiempo(url, ms) {
+      ms = ms || 5000;
+      const ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+      const t = ctrl ? setTimeout(function () { try { ctrl.abort(); } catch (e) {} }, ms) : null;
+      try {
+        return await fetch(url, { cache: 'no-store', signal: ctrl ? ctrl.signal : undefined });
+      } finally { if (t) clearTimeout(t); }
+    }
     async function cargarCatalogo() {
       const info = document.getElementById('estadoCatalogo');
       try {
-        const res = await fetch('/api/catalogo');
+        const res = await fetchConTiempo('/api/catalogo', 6000);
         const datosCat = await res.json();
         if (!res.ok || !Array.isArray(datosCat)) throw new Error('catalogo');
         catalogo = datosCat;
         try {
-          const resCfg = await fetch('/api/config');
+          const resCfg = await fetchConTiempo('/api/config', 4000);
           if (resCfg.ok) {
             const cfg = await resCfg.json();
             ocultarSinStock = !!cfg.ocultarSinStock;
@@ -15018,26 +15039,7 @@ TT.iniciar('vendedor');
           if (err) { err.style.display = 'block'; err.textContent = 'No se leyó ningún código.'; }
           return;
         }
-        const enlace = normalizarEnlaceServidor(bruto);
-        if (!enlace) {
-          if (err) { err.style.display = 'block'; err.textContent = 'Ese QR no es del servidor de pedidos. En la PC usa Alt+Q (QR para vendedores).'; }
-          return;
-        }
-        // Recordar en el teléfono (sirve si la app vuelve a abrir sin red)
-        try {
-          const u = new URL(enlace);
-          localStorage.setItem('ttNombreNegocio', localStorage.getItem('ttNombreNegocio') || '');
-          localStorage.setItem('ttServidorBase', u.origin);
-        } catch (e) {}
-        if (err) { err.style.display = 'block'; err.style.color = '#166534'; err.textContent = 'Servidor encontrado. Abriendo...'; }
-        // Si ya estamos en esa misma dirección, solo recarga
-        try {
-          if (location.href.split('#')[0].replace(/\/+$/, '') === enlace.replace(/\/+$/, '')) {
-            location.reload();
-            return;
-          }
-        } catch (e) {}
-        location.href = enlace;
+        await aplicarEnlaceServidor(bruto, err);
       } catch (e) {
         if (err) {
           err.style.display = 'block';
@@ -15047,6 +15049,58 @@ TT.iniciar('vendedor');
       } finally {
         if (btn) { btn.disabled = false; btn.textContent = 'Escanear QR del servidor'; }
       }
+    }
+    function pintarInfoServidorMovil() {
+      var el = document.getElementById('infoServidorMovil');
+      if (!el) return;
+      var txt = 'Servidor actual: ' + (location.origin || '(desconocido)');
+      try {
+        var guardado = localStorage.getItem('ttServidorBase');
+        if (guardado && guardado !== location.origin) txt += '\nGuardado: ' + guardado;
+      } catch (e) {}
+      el.textContent = txt;
+    }
+    async function aplicarEnlaceServidor(bruto, errEl) {
+      const enlace = normalizarEnlaceServidor(bruto);
+      if (!enlace) {
+        if (errEl) { errEl.style.display = 'block'; errEl.textContent = 'Ese QR/enlace no es del servidor de pedidos. En la PC usa Alt+Q.'; }
+        else alert('Ese QR/enlace no es del servidor de pedidos. En la PC usa Alt+Q.');
+        return false;
+      }
+      try {
+        const u = new URL(enlace);
+        localStorage.setItem('ttServidorBase', u.origin);
+      } catch (e) {}
+      if (errEl) { errEl.style.display = 'block'; errEl.style.color = '#166534'; errEl.textContent = 'Servidor encontrado. Abriendo...'; }
+      try {
+        if (location.href.split('#')[0].replace(/\/+$/, '') === enlace.replace(/\/+$/, '')) {
+          location.reload();
+          return true;
+        }
+      } catch (e) {}
+      location.href = enlace;
+      return true;
+    }
+    async function escanearQRServidorDesdeAjustes() {
+      try {
+        const bruto = await escanearCodigoUnaVez();
+        if (!bruto) { alert('No se leyó ningún código.'); return; }
+        await aplicarEnlaceServidor(bruto, null);
+      } catch (e) {
+        alert((e && e.message) ? e.message : 'No se pudo abrir la cámara.');
+      }
+    }
+    function cambiarIPServidorManual() {
+      var actual = location.host || '';
+      try {
+        var g = localStorage.getItem('ttServidorBase');
+        if (g) actual = g.replace(/^https?:\/\//i, '');
+      } catch (e) {}
+      var r = prompt('IP o enlace del servidor de la PC (ej. 192.168.1.10:8080 o http://192.168.1.10:8080/vendedor):', actual);
+      if (r === null) return;
+      r = String(r || '').trim();
+      if (!r) { alert('No escribiste ninguna dirección.'); return; }
+      aplicarEnlaceServidor(r, null);
     }
 
 
