@@ -5066,8 +5066,20 @@ function Qr-DebeImprimirse($q, $p) {
 function Agregar-EncabezadoNegocio($sb, [int]$ancho, [string]$grande, [string]$normal) {
     $rc = $global:reciboCfg
     if ($rc.logo -and $rc.logo.activo) { [void]$sb.AppendLine(([string][char]1) + "LOGO" + ([string][char]1)) }
-    foreach ($l in @(Partir-Texto ([string]$rc.nombre) $ancho)) { [void]$sb.AppendLine($grande + (Centrar $l $ancho) + $normal) }
-    if ($rc.nit) { [void]$sb.AppendLine($grande + (Centrar ("NIT: " + $rc.nit) $ancho) + $normal) }
+    # Solo nombre y NIT en grande/negrita. Se fuerza modo normal DESPUES de cada linea
+    # (muchas termicas dejan el modo activo si no se resetea bien).
+    foreach ($l in @(Partir-Texto ([string]$rc.nombre) $ancho)) {
+        if ($grande) { [void]$sb.Append($grande) }
+        [void]$sb.AppendLine((Centrar $l $ancho))
+        if ($normal) { [void]$sb.Append($normal) }
+    }
+    if ($rc.nit) {
+        if ($grande) { [void]$sb.Append($grande) }
+        [void]$sb.AppendLine((Centrar ("NIT: " + $rc.nit) $ancho))
+        if ($normal) { [void]$sb.Append($normal) }
+    }
+    # A partir de aqui TODO en tamaño normal (direccion, tel, resto del ticket)
+    if ($normal) { [void]$sb.Append($normal) }
     foreach ($l in @(Partir-Texto ([string]$rc.direccion) $ancho)) { [void]$sb.AppendLine((Centrar $l $ancho)) }
     if ($rc.telefono) {
         foreach ($l in @(Partir-Texto ("Tel: " + $rc.telefono) $ancho)) { [void]$sb.AppendLine((Centrar $l $ancho)) }
@@ -5078,6 +5090,7 @@ function Agregar-EncabezadoNegocio($sb, [int]$ancho, [string]$grande, [string]$n
             foreach ($l in @(Partir-Texto $linea $ancho)) { [void]$sb.AppendLine((Centrar $l $ancho)) }
         }
     }
+    if ($normal) { [void]$sb.Append($normal) }
 }
 
 function Escribir-ImagenRaster($ms, $img) {
@@ -5740,6 +5753,8 @@ function Generar-TextoRecibo($p) {
 
     # ---- Encabezado (logo, nombre, NIT, direccion, telefono, texto extra) ----
     Agregar-EncabezadoNegocio $sb $ancho $grande $normal
+    # Por si la impresora dejo el modo grande: el cuerpo del ticket es siempre normal
+    if ($normal) { [void]$sb.Append($normal) }
     [void]$sb.AppendLine("")
 
     $fecha = [string]$p.hora
@@ -5777,23 +5792,23 @@ function Generar-TextoRecibo($p) {
     # ---- Totales ----
     [void]$sb.AppendLine($sep)
     [void]$sb.AppendLine("")
-    [void]$sb.AppendLine($grande + (Linea-LR "SUBTOTAL:" (Formato-Monto $total) $ancho) + $normal)
+    [void]$sb.AppendLine((Linea-LR "SUBTOTAL:" (Formato-Monto $total) $ancho))
     if ($rc.mostrarServicioDescuento) {
-        [void]$sb.AppendLine($grande + (Linea-LR "SERVICIO:" "0.0" $ancho) + $normal)
-        [void]$sb.AppendLine($grande + "DESCUENTO %:" + $normal)
+        [void]$sb.AppendLine((Linea-LR "SERVICIO:" "0.0" $ancho))
+        [void]$sb.AppendLine("DESCUENTO %:")
     }
     [void]$sb.AppendLine($sep)
-    [void]$sb.AppendLine($grande + (Linea-LR "TOTAL CUP:" (Formato-Monto $total) $ancho) + $normal)
+    [void]$sb.AppendLine((Linea-LR "TOTAL CUP:" (Formato-Monto $total) $ancho))
 
     $tasa = 0.0
     try { $tasa = [double]$global:configApp.tasaDolar } catch {}
     if ($tasa -gt 0 -and $rc.mostrarUSD) {
-        [void]$sb.AppendLine($grande + (Linea-LR "TOTAL USD:" (Formato-Monto ($total / $tasa)) $ancho) + $normal)
+        [void]$sb.AppendLine((Linea-LR "TOTAL USD:" (Formato-Monto ($total / $tasa)) $ancho))
     }
     [void]$sb.AppendLine("")
 
     $etiquetaPago = if ([string]$p.estado -eq "cobrado") { "PAGADO:" } else { "POR COBRAR:" }
-    [void]$sb.AppendLine($grande + (Linea-LR $etiquetaPago (Formato-Monto $total) $ancho) + $normal)
+    [void]$sb.AppendLine((Linea-LR $etiquetaPago (Formato-Monto $total) $ancho))
     $textoMetodo = switch ($metodo) {
         "Transferencia" { "Pago por transferencia" }
         "USD"           { "Pago en dolares (USD)" }
@@ -5816,7 +5831,11 @@ function Generar-TextoRecibo($p) {
         if (-not $q) { continue }
         if (-not (Qr-DebeImprimirse $q $p)) { continue }
         [void]$sb.AppendLine($sep)
-        foreach ($l in @(Partir-Texto ([string]$q.titulo) $ancho)) { [void]$sb.AppendLine($grande + (Centrar $l $ancho) + $normal) }
+        foreach ($l in @(Partir-Texto ([string]$q.titulo) $ancho)) {
+            if ($grande) { [void]$sb.Append($grande) }
+            [void]$sb.AppendLine((Centrar $l $ancho))
+            if ($normal) { [void]$sb.Append($normal) }
+        }
         foreach ($l in @(Partir-Texto ([string]$q.instruccion) $ancho)) { [void]$sb.AppendLine((Centrar $l $ancho)) }
         [void]$sb.AppendLine(([string][char]1) + "QR" + $i + ([string][char]1))
     }
@@ -5933,8 +5952,11 @@ function Generar-TextoGasto($r) {
         $nom = [string]$rc.nombre; if (-not $nom) { $nom = "MI NEGOCIO" }
         [void]$sb.AppendLine((Centrar $nom $ancho))
     }
+    if ($normal) { [void]$sb.Append($normal) }
     [void]$sb.AppendLine($sep)
-    [void]$sb.AppendLine($grande + (Centrar "GASTO" $ancho) + $normal)
+    if ($grande) { [void]$sb.Append($grande) }
+    [void]$sb.AppendLine((Centrar "GASTO" $ancho))
+    if ($normal) { [void]$sb.Append($normal) }
     [void]$sb.AppendLine($sep)
     $fecha = [string]$r.hora
     try { $fecha = ([datetime]::ParseExact([string]$r.hora, "yyyy-MM-dd HH:mm:ss", $inv)).ToString("d/M/yyyy HH:mm", $inv) } catch {}
@@ -5944,7 +5966,8 @@ function Generar-TextoGasto($r) {
     if ($r.categoria) { [void]$sb.AppendLine("Categoria: $($r.categoria)") }
     if ($r.metodo) { [void]$sb.AppendLine("Metodo: $($r.metodo)") }
     [void]$sb.AppendLine($sep)
-    [void]$sb.AppendLine($grande + (Linea-LR "MONTO:" ("$" + (Formato-Monto ([double]$r.monto))) $ancho) + $normal)
+    if ($normal) { [void]$sb.Append($normal) }
+    [void]$sb.AppendLine((Linea-LR "MONTO:" ("$" + (Formato-Monto ([double]$r.monto))) $ancho))
     [void]$sb.AppendLine($sep)
     if ($r.realizadoPor) { foreach ($l in @(Partir-Texto ("Realizado por: " + [string]$r.realizadoPor) $ancho)) { [void]$sb.AppendLine($l) } }
     if ($r.notas) { foreach ($l in @(Partir-Texto ("Notas: " + [string]$r.notas) $ancho)) { [void]$sb.AppendLine($l) } }
@@ -5972,8 +5995,11 @@ function Generar-TextoFiado($r) {
         $nom = [string]$rc.nombre; if (-not $nom) { $nom = "MI NEGOCIO" }
         [void]$sb.AppendLine((Centrar $nom $ancho))
     }
+    if ($normal) { [void]$sb.Append($normal) }
     [void]$sb.AppendLine($sep)
-    [void]$sb.AppendLine($grande + (Centrar "CUENTA POR COBRAR" $ancho) + $normal)
+    if ($grande) { [void]$sb.Append($grande) }
+    [void]$sb.AppendLine((Centrar "CUENTA POR COBRAR" $ancho))
+    if ($normal) { [void]$sb.Append($normal) }
     [void]$sb.AppendLine((Centrar "(FIADO)" $ancho))
     [void]$sb.AppendLine($sep)
     $fecha = [string]$r.hora
@@ -5997,7 +6023,8 @@ function Generar-TextoFiado($r) {
     }
     if ([double]$r.monto -gt 0) { $total = [double]$r.monto }
     [void]$sb.AppendLine($sep)
-    [void]$sb.AppendLine($grande + (Linea-LR "TOTAL FIADO:" ("$" + (Formato-Monto $total)) $ancho) + $normal)
+    if ($normal) { [void]$sb.Append($normal) }
+    [void]$sb.AppendLine((Linea-LR "TOTAL FIADO:" ("$" + (Formato-Monto $total)) $ancho))
     $est = [string]$r.estado
     if (-not $est) { $est = "PENDIENTE" }
     [void]$sb.AppendLine("Estado: $est")
@@ -6027,7 +6054,9 @@ function Generar-TextoPagoFiado($r) {
         [void]$sb.AppendLine((Centrar $nom $ancho))
     }
     [void]$sb.AppendLine($sep)
-    [void]$sb.AppendLine($grande + (Centrar "PAGO DE FIADO" $ancho) + $normal)
+    if ($grande) { [void]$sb.Append($grande) }
+    [void]$sb.AppendLine((Centrar "PAGO DE FIADO" $ancho))
+    if ($normal) { [void]$sb.Append($normal) }
     [void]$sb.AppendLine($sep)
     $fecha = (Get-Date).ToString("d/M/yyyy HH:mm", $inv)
     [void]$sb.AppendLine("Fecha pago: $fecha")
@@ -6046,7 +6075,7 @@ function Generar-TextoPagoFiado($r) {
         foreach ($l in @(Partir-Texto ((Formato-Cantidad $cant) + " x " + $nomIt) $ancho)) { [void]$sb.AppendLine($l) }
     }
     [void]$sb.AppendLine($sep)
-    [void]$sb.AppendLine($grande + (Linea-LR "TOTAL PAGADO:" ("$" + (Formato-Monto ([double]$r.monto))) $ancho) + $normal)
+    [void]$sb.AppendLine((Linea-LR "TOTAL PAGADO:" ("$" + (Formato-Monto ([double]$r.monto))) $ancho))
     if ($r.metodoPago) { [void]$sb.AppendLine("Metodo: $($r.metodoPago)") }
     [void]$sb.AppendLine("Estado: PAGADO")
     [void]$sb.AppendLine("")
@@ -11320,7 +11349,7 @@ TT.iniciar('pc');
       const s = document.createElement('style');
       s.id = 'gcCSS';
       s.textContent =
-        '#gcBtn{position:fixed;left:18px;bottom:18px;width:54px;height:54px;border-radius:50%;border:2px solid #fbbf24;background:var(--tt-1e293b,#1e293b);color:#fbbf24;font-size:24px;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,.5);z-index:46;min-height:0 !important;display:flex;align-items:center;justify-content:center;}' +
+        '#gcBtn{position:fixed;right:18px;bottom:18px;width:54px;height:54px;border-radius:50%;border:2px solid #fbbf24;background:var(--tt-1e293b,#1e293b);color:#fbbf24;font-size:24px;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,.5);z-index:46;min-height:0 !important;display:flex;align-items:center;justify-content:center;}' +
         '#gcBtn:hover{background:#0f172a;}' +
         '#gcOverlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);align-items:center;justify-content:center;z-index:60;}' +
         '#gcPanel{background:var(--tt-1e293b,#1e293b);border-radius:14px;max-width:560px;width:96%;max-height:92vh;overflow:auto;padding:18px 18px 14px;border:1px solid var(--tt-334155,#334155);}' +
@@ -11541,8 +11570,21 @@ TT.iniciar('pc');
         const d = await r.json();
         if (!d || !d.ok) { box.innerHTML = ''; msg.textContent = 'No se pudo cargar.'; return; }
         gcRegistros = d.registros || [];
-        if (!gcRegistros.length) { box.innerHTML = '<div style="color:#94a3b8;font-size:13px;">Todavia no hay registros.</div>'; return; }
-        box.innerHTML = '';
+        const totG = (typeof d.totalGastos === 'number') ? d.totalGastos : gcRegistros.filter(function (x) { return x.tipo === 'gasto'; }).reduce(function (s, x) { return s + (parseFloat(x.monto) || 0); }, 0);
+        const totF = (typeof d.totalFiadosPendientes === 'number') ? d.totalFiadosPendientes : 0;
+        if (!gcRegistros.length) {
+          box.innerHTML = '<div style="color:#fbbf24;font-size:14px;font-weight:700;margin-bottom:8px;">Total gastado: $ 0</div><div style="color:#94a3b8;font-size:13px;">Todavia no hay registros.</div>';
+          return;
+        }
+        box.innerHTML =
+          '<div style="background:#0f172a;border:1px solid #334155;border-radius:10px;padding:10px 12px;margin-bottom:12px;">' +
+            '<div style="font-size:15px;font-weight:700;color:#fbbf24;">Total gastado: $ ' + totG.toLocaleString('es', { maximumFractionDigits: 2 }) + '</div>' +
+            '<div style="font-size:13px;color:#94a3b8;margin-top:4px;">Fiados pendientes: $ ' + totF.toLocaleString('es', { maximumFractionDigits: 2 }) + '</div>' +
+            '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:10px;">' +
+              '<button type="button" class="btn-toggle" style="padding:5px 8px;font-size:11px;" id="gcClearGastos">Borrar historial gastos</button>' +
+              '<button type="button" class="btn-toggle" style="padding:5px 8px;font-size:11px;" id="gcClearFiados">Borrar historial fiados</button>' +
+            '</div>' +
+          '</div>';
         gcRegistros.forEach(function (reg) {
           const div = document.createElement('div');
           div.className = 'gc-hist-item';
@@ -11565,10 +11607,51 @@ TT.iniciar('pc');
             '<div style="margin-bottom:6px;">' + detalle + '</div>' +
             '<div style="display:flex;gap:6px;flex-wrap:wrap;">' +
               '<button type="button" class="btn-toggle" style="padding:4px 8px;font-size:12px;" data-imp="' + reg.id + '">Reimprimir</button>' +
+              '<button type="button" class="btn-toggle" style="padding:4px 8px;font-size:12px;background:#7f1d1d;color:#fecaca;" data-del="' + reg.id + '">Eliminar</button>' +
+
               (!esGasto && est === 'PENDIENTE' ? '<button type="button" class="btn-toggle" style="padding:4px 8px;font-size:12px;background:#15803d;color:#fff;" data-pag="' + reg.id + '" data-print="0">Registrar pago</button>' : '') +
               (!esGasto && est === 'PENDIENTE' ? '<button type="button" class="btn-toggle" style="padding:4px 8px;font-size:12px;background:#b45309;color:#fff;" data-pag="' + reg.id + '" data-print="1">Cobrar e imprimir</button>' : '') +
             '</div>';
           box.appendChild(div);
+        });
+                async function gcPedirClaveY(op, id) {
+          const clave = window.prompt('Clave de administrador para confirmar:');
+          if (clave === null) return;
+          if (!String(clave).trim()) { alert('Escribe la clave.'); return; }
+          msg.textContent = 'Procesando...';
+          try {
+            const body = { op: op, clave: String(clave).trim() };
+            if (id != null) body.id = id;
+            const r = await fetch('/api/gastos-cuentas', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+            const d = await r.json().catch(function () { return null; });
+            if (!r.ok || !d || !d.ok) {
+              msg.style.color = '#fca5a5';
+              msg.textContent = (d && d.error) || 'No se pudo completar.';
+              return;
+            }
+            msg.style.color = '#86efac';
+            msg.textContent = 'Listo.';
+            gcCargarHist();
+          } catch (e) {
+            msg.style.color = '#fca5a5';
+            msg.textContent = 'Error de red.';
+          }
+        }
+        const cg = document.getElementById('gcClearGastos');
+        if (cg) cg.onclick = function () {
+          if (!confirm('¿Borrar TODO el historial de gastos? Requiere clave de administrador.')) return;
+          gcPedirClaveY('clear_gastos');
+        };
+        const cf = document.getElementById('gcClearFiados');
+        if (cf) cf.onclick = function () {
+          if (!confirm('¿Borrar TODO el historial de cuentas por cobrar (fiados)? Requiere clave de administrador.')) return;
+          gcPedirClaveY('clear_fiados');
+        };
+        box.querySelectorAll('[data-del]').forEach(function (b) {
+          b.onclick = function () {
+            if (!confirm('¿Eliminar este registro? Requiere clave de administrador.')) return;
+            gcPedirClaveY('del', parseInt(b.getAttribute('data-del'), 10));
+          };
         });
         box.querySelectorAll('[data-imp]').forEach(function (b) {
           b.onclick = async function () {
@@ -14953,7 +15036,14 @@ TT.iniciar('vendedor');
       const enModoCliente = document.body.classList.contains('modoCliente');
       if (!q && !enModoCliente) { cont.innerHTML = ''; renderRecientes(); return; }
       const base = ocultandoSinStock() ? catalogo.filter(p => !productoSinStock(p)) : catalogo;
-      const filtrados = q ? buscarProductos(base, document.getElementById('buscador').value) : base;
+      let filtrados = q ? buscarProductos(base, document.getElementById('buscador').value) : base.slice();
+      try {
+        filtrados = filtrados.slice().sort(function (a, b) {
+          const sa = (a.stock == null || isNaN(Number(a.stock))) ? 1 : (Number(a.stock) > 0 ? 0 : 2);
+          const sb = (b.stock == null || isNaN(Number(b.stock))) ? 1 : (Number(b.stock) > 0 ? 0 : 2);
+          return sa - sb;
+        });
+      } catch (eSort) {}
       const encontrados = enModoCliente ? filtrados : filtrados.slice(0, 25);
 
       const htmlRes = encontrados.map(p => {
@@ -23941,7 +24031,15 @@ while ($listener.IsListening) {
                 Enviar-Json $context @{ ok = $false; error = "Solo desde la PC." } 403
             } else {
                 $listaG = @($global:gastosCuentas.registros | Sort-Object { try { [datetime]::ParseExact([string]$_.hora, "yyyy-MM-dd HH:mm:ss", $null) } catch { [datetime]::MinValue } } -Descending)
-                Enviar-Json $context @{ ok = $true; registros = @($listaG) } 200 6
+                $totalGastos = 0.0
+                $totalFiadosPend = 0.0
+                foreach ($rg in @($global:gastosCuentas.registros)) {
+                    if (-not $rg) { continue }
+                    $m = 0.0; try { $m = [double]$rg.monto } catch { $m = 0 }
+                    if ([string]$rg.tipo -eq "gasto") { $totalGastos += $m }
+                    elseif ([string]$rg.tipo -eq "fiado" -and [string]$rg.estado -ne "PAGADO") { $totalFiadosPend += $m }
+                }
+                Enviar-Json $context @{ ok = $true; registros = @($listaG); totalGastos = [math]::Round($totalGastos, 2); totalFiadosPendientes = [math]::Round($totalFiadosPend, 2) } 200 6
             }
 
         } elseif ($method -eq "POST" -and $path -eq "/api/gastos-cuentas") {
