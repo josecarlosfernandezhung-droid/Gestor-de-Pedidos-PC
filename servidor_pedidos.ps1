@@ -11362,8 +11362,13 @@ TT.iniciar('pc');
         '.gc-tipo button.activo{background:#b45309;color:#fff;border-color:#fbbf24;}' +
         '.gc-et{display:block;font-size:12px;color:var(--tt-94a3b8,#94a3b8);margin:8px 0 3px;}' +
         '.gc-in{width:100%;padding:8px;border-radius:6px;border:1px solid var(--tt-334155,#334155);background:var(--tt-0f172a,#0f172a);color:var(--tt-e2e8f0,#e2e8f0);font-size:13px;box-sizing:border-box;}' +
-        '.gc-row{display:flex;gap:6px;margin-bottom:6px;align-items:center;}' +
+        '.gc-row{display:flex;gap:6px;margin-bottom:6px;align-items:center;position:relative;}' +
         '.gc-row input{flex:1;}' +
+        '.gc-sug{position:absolute;left:70px;right:90px;top:100%;z-index:5;background:#0f172a;border:1px solid #475569;border-radius:8px;max-height:180px;overflow:auto;box-shadow:0 8px 20px rgba(0,0,0,.45);}' +
+        '.gc-sug div{padding:8px 10px;cursor:pointer;font-size:13px;color:#e2e8f0;border-bottom:1px solid #1e293b;}' +
+        '.gc-sug div:hover{background:#1e293b;}' +
+        '.gc-sug .p{color:#fbbf24;font-weight:700;}' +
+        '.gc-sug .s{color:#94a3b8;font-size:11px;}' +
         '.gc-hist-item{border:1px solid var(--tt-334155,#334155);border-radius:8px;padding:8px 10px;margin-bottom:8px;background:var(--tt-0f172a,#0f172a);font-size:13px;color:var(--tt-e2e8f0,#e2e8f0);}' +
         '.gc-badge{display:inline-block;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:700;}' +
         '.gc-badge.gasto{background:#334155;color:#e2e8f0;}' +
@@ -11445,6 +11450,7 @@ TT.iniciar('pc');
       gcSetTipo(gcTipo);
       if (!gcItems.length) gcAddItem();
       document.getElementById('gcMsg').textContent = '';
+      gcCargarCatalogo();
     }
     function gcCerrar() {
       const o = document.getElementById('gcOverlay');
@@ -11463,9 +11469,42 @@ TT.iniciar('pc');
       document.getElementById('gcTipoFiado').classList.toggle('activo', t === 'fiado');
       document.getElementById('gcFormGasto').style.display = t === 'gasto' ? '' : 'none';
       document.getElementById('gcFormFiado').style.display = t === 'fiado' ? '' : 'none';
+      if (t === 'fiado') gcCargarCatalogo();
+    }
+    let gcCatalogo = [];
+    async function gcCargarCatalogo() {
+      try {
+        const res = await fetch('/api/catalogo');
+        const d = await res.json();
+        gcCatalogo = Array.isArray(d) ? d : ((d && d.productos) || []);
+      } catch (e) { gcCatalogo = []; }
+    }
+    function gcNorm(s) {
+      return String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    }
+    function gcDisponible(p) {
+      if (!p) return false;
+      if (p.stock == null || p.stock === '' || isNaN(Number(p.stock))) return true;
+      return Number(p.stock) > 0;
+    }
+    function gcBuscarCatalogo(q) {
+      const n = gcNorm(q).trim();
+      if (!n || n.length < 1) return [];
+      const out = [];
+      for (let i = 0; i < gcCatalogo.length; i++) {
+        const p = gcCatalogo[i];
+        if (!gcDisponible(p)) continue;
+        const nom = gcNorm(p.nombre);
+        const sku = gcNorm(p.sku);
+        if (nom.indexOf(n) >= 0 || sku.indexOf(n) >= 0) {
+          out.push(p);
+          if (out.length >= 12) break;
+        }
+      }
+      return out;
     }
     function gcAddItem() {
-      gcItems.push({ cantidad: 1, nombre: '', precio: 0 });
+      gcItems.push({ cantidad: 1, nombre: '', precio: 0, sku: '' });
       gcRenderItems();
     }
     function gcRenderItems() {
@@ -11475,21 +11514,59 @@ TT.iniciar('pc');
       gcItems.forEach(function (it, i) {
         const row = document.createElement('div');
         row.className = 'gc-row';
+        row.style.flexWrap = 'wrap';
         row.innerHTML =
           '<input type="number" min="0" step="any" style="max-width:64px;" value="' + (it.cantidad || '') + '" placeholder="Cant" data-i="' + i + '" data-f="cantidad">' +
-          '<input type="text" value="' + (it.nombre || '').replace(/"/g, '&quot;') + '" placeholder="Articulo" data-i="' + i + '" data-f="nombre">' +
-          '<input type="number" min="0" step="any" style="max-width:90px;" value="' + (it.precio || '') + '" placeholder="Precio" data-i="' + i + '" data-f="precio">' +
-          '<button type="button" class="btn-toggle" style="padding:4px 8px;" data-del="' + i + '">X</button>';
+          '<input type="text" value="' + (it.nombre || '').replace(/"/g, '&quot;') + '" placeholder="Escribe para buscar..." data-i="' + i + '" data-f="nombre" autocomplete="off" style="min-width:140px;flex:2;">' +
+          '<input type="number" min="0" step="any" style="max-width:90px;" value="' + (it.precio || '') + '" placeholder="Precio" data-i="' + i + '" data-f="precio" readonly title="Se rellena al elegir del catalogo">' +
+          '<button type="button" class="btn-toggle" style="padding:4px 8px;" data-del="' + i + '">X</button>' +
+          '<div class="gc-sug" data-sug="' + i + '" style="display:none;width:100%;position:relative;left:0;right:0;top:0;"></div>';
         box.appendChild(row);
       });
       box.querySelectorAll('input').forEach(function (inp) {
-        inp.addEventListener('input', function () {
-          const i = parseInt(inp.getAttribute('data-i'), 10);
-          const f = inp.getAttribute('data-f');
-          if (f === 'nombre') gcItems[i].nombre = inp.value;
-          else gcItems[i][f] = parseFloat(String(inp.value).replace(',', '.')) || 0;
-          gcTotal();
-        });
+        const f = inp.getAttribute('data-f');
+        const i = parseInt(inp.getAttribute('data-i'), 10);
+        if (f === 'nombre') {
+          inp.addEventListener('input', function () {
+            gcItems[i].nombre = inp.value;
+            gcItems[i].sku = '';
+            const sug = box.querySelector('[data-sug="' + i + '"]');
+            if (!sug) return;
+            const lista = gcBuscarCatalogo(inp.value);
+            if (!lista.length) { sug.style.display = 'none'; sug.innerHTML = ''; return; }
+            sug.style.display = 'block';
+            sug.innerHTML = lista.map(function (p) {
+              const st = (p.stock != null && !isNaN(Number(p.stock))) ? (' · stock ' + p.stock) : '';
+              const pr = (parseFloat(p.precio) || 0).toFixed(2);
+              return '<div data-pick="' + i + '" data-sku="' + String(p.sku || '').replace(/"/g, '&quot;') + '" data-nom="' + String(p.nombre || '').replace(/"/g, '&quot;') + '" data-pre="' + pr + '">' +
+                String(p.nombre || '') + ' <span class="p">$ ' + pr + '</span> <span class="s">' + (p.sku || '') + st + '</span></div>';
+            }).join('');
+            sug.querySelectorAll('[data-pick]').forEach(function (el) {
+              el.addEventListener('mousedown', function (ev) {
+                ev.preventDefault();
+                const ii = parseInt(el.getAttribute('data-pick'), 10);
+                gcItems[ii].nombre = el.getAttribute('data-nom') || '';
+                gcItems[ii].precio = parseFloat(el.getAttribute('data-pre')) || 0;
+                gcItems[ii].sku = el.getAttribute('data-sku') || '';
+                gcRenderItems();
+              });
+            });
+          });
+          inp.addEventListener('blur', function () {
+            setTimeout(function () {
+              const sug = box.querySelector('[data-sug="' + i + '"]');
+              if (sug) { sug.style.display = 'none'; }
+            }, 180);
+          });
+          inp.addEventListener('focus', function () {
+            if ((inp.value || '').trim()) inp.dispatchEvent(new Event('input'));
+          });
+        } else {
+          inp.addEventListener('input', function () {
+            gcItems[i][f] = parseFloat(String(inp.value).replace(',', '.')) || 0;
+            gcTotal();
+          });
+        }
       });
       box.querySelectorAll('[data-del]').forEach(function (b) {
         b.addEventListener('click', function () {
@@ -24162,10 +24239,44 @@ while ($listener.IsListening) {
                             else { Enviar-Json $context @{ ok = $false; error = "Windows no confirmo la impresion." } 500 }
                         } catch { Enviar-Json $context @{ ok = $false; error = "$($_.Exception.Message)" } 500 }
                     }
-                } elseif ($opG -eq "del") {
-                    $regG = $global:gastosCuentas.registros | Where-Object { [int]$_.id -eq [int]$dataG.id } | Select-Object -First 1
-                    if ($regG) { [void]$global:gastosCuentas.registros.Remove($regG); Guardar-GastosCuentas }
-                    Enviar-Json $context @{ ok = $true }
+                } elseif ($opG -eq "del" -or $opG -eq "clear_gastos" -or $opG -eq "clear_fiados" -or $opG -eq "clear_all") {
+                    # Borrar uno o vaciar historial: requiere clave de administrador (la del modo POS)
+                    if ([string]::IsNullOrEmpty($global:posClaveHash)) {
+                        Enviar-Json $context @{ ok = $false; error = "Define primero la clave de administrador en Ajustes (PIN / modo punto de venta)." } 400
+                    } else {
+                        $claveDel = ""
+                        try { if ($dataG -and $dataG.clave) { $claveDel = ([string]$dataG.clave).Trim() } } catch { $claveDel = "" }
+                        if (-not $claveDel -or ((Pos-Hash $claveDel) -ne $global:posClaveHash)) {
+                            Enviar-Json $context @{ ok = $false; error = "Clave de administrador incorrecta." } 403
+                        } elseif ($opG -eq "del") {
+                            $regG = $global:gastosCuentas.registros | Where-Object { [int]$_.id -eq [int]$dataG.id } | Select-Object -First 1
+                            if ($regG) {
+                                [void]$global:gastosCuentas.registros.Remove($regG)
+                                Guardar-GastosCuentas
+                            }
+                            Enviar-Json $context @{ ok = $true }
+                        } elseif ($opG -eq "clear_gastos") {
+                            $quedan = New-Object System.Collections.ArrayList
+                            foreach ($rg in @($global:gastosCuentas.registros)) {
+                                if ($rg -and [string]$rg.tipo -ne "gasto") { [void]$quedan.Add($rg) }
+                            }
+                            $global:gastosCuentas.registros = $quedan
+                            Guardar-GastosCuentas
+                            Enviar-Json $context @{ ok = $true }
+                        } elseif ($opG -eq "clear_fiados") {
+                            $quedan = New-Object System.Collections.ArrayList
+                            foreach ($rg in @($global:gastosCuentas.registros)) {
+                                if ($rg -and [string]$rg.tipo -ne "fiado") { [void]$quedan.Add($rg) }
+                            }
+                            $global:gastosCuentas.registros = $quedan
+                            Guardar-GastosCuentas
+                            Enviar-Json $context @{ ok = $true }
+                        } else {
+                            $global:gastosCuentas.registros = New-Object System.Collections.ArrayList
+                            Guardar-GastosCuentas
+                            Enviar-Json $context @{ ok = $true }
+                        }
+                    }
                 } else {
                     Enviar-Json $context @{ ok = $false; error = "Operacion no valida." } 400
                 }
