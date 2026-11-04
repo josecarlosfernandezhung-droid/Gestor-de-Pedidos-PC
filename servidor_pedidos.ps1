@@ -9285,7 +9285,7 @@ TT.iniciar('pc');
         const info = await res.json();
         if (info && info.ip) base = 'http://' + info.ip + ':' + info.puerto;
       } catch (e) { /* si falla, se usa location.origin (sirve solo en esta PC) */ }
-      enlaceClienteCache = base + '/vendedor?cliente=1';
+      enlaceClienteCache = base + '/tienda';
       return enlaceClienteCache;
     }
 
@@ -12619,6 +12619,161 @@ TT.iniciar('pc');
 # ------------------------------------------------------------------
 # HTML: App Vendedor (se abre en los telefonos)
 # ------------------------------------------------------------------
+$htmlTienda = @'
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Catálogo</title>
+<style>
+:root{--c:#0a7c86;--on:#fff;--bg:#f3f6f6;--card:#fff;--ink:#14212b;--mut:#62727d;--line:#e2e9ec;--soft:#e6f3f4;--ok:#15803d;--bad:#b91c1c;--r:16px}
+@media (prefers-color-scheme:dark){:root{--bg:#0e1519;--card:#162027;--ink:#e8eff2;--mut:#93a4ae;--line:#25343d;--soft:#1b2b31}}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif}
+button,input{font:inherit;color:inherit}button{cursor:pointer;border:0;background:none;padding:0}img{display:block}
+.wrap{max-width:1100px;margin:0 auto;padding:0 14px}
+.cover{height:120px;background:linear-gradient(135deg,var(--c),#0b3a40);position:relative}
+.hd{margin-top:-36px;position:relative;z-index:1;padding-bottom:10px}
+.logo{width:72px;height:72px;border-radius:20px;border:4px solid var(--bg);background:var(--c);color:var(--on);display:flex;align-items:center;justify-content:center;font-weight:800;font-size:26px;overflow:hidden}
+.logo img{width:100%;height:100%;object-fit:cover}
+h1{margin:8px 0 2px;font-size:22px;line-height:1.2}.fr{color:var(--mut);margin:0}
+.bar{position:sticky;top:0;z-index:5;background:var(--bg);padding:8px 0 6px}
+.in{width:100%;padding:11px 14px;border-radius:12px;border:1px solid var(--line);background:var(--card);outline:0}
+.in:focus{border-color:var(--c)}
+.chips{display:flex;gap:8px;overflow-x:auto;padding:8px 0 2px;scrollbar-width:none}.chips::-webkit-scrollbar{display:none}
+.chip{flex:none;padding:7px 14px;border-radius:99px;background:var(--card);border:1px solid var(--line);font-weight:600;font-size:13.5px;white-space:nowrap}
+.chip.on{background:var(--c);color:var(--on);border-color:var(--c)}
+.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;padding:10px 0 110px}
+@media(min-width:620px){.grid{grid-template-columns:repeat(3,1fr)}}@media(min-width:900px){.grid{grid-template-columns:repeat(4,1fr)}}
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);overflow:hidden;display:flex;flex-direction:column}
+.ph{position:relative;width:100%;padding-top:100%;background:var(--soft)}
+.ph img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.ph .ini{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:40px;font-weight:800;color:var(--mut);opacity:.5}
+.tag{position:absolute;left:8px;top:8px;background:#dc2626;color:#fff;font-weight:800;font-size:11.5px;padding:3px 8px;border-radius:99px}
+.few{position:absolute;right:8px;top:8px;background:#b45309;color:#fff;font-weight:700;font-size:11px;padding:3px 8px;border-radius:99px}
+.cb{padding:10px 12px 12px;display:flex;flex-direction:column;flex:1}
+.cb h3{margin:0 0 4px;font-size:14px;line-height:1.3;font-weight:650;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:2.6em}
+.pr{font-weight:800;font-size:17px;color:var(--c);margin-top:auto}.old{color:var(--mut);font-weight:500;font-size:12.5px;text-decoration:line-through;margin-left:6px}
+.add{margin-top:8px;width:100%;padding:9px;border-radius:12px;background:var(--c);color:var(--on);font-weight:700}
+.qty{margin-top:8px;display:flex;align-items:center;justify-content:space-between;background:var(--soft);border-radius:12px;padding:3px}
+.qty button{width:38px;height:34px;border-radius:10px;background:var(--card);font-size:20px;font-weight:700}.qty b{min-width:30px;text-align:center}
+.empty{text-align:center;color:var(--mut);padding:40px 10px}
+.cartbar{position:fixed;left:0;right:0;bottom:0;padding:10px 14px calc(10px + env(safe-area-inset-bottom));background:var(--bg);border-top:1px solid var(--line);z-index:6}
+.cartbar button{width:100%;max-width:1072px;margin:0 auto;display:flex;justify-content:space-between;padding:14px 18px;border-radius:14px;background:var(--c);color:var(--on);font-weight:800}
+.sheet{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:10;display:none;align-items:flex-end;justify-content:center}.sheet.on{display:flex}
+.pan{background:var(--card);width:100%;max-width:560px;max-height:90vh;overflow:auto;border-radius:20px 20px 0 0;padding:18px 16px calc(18px + env(safe-area-inset-bottom))}
+.pan h2{margin:0 0 10px;font-size:19px}
+.ln{display:flex;gap:10px;align-items:center;padding:8px 0;border-bottom:1px solid var(--line)}.ln span{flex:1;font-size:14px}
+.lbl{display:block;font-weight:700;margin:14px 0 6px;font-size:13.5px}
+.tot{display:flex;justify-content:space-between;font-weight:800;font-size:18px;margin:14px 0 4px}
+.go{margin-top:14px;width:100%;padding:14px;border-radius:14px;background:var(--c);color:var(--on);font-weight:800}.go[disabled]{opacity:.55}
+.sec{margin-top:8px;width:100%;padding:12px;border-radius:14px;background:var(--soft);font-weight:700}
+.msg{margin-top:10px;padding:10px 12px;border-radius:12px;font-weight:600}.msg.bad{background:#fee2e2;color:var(--bad)}.msg.ok{background:#dcfce7;color:var(--ok)}
+.ok-big{text-align:center;padding:20px 6px}.ok-big .e{font-size:54px}
+</style></head><body>
+<div class="cover"></div>
+<div class="wrap">
+ <div class="hd"><div class="logo" id="logo"></div><h1 id="nom"></h1><p class="fr" id="lema"></p></div>
+ <div class="bar"><input class="in" id="q" type="search" placeholder="Buscar producto…" autocomplete="off"><div class="chips" id="chips"></div></div>
+ <div class="grid" id="grid"></div>
+</div>
+<div class="cartbar" id="cb" hidden><button id="vc"><span id="cn"></span><span id="ct"></span></button></div>
+<div class="sheet" id="sh"><div class="pan" id="pan"></div></div>
+<script>
+var D={nombre:'',lema:'',color:'#0a7c86',on:'#fff',logo:'/icon-192.png',cur:'$',cats:[],prods:[]};
+var $=function(i){return document.getElementById(i)};
+function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
+function fmt(n){n=+n||0;return n.toLocaleString('es',{minimumFractionDigits:n%1?2:0,maximumFractionDigits:2})}
+var LIVE={},FOTOS={},CART={},CAT='',Q='',DEST='pc',CARGADO=false,ENVIANDO=false;
+try{CART=JSON.parse(sessionStorage.getItem('tt_cart')||'{}')||{}}catch(e){CART={}}
+function guardaCart(){try{sessionStorage.setItem('tt_cart',JSON.stringify(CART))}catch(e){}}
+document.documentElement.style.setProperty('--c',D.color||'#0a7c86');document.documentElement.style.setProperty('--on',D.on||'#fff');
+document.title=D.nombre||'Catálogo';$('nom').textContent=D.nombre||'Catálogo';$('lema').textContent=D.lema||'';
+function pintaCab(){document.title=D.nombre||'Catálogo';$('nom').textContent=D.nombre||'Catálogo';$('logo').innerHTML='<img src="'+esc(D.logo)+'" alt="" onerror="this.remove()">'}
+pintaCab();
+function lista(){
+  var out=[];
+  D.prods.forEach(function(p){
+    var l=LIVE[p.s];if(!l)return;               /* solo lo que existe en el servidor */
+    var st=l.stock;if(!(st>0))return;            /* solo con cantidad */
+    var pr=l.precio>0?l.precio:p.p;if(!(pr>0))return;
+    var of=p.o>0&&p.o<pr?p.o:0;
+    out.push({s:p.s,n:p.n,c:p.c,pr:of||pr,antes:of?pr:0,st:st,f:!!FOTOS[p.s],d:p.d?1:0});
+  });
+  out.sort(function(a,b){return b.d-a.d||(a.antes?0:1)-(b.antes?0:1)||a.n.localeCompare(b.n,'es')});
+  return out;
+}
+function norm(s){return String(s||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'')}
+function pinta(){
+  var L=lista(),usadas={};L.forEach(function(p){usadas[p.c]=1});
+  var cs='<button class="chip'+(CAT?'':' on')+'" data-c="">Todo</button>';
+  D.cats.forEach(function(c){if(usadas[c.id])cs+='<button class="chip'+(CAT===c.id?' on':'')+'" data-c="'+esc(c.id)+'">'+esc(c.n)+'</button>'});
+  $('chips').innerHTML=D.cats.length?cs:'';
+  var q=norm(Q),h='';
+  L.forEach(function(p){
+    if(CAT&&p.c!==CAT)return;if(q&&norm(p.n).indexOf(q)<0)return;
+    var n=CART[p.s]||0;
+    h+='<div class="card"><div class="ph"><div class="ini">'+esc(p.n.trim().charAt(0).toUpperCase())+'</div>'+(p.f?'<img loading="lazy" src="/foto/'+encodeURIComponent(p.s)+'.jpg" onerror="this.remove()" alt="">':'')+(p.antes?'<span class="tag">OFERTA</span>':'')+(p.st<=3?'<span class="few">Quedan '+fmt(p.st)+'</span>':'')+'</div><div class="cb"><h3>'+esc(p.n)+'</h3><div class="pr">'+esc(D.cur)+' '+fmt(p.pr)+(p.antes?'<span class="old">'+fmt(p.antes)+'</span>':'')+'</div>'+(n?'<div class="qty"><button data-m="'+esc(p.s)+'">−</button><b>'+n+'</b><button data-p="'+esc(p.s)+'">+</button></div>':'<button class="add" data-p="'+esc(p.s)+'">Agregar</button>')+'</div></div>';
+  });
+  $('grid').innerHTML=h||'<div class="empty" style="grid-column:1/-1">'+(CARGADO?(L.length?'No hay productos con ese nombre.':'Por ahora no hay productos disponibles.'):'Cargando…')+'</div>';
+  barra();
+}
+function totales(){var t=0,n=0,L=lista();L.forEach(function(p){var c=CART[p.s]||0;if(c){t+=c*p.pr;n+=c}});return{t:t,n:n,L:L}}
+function barra(){var T=totales();$('cb').hidden=!T.n;$('cn').textContent='Ver pedido · '+T.n+(T.n===1?' producto':' productos');$('ct').textContent=D.cur+' '+fmt(T.t)}
+function stockDe(s){var l=LIVE[s];return l?l.stock:0}
+function mas(s){var c=(CART[s]||0)+1;if(c>stockDe(s)){alert('No hay más unidades disponibles de este producto.');return}CART[s]=c;guardaCart();pinta()}
+function menos(s){var c=(CART[s]||0)-1;if(c<=0)delete CART[s];else CART[s]=c;guardaCart();pinta();if($('sh').classList.contains('on'))abre()}
+$('grid').addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return;if(b.dataset.p)mas(b.dataset.p);else if(b.dataset.m)menos(b.dataset.m)});
+$('chips').addEventListener('click',function(e){var b=e.target.closest('.chip');if(!b)return;CAT=b.dataset.c;pinta()});
+$('q').addEventListener('input',function(){Q=this.value;pinta()});
+$('vc').addEventListener('click',abre);
+$('sh').addEventListener('click',function(e){if(e.target===this)cierra()});
+function cierra(){$('sh').classList.remove('on')}
+var NOMBRE='';try{NOMBRE=localStorage.getItem('tt_nombre')||''}catch(e){}
+function abre(msg){
+  var T=totales();
+  if(!T.n){cierra();return}
+  var h='<h2>Tu pedido</h2>';
+  T.L.forEach(function(p){var c=CART[p.s]||0;if(!c)return;h+='<div class="ln"><span>'+esc(p.n)+'<br><small style="color:var(--mut)">'+esc(D.cur)+' '+fmt(p.pr)+' c/u</small></span><div class="qty" style="margin:0;min-width:116px"><button data-m="'+esc(p.s)+'">−</button><b>'+c+'</b><button data-p="'+esc(p.s)+'">+</button></div></div>'});
+  h+='<div class="tot"><span>Total</span><span>'+esc(D.cur)+' '+fmt(T.t)+'</span></div>';
+  h+='<label class="lbl" for="nm">Tu nombre</label><input class="in" id="nm" value="'+esc(NOMBRE)+'" maxlength="30" autocomplete="name" placeholder="Escribe tu nombre">';
+  h+='<div id="mm"></div><button class="go" id="go">Enviar pedido</button><button class="sec" id="sg">Seguir viendo</button>';
+  $('pan').innerHTML=h;$('sh').classList.add('on');
+  $('pan').onclick=function(e){var b=e.target.closest('button');if(!b)return;if(b.dataset.p)mas(b.dataset.p),abre();else if(b.dataset.m)menos(b.dataset.m);else if(b.id==='sg')cierra();else if(b.id==='go')envia()};
+}
+async function envia(){
+  if(ENVIANDO)return;
+  var nm=($('nm').value||'').trim(),mm=$('mm');
+  if(!nm){mm.innerHTML='<div class="msg bad">Escribe tu nombre para enviar el pedido.</div>';$('nm').focus();return}
+  var T=totales(),items=[];
+  T.L.forEach(function(p){var c=CART[p.s]||0;if(c)items.push({sku:p.s,nombre:p.n,precio:p.pr,precioLista:p.pr,cantidad:c,stock:p.st})});
+  if(!items.length)return;
+  NOMBRE=nm;try{localStorage.setItem('tt_nombre',nm)}catch(e){}
+  ENVIANDO=true;var go=$('go');go.disabled=true;go.textContent='Enviando…';
+  var id='c'+Date.now()+'_'+Math.random().toString(36).slice(2,10);
+  var url='/api/pedidos',body={clienteId:id,vendedor:nm,pin:'',autoservicio:true,items:items,estado:'pendiente',metodoPago:'Efectivo',montoRecibido:null,totalCobrado:Number(T.t.toFixed(2)),cambio:null,pagoEfectivo:null,pagoTransferencia:null,nota:'',clienteNombre:''};
+  if(DEST==='vendedor'){url='/api/pedidos/asignar';body={todos:true,items:items,cliente:nm,claveEnvio:id}}
+  try{
+    var r=await fetch(url,{method:'POST',body:JSON.stringify(body)});var j=await r.json().catch(function(){return null});
+    if(!r.ok||(j&&j.ok===false)){mm.innerHTML='<div class="msg bad">'+esc((j&&j.error)||'No se pudo enviar el pedido.')+'</div>';go.disabled=false;go.textContent='Enviar pedido';ENVIANDO=false;carga();return}
+    CART={};guardaCart();ENVIANDO=false;
+    $('pan').innerHTML='<div class="ok-big"><div class="e">✅</div><h2>¡Pedido enviado!</h2><p>Gracias, '+esc(nm)+'. En un momento te atienden.</p><button class="go" id="ce">Listo</button></div>';
+    $('pan').onclick=function(e){if(e.target.id==='ce')cierra()};pinta();carga();
+  }catch(e){mm.innerHTML='<div class="msg bad">Sin conexión con el servidor. Revisa que estés en la misma WiFi e inténtalo otra vez.</div>';go.disabled=false;go.textContent='Enviar pedido';ENVIANDO=false}
+}
+async function carga(){
+  try{
+    var rs=await Promise.all([fetch('/api/catalogo',{cache:'no-store'}),fetch('/api/fotos/skus',{cache:'no-store'}).catch(function(){return null}),fetch('/api/config',{cache:'no-store'}).catch(function(){return null})]);
+    var cat=await rs[0].json();if(!Array.isArray(cat))throw 0;
+    var L={},P=[];cat.forEach(function(p){var s=String(p.sku);L[s]={stock:(p.stock===null||p.stock===undefined)?0:Number(p.stock),precio:Number(p.precio)||0};P.push({s:s,n:String(p.nombre||s),c:'',p:Number(p.precio)||0,o:0,d:0})});LIVE=L;D.prods=P;
+    if(rs[1]&&rs[1].ok){var f=await rs[1].json();FOTOS={};(f||[]).forEach(function(s){FOTOS[s]=1})}
+    if(rs[2]&&rs[2].ok){var c=await rs[2].json();if(c.nombreNegocio||c.negocioNombre){D.nombre=c.nombreNegocio||c.negocioNombre;pintaCab()}DEST=c.autoservicioDestino==='vendedor'?'vendedor':'pc'}
+    CARGADO=true;
+    var ab=$('sh').classList.contains('on')&&$('nm');if(!ab)pinta();else barra();
+  }catch(e){if(!CARGADO){$('grid').innerHTML='<div class="empty" style="grid-column:1/-1">No se pudo cargar el catálogo. Revisa tu conexión WiFi.</div>'}}
+}
+pinta();carga();setInterval(function(){if(!document.hidden&&!ENVIANDO)carga()},45000);
+document.addEventListener('visibilitychange',function(){if(!document.hidden)carga()});
+</script></body></html>
+'@
 $htmlVendedor = @'
 <!DOCTYPE html>
 <html lang="es">
@@ -22664,6 +22819,10 @@ while ($listener.IsListening) {
         } elseif ($method -eq "GET" -and ($path -eq "/" -or $path -eq "/pc")) {
             Enviar-Respuesta -Context $context -Body (Inyectar-Extras (Inyectar-Admin (Inyectar-Guardian $htmlPC)) 'pc')
 
+        } elseif ($method -eq "GET" -and $path -eq "/tienda") {
+            # Catalogo para clientes generado por el propio servidor: solo productos con cantidad, el cliente pone solo su nombre.
+            Enviar-Respuesta -Context $context -Body $htmlTienda
+
         } elseif ($method -eq "GET" -and $path -eq "/vendedor") {
             Enviar-Respuesta -Context $context -Body (Inyectar-Extras (Inyectar-Guardian $htmlVendedor) 'vendedor')
 
@@ -22752,9 +22911,13 @@ while ($listener.IsListening) {
                 if ($null -ne $prT.stock) { $stT = [math]::Round([double]$prT.stock, 4) }
                 $vdT = 0.0
                 if ($hayVentas -and $mapaV.ContainsKey([string]$prT.sku)) { $vdT = [math]::Max(0.0, [double]$mapaV[[string]$prT.sku]) }
-                [void]$listaT.Add([pscustomobject]@{ sku = [string]$prT.sku; nombre = [string]$prT.nombre; stock = $stT; vendido = $vdT })
+                $pxT = $null
+                if ($null -ne $prT.precio) { $pxT = [math]::Round([double]$prT.precio, 2) }
+                [void]$listaT.Add([pscustomobject]@{ sku = [string]$prT.sku; nombre = [string]$prT.nombre; precio = $pxT; stock = $stT; vendido = $vdT })
             }
-            $outT = [pscustomobject]@{ ok = $true; cantidad = $listaT.Count; dias = $diasT; ventas = $hayVentas; avisoVentas = $avisoV; origen = [string]$global:catalogoInfo.origen; items = @($listaT) }
+            $tasaT = 0.0
+            try { $tasaT = [double]$global:configApp.tasaDolar } catch { $tasaT = 0.0 }
+            $outT = [pscustomobject]@{ ok = $true; cantidad = $listaT.Count; dias = $diasT; ventas = $hayVentas; avisoVentas = $avisoV; origen = [string]$global:catalogoInfo.origen; tasaDolar = $tasaT; items = @($listaT) }
             Enviar-Respuesta -Context $context -Body ($outT | ConvertTo-Json -Depth 4 -Compress) -ContentType "application/json; charset=utf-8"
 
         } elseif ($method -eq "GET" -and $path -eq "/api/stock-pos") {
