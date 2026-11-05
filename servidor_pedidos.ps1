@@ -12712,7 +12712,7 @@ h1{margin:10px 0 2px;font-size:22px;line-height:1.2}.fr{color:var(--mut);margin:
 .row{display:flex;align-items:flex-end;justify-content:space-between;gap:6px;margin-top:auto}
 .pl{width:44px;height:44px;border-radius:14px;background:var(--c);color:var(--on);font-size:26px;font-weight:700;flex:none;display:flex;align-items:center;justify-content:center}
 .qty{display:flex;align-items:center;justify-content:space-between;background:var(--soft);border-radius:12px;padding:3px}
-.qty button{width:38px;height:34px;border-radius:10px;background:var(--card);font-size:20px;font-weight:700}.qty b{min-width:30px;text-align:center}
+.qty button{width:38px;height:34px;border-radius:10px;background:var(--card);font-size:20px;font-weight:700}.qty b{min-width:30px;text-align:center}.qty .qi{flex:1;min-width:0;width:44px;height:34px;border:0;background:transparent;text-align:center;font-weight:800;font-size:16px;padding:0;outline:0;-moz-appearance:textfield}.qty .qi:focus{background:var(--card);border-radius:8px}
 .empty{text-align:center;color:var(--mut);padding:40px 10px}
 .cartbar{position:fixed;left:0;right:0;bottom:0;padding:10px 14px calc(10px + env(safe-area-inset-bottom));background:var(--bg);border-top:1px solid var(--line);z-index:6}
 .cartbar button{width:100%;max-width:1072px;margin:0 auto;display:flex;justify-content:space-between;padding:14px 18px;border-radius:14px;background:var(--c);color:var(--on);font-weight:800}
@@ -12809,7 +12809,7 @@ function lista(){var q=norm(Q),o=[];LISTA.forEach(function(p){if(q&&norm(p.n).in
 function pinta(){
   var h='';lista().forEach(function(p){var n=CART[p.s]||0;
     h+='<div class="card"><div class="ph" data-z="'+esc(p.s)+'"><div class="ini">'+esc(p.n.trim().charAt(0).toUpperCase())+'</div>'+(FOTOS[p.s]?'<img loading="lazy" src="/foto/'+encodeURIComponent(p.s)+'.jpg" onerror="this.remove()" alt="">':'')+(p.st<=3?'<span class="few">Quedan '+fmt(p.st)+'</span>':'')+'</div><div class="cb"><h3 data-z="'+esc(p.s)+'">'+esc(p.n)+'</h3><div class="pr">'+esc(txt(METODO,p.b))+'</div>'+
-    '<div style="margin-top:8px">'+(n?'<div class="qty"><button data-m="'+esc(p.s)+'">−</button><b>'+n+'</b><button data-p="'+esc(p.s)+'">+</button></div>':'<div class="row" style="margin:0;justify-content:flex-end"><button class="pl" data-p="'+esc(p.s)+'">+</button></div>')+'</div></div></div>'});
+    '<div style="margin-top:8px">'+(n?'<div class="qty"><button data-m="'+esc(p.s)+'">−</button><input class="qi" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="5" data-qi="'+esc(p.s)+'" value="'+n+'" aria-label="Cantidad"><button data-p="'+esc(p.s)+'">+</button></div>':'<div class="row" style="margin:0;justify-content:flex-end"><button class="pl" data-p="'+esc(p.s)+'">+</button></div>')+'</div></div></div>'});
   $('grid').innerHTML=h||'<div class="empty" style="grid-column:1/-1">'+(CARGADO?(LISTA.length?'No hay productos con ese nombre.':'Por ahora no hay productos disponibles.'):'Cargando…')+'</div>';barra();
 }
 function totales(){var t=0,n=0;LISTA.forEach(function(p){var c=CART[p.s]||0;if(c){t+=c*p.b;n+=c}});return{t:t,n:n}}
@@ -12822,6 +12822,14 @@ $('grid').addEventListener('click',function(e){var b=e.target.closest('button');
 $('q').addEventListener('input',function(){Q=this.value;pinta()});
 $('vc').addEventListener('click',abreCarrito);
 $('sh').addEventListener('click',function(e){if(e.target===this)cierra()});
+document.addEventListener('input',function(e){var el=e.target;if(!el)return;
+  if(el.id==='pq'||el.dataset&&el.dataset.qi){var v=el.value.replace(/\D/g,'');if(v!==''){var mx=stockDe(el.id==='pq'?$('pan').dataset.sku:el.dataset.qi);var n=Math.min(mx,parseInt(v,10));if(el.id==='pq'&&n<1)n=1;v=String(n);if(el.id==='pq')PQ=n}el.value=v}
+});
+document.addEventListener('change',function(e){var el=e.target;if(!el)return;
+  if(el.id==='pq'){var s=$('pan').dataset.sku,n=Math.max(1,Math.min(stockDe(s),parseInt(el.value,10)||1));PQ=n;el.value=n;return}
+  if(el.dataset&&el.dataset.qi){var s2=el.dataset.qi,raw=el.value.replace(/\D/g,''),n2=raw===''?(CART[s2]||0):Math.min(stockDe(s2),parseInt(raw,10));if(n2<=0)delete CART[s2];else CART[s2]=n2;guardaCart();var cart=$('sh').classList.contains('on')&&$('pan').dataset.vista==='c';pinta();if(cart)abreCarrito()}
+});
+document.addEventListener('keydown',function(e){if(e.key==='Enter'&&e.target&&e.target.classList&&e.target.classList.contains('qi'))e.target.blur()});
 function cierra(){$('sh').classList.remove('on');$('pan').dataset.vista='';pinta()}
 /* ---- producto en grande ---- */
 var PQ=1;
@@ -12829,7 +12837,7 @@ function abreProd(s,mant){
   var p=LISTA.filter(function(x){return x.s===s})[0];if(!p)return;if(!mant)PQ=Math.max(1,CART[s]||1);
   var h='<button class="x" id="xx">×</button>'+(FOTOS[s]?'<img class="big" src="/foto/grande/'+encodeURIComponent(s)+'.jpg" onerror="this.onerror=null;this.src=\'/foto/'+encodeURIComponent(s)+'.jpg\'" alt="">':'<div class="big" style="display:flex;align-items:center;justify-content:center;font-size:80px;font-weight:800;color:var(--mut)">'+esc(p.n.trim().charAt(0).toUpperCase())+'</div>')+
    '<div class="pd"><h2>'+esc(p.n)+'</h2><div class="pr" style="font-size:26px">'+esc(txt(METODO,p.b))+'</div>'+sub(METODO,p.b).map(function(x){return'<div class="s2" style="font-size:14px">'+esc(x)+'</div>'}).join('')+(p.st<=3?'<div class="s2" style="color:#b45309">Quedan '+fmt(p.st)+'</div>':'')+
-   '<div style="display:flex;gap:10px;margin-top:16px;align-items:center"><div class="qty" style="min-width:130px"><button id="pm">−</button><b id="pq">'+PQ+'</b><button id="pp">+</button></div><button class="go" id="pa" style="margin:0;flex:1">Agregar al pedido</button></div></div>';
+   '<div style="display:flex;gap:10px;margin-top:16px;align-items:center"><div class="qty" style="min-width:130px"><button id="pm">−</button><input class="qi" id="pq" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="5" value="'+PQ+'" aria-label="Cantidad"><button id="pp">+</button></div><button class="go" id="pa" style="margin:0;flex:1">Agregar al pedido</button></div></div>';
   var pan=$('pan');pan.innerHTML=h;pan.dataset.vista='p';pan.dataset.sku=s;$('sh').classList.add('on');
   pan.onclick=function(e){var id=e.target.id;if(id==='xx')cierra();else if(id==='pm'){PQ=Math.max(1,PQ-1);$('pq').textContent=PQ}else if(id==='pp'){if(PQ<stockDe(s)){PQ++;$('pq').textContent=PQ}}else if(id==='pa'){var c=(CART[s]||0)+PQ;if(c>stockDe(s))c=stockDe(s);CART[s]=c;guardaCart();cierra()}};
 }
@@ -12838,7 +12846,7 @@ var NOMBRE='';try{NOMBRE=localStorage.getItem('tt_nombre')||''}catch(e){}
 function abreCarrito(){
   var T=totales();if(!T.n){cierra();return}
   var h='<button class="x" id="xx">×</button><div class="pd"><h2>Tu pedido</h2><div class="seg" id="seg2" style="margin-bottom:6px">'+metodos().map(function(m){return'<button data-m="'+m+'" class="'+(m===METODO?'on':'')+'">'+(m==='USD'?'USD':m)+'</button>'}).join('')+'</div>';
-  LISTA.forEach(function(p){var c=CART[p.s]||0;if(!c)return;h+='<div class="ln"><span>'+esc(p.n)+'<br><small style="color:var(--mut)">'+esc(txt(METODO,p.b))+' c/u</small></span><div class="qty" style="min-width:116px"><button data-m2="'+esc(p.s)+'">−</button><b>'+c+'</b><button data-p2="'+esc(p.s)+'">+</button></div></div>'});
+  LISTA.forEach(function(p){var c=CART[p.s]||0;if(!c)return;h+='<div class="ln"><span>'+esc(p.n)+'<br><small style="color:var(--mut)">'+esc(txt(METODO,p.b))+' c/u</small></span><div class="qty" style="min-width:116px"><button data-m2="'+esc(p.s)+'">−</button><input class="qi" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="5" data-qi="'+esc(p.s)+'" value="'+c+'" aria-label="Cantidad"><button data-p2="'+esc(p.s)+'">+</button></div></div>'});
   h+='<div class="tot"><span>Total</span><span>'+esc(txt(METODO,T.t))+'</span></div>';
   h+='<label class="lbl" for="nm">Tu nombre</label><input class="in" id="nm" value="'+esc(NOMBRE)+'" maxlength="30" autocomplete="name" placeholder="Escribe tu nombre"><div id="mm"></div><button class="go" id="go">Enviar pedido</button><button class="sec" id="sg">Seguir viendo</button></div>';
   var pan=$('pan');pan.innerHTML=h;pan.dataset.vista='c';$('sh').classList.add('on');
