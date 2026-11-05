@@ -1267,73 +1267,114 @@ function Guardar-FotoRedimensionada {
     }
 }
 
+function Tienda-InfoLeer {
+    $h = @{}
+    $f = Join-Path $scriptDir "tienda_info.json"
+    if (Test-Path -LiteralPath $f) {
+        try { $o = Get-Content -LiteralPath $f -Raw -Encoding UTF8 | ConvertFrom-Json; foreach ($pr in $o.PSObject.Properties) { $h[$pr.Name] = $pr.Value } } catch {}
+    }
+    return $h
+}
+function Tienda-InfoGuardar($h) {
+    $h["mt"] = [string][DateTime]::UtcNow.Ticks
+    ($h | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath (Join-Path $scriptDir "tienda_info.json") -Encoding UTF8
+}
+function Tienda-ImgNombre([string]$que) { return (Join-Path $scriptDir ("tienda_" + $que + ".bin")) }
+
 function Importar-FotosCatalogo {
-    # Busca el .zip de "Copia de seguridad" mas reciente que la app del
-    # catalogo (Catalogo_de_productos.html) genera en el telefono, y que
-    # Jose copio a esta carpeta. Ese zip trae "datos.json" (productos,
-    # con su sku) y "fotos/<id>.jpg" (la foto de cada producto, nombrada
-    # por su id interno, NO por el sku). Aqui se extraen, se emparejan
-    # id->sku usando datos.json, y se guardan en "fotos_catalogo\<sku>.jpg"
-    # para poder servirlas por SKU a los vendedores.
-    $zips = @(Get-ChildItem -Path $scriptDir -Filter "backup-catalogo-*.zip" -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending)
+    # Acepta la copia de seguridad del catalogo VIEJO (backup-catalogo-*.zip: datos.json con "products" y fotos/<id>.jpg)
+    # y la del Catalogo de Productos NUEVO (catalogo-copia-*.zip: datos.json con data.stores[].prods y fotos/<id>-g.bin).
+    # Se leen solo las fotos que hacen falta directo del .zip (sin descomprimirlo todo), por SKU. De la copia nueva tambien
+    # salen el logo, la portada y los datos del negocio (horario, direccion...) para el catalogo de clientes.
+    $zips = @(Get-ChildItem -Path $scriptDir -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "backup-catalogo-*.zip" -or $_.Name -like "catalogo-copia-*.zip" } | Sort-Object LastWriteTime -Descending)
     if ($zips.Count -eq 0) {
-        return [pscustomobject]@{ ok = $false; error = "No se encontro ningun archivo 'backup-catalogo-*.zip' en esta carpeta. Desde la app del catalogo, en el telefono, toca 'Copia de seguridad' y copia ese .zip a esta misma carpeta (junto al .ps1)." }
+        return [pscustomobject]@{ ok = $false; error = "No se encontro ninguna copia de seguridad en esta carpeta. Copia aqui (junto al .ps1) el .zip de 'Copia de seguridad' del catalogo: 'catalogo-copia-...zip' o 'backup-catalogo-...zip'." }
     }
     $zipPath = $zips[0].FullName
-
     $carpetaFotos = Join-Path $scriptDir "fotos_catalogo"
-    if (-not (Test-Path $carpetaFotos)) {
-        New-Item -ItemType Directory -Path $carpetaFotos | Out-Null
-    }
+    if (-not (Test-Path $carpetaFotos)) { New-Item -ItemType Directory -Path $carpetaFotos | Out-Null }
     $carpetaFotosGrandes = Join-Path $carpetaFotos "grande"
-    if (-not (Test-Path $carpetaFotosGrandes)) {
-        New-Item -ItemType Directory -Path $carpetaFotosGrandes | Out-Null
-    }
-
-    $carpetaTemp = Join-Path $scriptDir "fotos_catalogo_tmp"
-    if (Test-Path $carpetaTemp) { Remove-Item $carpetaTemp -Recurse -Force }
-    New-Item -ItemType Directory -Path $carpetaTemp | Out-Null
-
+    if (-not (Test-Path $carpetaFotosGrandes)) { New-Item -ItemType Directory -Path $carpetaFotosGrandes | Out-Null }
+    $tmp = Join-Path $scriptDir "fotos_catalogo_tmp.bin"
+    $zip = $null
     try {
+        Add-Type -AssemblyName System.IO.Compression
         Add-Type -AssemblyName System.IO.Compression.FileSystem
-        [System.IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $carpetaTemp)
-
-        $datosJsonPath = Join-Path $carpetaTemp "datos.json"
-        if (-not (Test-Path $datosJsonPath)) {
-            throw "El .zip no tiene 'datos.json' (es una copia de seguridad valida del catalogo?)."
-        }
-        $datos = Get-Content $datosJsonPath -Raw -Encoding UTF8 | ConvertFrom-Json
-        $productos = @($datos.products)
-
-        $fotosOrigen = Join-Path $carpetaTemp "fotos"
         Add-Type -AssemblyName System.Drawing
-        $copiadas = 0
-        $sinFoto = 0
-        $conError = 0
-        foreach ($p in $productos) {
-            $sku = if ($p.sku) { ([string]$p.sku).Trim() } else { "" }
-            if (-not $sku) { continue }
-            $origen = Join-Path $fotosOrigen ("$($p.id).jpg")
-            if (Test-Path $origen) {
-                $destinoChica = Join-Path $carpetaFotos ("$sku.jpg")
-                $destinoGrande = Join-Path $carpetaFotosGrandes ("$sku.jpg")
-                # Las fotos que llegan del telefono suelen venir a resolucion
-                # completa de camara (varios MB cada una); con 600+ productos
-                # eso es lo que hacia lenta la importacion y pesada de servir
-                # a cada movil por la red. Aqui se guardan dos versiones: una
-                # chica para el buscador y otra mas grande para cuando el
-                # vendedor la toca para verla ampliada.
-                if (Guardar-FotoRedimensionada -Origen $origen -DestinoChica $destinoChica -DestinoGrande $destinoGrande) {
-                    $copiadas++
-                } else {
-                    $conError++
+        $zip = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
+        $ent = @{}
+        foreach ($e in $zip.Entries) { $ent[$e.FullName] = $e }
+        $pre = ""
+        $eDatos = $ent["datos.json"]
+        if (-not $eDatos) {
+            foreach ($k in $ent.Keys) { if ($k -like "*/datos.json") { $eDatos = $ent[$k]; $pre = $k.Substring(0, $k.Length - 9); break } }
+        }
+        if (-not $eDatos) { throw "El .zip no tiene 'datos.json' (es una copia de seguridad valida del catalogo?)." }
+        $sr = New-Object System.IO.StreamReader($eDatos.Open(), [System.Text.Encoding]::UTF8)
+        try { $txt = $sr.ReadToEnd() } finally { $sr.Close() }
+        $datos = $txt | ConvertFrom-Json
+        $txt = $null
+
+        $lista = New-Object System.Collections.ArrayList   # { sku, claves[] }
+        $tienda = $null
+        if ($datos.products) {
+            foreach ($p in @($datos.products)) {
+                $sku = if ($p.sku) { ([string]$p.sku).Trim() } else { "" }
+                if ($sku) { [void]$lista.Add([pscustomobject]@{ sku = $sku; claves = @("fotos/" + $p.id + ".jpg", "fotos/" + $p.id + ".jpeg", "fotos/" + $p.id + ".png") }) }
+            }
+        } else {
+            $d = $datos.data
+            if (-not $d -or -not $d.stores) { throw "La copia no trae productos." }
+            $mejor = -1
+            foreach ($stx in @($d.stores)) {
+                $n = @(@($stx.prods) | Where-Object { $_.sku }).Count
+                if (([string]$stx.id -eq [string]$d.cur) -and $n -gt 0) { $tienda = $stx; break }
+                if ($n -gt $mejor) { $mejor = $n; $tienda = $stx }
+            }
+            foreach ($p in @($tienda.prods)) {
+                $sku = if ($p.sku) { ([string]$p.sku).Trim() } else { "" }
+                if (-not $sku) { continue }
+                $cl = New-Object System.Collections.ArrayList
+                foreach ($fid in @($p.fotos)) {
+                    if (-not $fid) { continue }
+                    foreach ($suf in @("-g.bin", "-t.bin", ".jpg", ".jpeg", ".png", ".webp")) { [void]$cl.Add("fotos/" + $fid + $suf) }
+                    break
                 }
-            } else {
-                $sinFoto++
+                if ($cl.Count -gt 0) { [void]$lista.Add([pscustomobject]@{ sku = $sku; claves = @($cl) }) }
             }
         }
-
-        Remove-Item $carpetaTemp -Recurse -Force
+        $copiadas = 0; $sinFoto = 0; $conError = 0
+        foreach ($it in $lista) {
+            $en = $null
+            foreach ($c in $it.claves) { if ($ent.ContainsKey($pre + $c)) { $en = $ent[$pre + $c]; break } }
+            if (-not $en) { $sinFoto++; continue }
+            try {
+                [System.IO.Compression.ZipFileExtensions]::ExtractToFile($en, $tmp, $true)
+                if (Guardar-FotoRedimensionada -Origen $tmp -DestinoChica (Join-Path $carpetaFotos ($it.sku + ".jpg")) -DestinoGrande (Join-Path $carpetaFotosGrandes ($it.sku + ".jpg"))) { $copiadas++ } else { $conError++ }
+            } catch { $conError++ }
+        }
+        # Datos del negocio (solo copia nueva)
+        $negocio = $false
+        if ($tienda) {
+            try {
+                $h = Tienda-InfoLeer
+                foreach ($k in @("nombre", "frase", "sobre", "color", "wa", "dir", "lat", "lng", "hor", "esp", "cierre", "msgCierre", "pagos")) { if ($null -ne $tienda.$k) { $h[$k] = $tienda.$k } }
+                foreach ($par in @(@("logo", "logo"), @("portada", "portada"))) {
+                    $fid = [string]$tienda.($par[0])
+                    if ($fid) {
+                        foreach ($suf in @("-g.bin", "-t.bin", ".jpg", ".png", ".webp")) {
+                            if ($ent.ContainsKey($pre + "fotos/" + $fid + $suf)) {
+                                [System.IO.Compression.ZipFileExtensions]::ExtractToFile($ent[$pre + "fotos/" + $fid + $suf], (Tienda-ImgNombre $par[1]), $true)
+                                $h[$par[1]] = $true
+                                break
+                            }
+                        }
+                    }
+                }
+                Tienda-InfoGuardar $h
+                $negocio = $true
+            } catch {}
+        }
         return [pscustomobject]@{
             ok = $true
             archivo = $zips[0].Name
@@ -1341,11 +1382,14 @@ function Importar-FotosCatalogo {
             copiadas = $copiadas
             sinFoto = $sinFoto
             conError = $conError
-            totalProductos = $productos.Count
+            totalProductos = $lista.Count
+            negocio = $negocio
         }
     } catch {
-        if (Test-Path $carpetaTemp) { Remove-Item $carpetaTemp -Recurse -Force -ErrorAction SilentlyContinue }
         return [pscustomobject]@{ ok = $false; error = "$_" }
+    } finally {
+        if ($zip) { try { $zip.Dispose() } catch {} }
+        if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
     }
 }
 
@@ -12622,156 +12666,223 @@ TT.iniciar('pc');
 $htmlTienda = @'
 <!doctype html>
 <html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>Catálogo</title>
+<meta name="theme-color" content="#0a7c86"><title>Catálogo</title>
+<link rel="manifest" href="/manifest-tienda.json"><link rel="icon" href="/icon-192.png"><link rel="apple-touch-icon" href="/icon-192.png">
 <style>
 :root{--c:#0a7c86;--on:#fff;--bg:#f3f6f6;--card:#fff;--ink:#14212b;--mut:#62727d;--line:#e2e9ec;--soft:#e6f3f4;--ok:#15803d;--bad:#b91c1c;--r:16px}
 @media (prefers-color-scheme:dark){:root{--bg:#0e1519;--card:#162027;--ink:#e8eff2;--mut:#93a4ae;--line:#25343d;--soft:#1b2b31}}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 html,body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif}
-button,input{font:inherit;color:inherit}button{cursor:pointer;border:0;background:none;padding:0}img{display:block}
+button,input{font:inherit;color:inherit}button{cursor:pointer;border:0;background:none;padding:0}img{display:block}a{color:inherit}
 .wrap{max-width:1100px;margin:0 auto;padding:0 14px}
-.cover{height:120px;background:linear-gradient(135deg,var(--c),#0b3a40);position:relative}
-.hd{margin-top:-36px;position:relative;z-index:1;padding-bottom:10px}
-.logo{width:72px;height:72px;border-radius:20px;border:4px solid var(--bg);background:var(--c);color:var(--on);display:flex;align-items:center;justify-content:center;font-weight:800;font-size:26px;overflow:hidden}
+.cover{height:150px;background:linear-gradient(135deg,var(--c),#0b3a40);background-size:cover;background-position:center;position:relative}
+.cover img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.hd{margin-top:-38px;position:relative;z-index:1;padding-bottom:6px}
+.logo{width:76px;height:76px;border-radius:20px;border:4px solid var(--bg);background:var(--c);color:var(--on);display:flex;align-items:center;justify-content:center;font-weight:800;font-size:26px;overflow:hidden}
 .logo img{width:100%;height:100%;object-fit:cover}
-h1{margin:8px 0 2px;font-size:22px;line-height:1.2}.fr{color:var(--mut);margin:0}
+h1{margin:10px 0 2px;font-size:22px;line-height:1.2}.fr{color:var(--mut);margin:0 0 8px}
+.pill{display:inline-flex;align-items:flex-start;gap:6px;padding:7px 13px;border-radius:16px;max-width:100%;white-space:normal;line-height:1.3;font-weight:700;font-size:13.5px;background:var(--soft);margin:0 6px 8px 0}
+.pill.open{background:#dcfce7;color:var(--ok)}.pill.closed{background:#fee2e2;color:var(--bad)}
+.btns{display:flex;flex-wrap:wrap;gap:8px;margin:2px 0 6px}
+.bt{padding:10px 16px;border-radius:99px;background:var(--card);border:1px solid var(--line);font-weight:700;text-decoration:none;font-size:14px}
+.bt.wa{background:#4ade80;color:#052e16;border-color:#4ade80}
+.pago{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:12px;margin:8px 0 4px}
+.pago .av{font-size:13.5px;color:var(--mut);margin:0 0 10px}
+.seg{display:grid;grid-template-columns:repeat(auto-fit,minmax(88px,1fr));gap:8px}
+.seg button{position:relative;display:flex;flex-direction:column;align-items:center;gap:2px;padding:12px 6px 10px;border-radius:14px;border:2px solid var(--line);background:var(--bg);font-weight:800;font-size:13.5px;line-height:1.2;transition:transform .12s,border-color .12s,background .12s}
+.seg button .ic{font-size:24px;line-height:1;margin-bottom:2px}
+.seg button small{font-weight:600;font-size:11px;color:var(--mut)}
+.seg button:active{transform:scale(.97)}
+.seg button.on{border-color:var(--c);background:var(--soft);box-shadow:0 0 0 3px color-mix(in srgb,var(--c) 18%,transparent)}
+.seg button.on:after{content:"✓";position:absolute;right:7px;top:6px;width:18px;height:18px;border-radius:50%;background:var(--c);color:var(--on);font-size:11px;line-height:18px;text-align:center}
+.seg button.on small{color:var(--ink)}
+.pago h4{margin:0 0 8px;font-size:13px;color:var(--mut);text-transform:uppercase;letter-spacing:.04em}
 .bar{position:sticky;top:0;z-index:5;background:var(--bg);padding:8px 0 6px}
-.in{width:100%;padding:11px 14px;border-radius:12px;border:1px solid var(--line);background:var(--card);outline:0}
-.in:focus{border-color:var(--c)}
-.chips{display:flex;gap:8px;overflow-x:auto;padding:8px 0 2px;scrollbar-width:none}.chips::-webkit-scrollbar{display:none}
-.chip{flex:none;padding:7px 14px;border-radius:99px;background:var(--card);border:1px solid var(--line);font-weight:600;font-size:13.5px;white-space:nowrap}
-.chip.on{background:var(--c);color:var(--on);border-color:var(--c)}
+.in{width:100%;padding:11px 14px;border-radius:12px;border:1px solid var(--line);background:var(--card);outline:0}.in:focus{border-color:var(--c)}
 .grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;padding:10px 0 110px}
 @media(min-width:620px){.grid{grid-template-columns:repeat(3,1fr)}}@media(min-width:900px){.grid{grid-template-columns:repeat(4,1fr)}}
 .card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);overflow:hidden;display:flex;flex-direction:column}
-.ph{position:relative;width:100%;padding-top:100%;background:var(--soft)}
+.ph{position:relative;width:100%;padding-top:100%;background:var(--soft);cursor:zoom-in}
 .ph img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
 .ph .ini{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:40px;font-weight:800;color:var(--mut);opacity:.5}
-.tag{position:absolute;left:8px;top:8px;background:#dc2626;color:#fff;font-weight:800;font-size:11.5px;padding:3px 8px;border-radius:99px}
 .few{position:absolute;right:8px;top:8px;background:#b45309;color:#fff;font-weight:700;font-size:11px;padding:3px 8px;border-radius:99px}
 .cb{padding:10px 12px 12px;display:flex;flex-direction:column;flex:1}
-.cb h3{margin:0 0 4px;font-size:14px;line-height:1.3;font-weight:650;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:2.6em}
-.pr{font-weight:800;font-size:17px;color:var(--c);margin-top:auto}.old{color:var(--mut);font-weight:500;font-size:12.5px;text-decoration:line-through;margin-left:6px}
-.add{margin-top:8px;width:100%;padding:9px;border-radius:12px;background:var(--c);color:var(--on);font-weight:700}
-.qty{margin-top:8px;display:flex;align-items:center;justify-content:space-between;background:var(--soft);border-radius:12px;padding:3px}
+.cb h3{margin:0 0 4px;font-size:14px;line-height:1.3;font-weight:650;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:2.6em;cursor:pointer}
+.pr{font-weight:800;font-size:17px;margin-top:auto}.s2{color:var(--mut);font-size:12.5px;font-weight:600;line-height:1.35}
+.row{display:flex;align-items:flex-end;justify-content:space-between;gap:6px;margin-top:auto}
+.pl{width:44px;height:44px;border-radius:14px;background:var(--c);color:var(--on);font-size:26px;font-weight:700;flex:none;display:flex;align-items:center;justify-content:center}
+.qty{display:flex;align-items:center;justify-content:space-between;background:var(--soft);border-radius:12px;padding:3px}
 .qty button{width:38px;height:34px;border-radius:10px;background:var(--card);font-size:20px;font-weight:700}.qty b{min-width:30px;text-align:center}
 .empty{text-align:center;color:var(--mut);padding:40px 10px}
 .cartbar{position:fixed;left:0;right:0;bottom:0;padding:10px 14px calc(10px + env(safe-area-inset-bottom));background:var(--bg);border-top:1px solid var(--line);z-index:6}
 .cartbar button{width:100%;max-width:1072px;margin:0 auto;display:flex;justify-content:space-between;padding:14px 18px;border-radius:14px;background:var(--c);color:var(--on);font-weight:800}
-.sheet{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:10;display:none;align-items:flex-end;justify-content:center}.sheet.on{display:flex}
-.pan{background:var(--card);width:100%;max-width:560px;max-height:90vh;overflow:auto;border-radius:20px 20px 0 0;padding:18px 16px calc(18px + env(safe-area-inset-bottom))}
-.pan h2{margin:0 0 10px;font-size:19px}
+.sheet{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:10;display:none;align-items:flex-end;justify-content:center}.sheet.on{display:flex}
+.pan{background:var(--bg);width:100%;max-width:560px;max-height:92vh;overflow:auto;border-radius:20px 20px 0 0;padding:0 0 calc(18px + env(safe-area-inset-bottom));position:relative}
+.pan .pd{padding:16px}.pan h2{margin:0 0 8px;font-size:19px}
+.x{position:absolute;right:12px;top:12px;width:42px;height:42px;border-radius:50%;background:var(--card);box-shadow:0 2px 8px rgba(0,0,0,.25);font-size:22px;z-index:2}
+.big{width:100%;height:auto;max-width:100%;max-height:50vh;min-height:200px;background:var(--soft);object-fit:contain;display:block}
+.pan{overflow-x:hidden;overscroll-behavior:contain}.pan h2,.pan .ln span,.cb h3{overflow-wrap:anywhere}html,body{overflow-x:hidden}
 .ln{display:flex;gap:10px;align-items:center;padding:8px 0;border-bottom:1px solid var(--line)}.ln span{flex:1;font-size:14px}
 .lbl{display:block;font-weight:700;margin:14px 0 6px;font-size:13.5px}
 .tot{display:flex;justify-content:space-between;font-weight:800;font-size:18px;margin:14px 0 4px}
 .go{margin-top:14px;width:100%;padding:14px;border-radius:14px;background:var(--c);color:var(--on);font-weight:800}.go[disabled]{opacity:.55}
 .sec{margin-top:8px;width:100%;padding:12px;border-radius:14px;background:var(--soft);font-weight:700}
-.msg{margin-top:10px;padding:10px 12px;border-radius:12px;font-weight:600}.msg.bad{background:#fee2e2;color:var(--bad)}.msg.ok{background:#dcfce7;color:var(--ok)}
+.msg{margin-top:10px;padding:10px 12px;border-radius:12px;font-weight:600}.msg.bad{background:#fee2e2;color:var(--bad)}
 .ok-big{text-align:center;padding:20px 6px}.ok-big .e{font-size:54px}
+.hr{display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px dashed var(--line)}.hr.hoy{color:var(--c);font-weight:800}
+.k{font-weight:700;color:var(--mut);font-size:13px;margin:14px 0 4px}
 </style></head><body>
-<div class="cover"></div>
+<div class="cover" id="cv"></div>
 <div class="wrap">
- <div class="hd"><div class="logo" id="logo"></div><h1 id="nom"></h1><p class="fr" id="lema"></p></div>
- <div class="bar"><input class="in" id="q" type="search" placeholder="Buscar producto…" autocomplete="off"><div class="chips" id="chips"></div></div>
+ <div class="hd"><div class="logo" id="logo"></div><h1 id="nom"></h1><p class="fr" id="lema"></p>
+  <div id="chips"></div><div class="btns" id="btns"></div></div>
+ <div class="pago" id="pago" hidden><p class="av" id="av"></p><h4>¿Cómo vas a pagar?</h4><div class="seg" id="seg"></div></div>
+ <div class="bar"><input class="in" id="q" type="search" placeholder="Buscar producto…" autocomplete="off"></div>
  <div class="grid" id="grid"></div>
 </div>
 <div class="cartbar" id="cb" hidden><button id="vc"><span id="cn"></span><span id="ct"></span></button></div>
 <div class="sheet" id="sh"><div class="pan" id="pan"></div></div>
 <script>
-var D={nombre:'',lema:'',color:'#0a7c86',on:'#fff',logo:'/icon-192.png',cur:'$',cats:[],prods:[]};
+var DIAS=['Domingo','Lunes','Martes','Miércoles','Jueves','Viernes','Sábado'],TZ='America/Havana';
 var $=function(i){return document.getElementById(i)};
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
-function fmt(n){n=+n||0;return n.toLocaleString('es',{minimumFractionDigits:n%1?2:0,maximumFractionDigits:2})}
-var LIVE={},FOTOS={},CART={},CAT='',Q='',DEST='pc',CARGADO=false,ENVIANDO=false;
+function fmt(n,d){n=+n||0;var dd=d==null?(Math.abs(n-Math.round(n))<.005?0:2):d;var p=Math.abs(n).toFixed(dd).split('.');p[0]=p[0].replace(/\B(?=(\d{3})+(?!\d))/g,' ');return(n<0?'-':'')+p.join(',')}
+function norm(s){return String(s||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'')}
+var INFO={},LIVE={},LISTA=[],FOTOS={},CART={},Q='',DEST='pc',CARGADO=false,ENVIANDO=false,TASA=0,METODO='';
 try{CART=JSON.parse(sessionStorage.getItem('tt_cart')||'{}')||{}}catch(e){CART={}}
 function guardaCart(){try{sessionStorage.setItem('tt_cart',JSON.stringify(CART))}catch(e){}}
-document.documentElement.style.setProperty('--c',D.color||'#0a7c86');document.documentElement.style.setProperty('--on',D.on||'#fff');
-document.title=D.nombre||'Catálogo';$('nom').textContent=D.nombre||'Catálogo';$('lema').textContent=D.lema||'';
-function pintaCab(){document.title=D.nombre||'Catálogo';$('nom').textContent=D.nombre||'Catálogo';$('logo').innerHTML='<img src="'+esc(D.logo)+'" alt="" onerror="this.remove()">'}
-pintaCab();
-function lista(){
-  var out=[];
-  D.prods.forEach(function(p){
-    var l=LIVE[p.s];if(!l)return;               /* solo lo que existe en el servidor */
-    var st=l.stock;if(!(st>0))return;            /* solo con cantidad */
-    var pr=l.precio>0?l.precio:p.p;if(!(pr>0))return;
-    var of=p.o>0&&p.o<pr?p.o:0;
-    out.push({s:p.s,n:p.n,c:p.c,pr:of||pr,antes:of?pr:0,st:st,f:!!FOTOS[p.s],d:p.d?1:0});
-  });
-  out.sort(function(a,b){return b.d-a.d||(a.antes?0:1)-(b.antes?0:1)||a.n.localeCompare(b.n,'es')});
-  return out;
+/* ---- horario ---- */
+function ahoraOff(k){var d=new Date(Date.now()+k*864e5);var f=new Intl.DateTimeFormat('en-US',{timeZone:TZ,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false,weekday:'short'}).formatToParts(d);var o={};f.forEach(function(p){o[p.type]=p.value});return{fecha:o.year+'-'+o.month+'-'+o.day,dow:{Sun:0,Mon:1,Tue:2,Wed:3,Thu:4,Fri:5,Sat:6}[o.weekday],min:(+o.hour%24)*60+(+o.minute)}}
+function hm(s){var m=/^(\d{1,2}):(\d{2})$/.exec(s||'');return m?(+m[1])*60+(+m[2]):null}
+function hmT(s){var m=hm(s);if(m==null)return'';var h=Math.floor(m/60),mm=m%60,suf=h>=12?'pm':'am';h=h%12||12;return h+':'+String(mm).padStart(2,'0')+' '+suf}
+function A(x){return Array.isArray(x)?x:[]}
+function regla(k){var x=ahoraOff(k),esp=A(INFO.esp).filter(function(e){return e.f===x.fecha})[0],b=A(INFO.hor)[x.dow]||{c:true};return esp?{c:!!esp.c,a:esp.a,z:esp.z}:{c:!!b.c,a:b.a,z:b.z}}
+function estado(){
+  if(INFO.cierre)return{ok:false,t:INFO.msgCierre||'Cerrada temporalmente'};
+  if(!A(INFO.hor).length)return null;
+  var n=ahoraOff(0),h=regla(0),a=hm(h.a),z=hm(h.z);
+  if(!h.c&&a!=null&&z!=null){var ab=z>a?(n.min>=a&&n.min<z):(n.min>=a||n.min<z);if(ab)return{ok:true,t:'Abierto hasta las '+hmT(h.z)};if(n.min<a)return{ok:false,t:'Cerrado · abre hoy a las '+hmT(h.a)}}
+  for(var i=1;i<=7;i++){var r=regla(i);if(!r.c&&hm(r.a)!=null)return{ok:false,t:'Cerrado · abre '+(i===1?'mañana':'el '+DIAS[ahoraOff(i).dow].toLowerCase())+' a las '+hmT(r.a)}}
+  return{ok:false,t:'Cerrado'}
 }
-function norm(s){return String(s||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'')}
+/* ---- precios: base = precio en efectivo (CUP) ---- */
+function metodos(){var p=A(INFO.pagos).map(function(x){return norm(x)}),m=[];if(!p.length||p.some(function(x){return x.indexOf('transf')>=0}))m.push('Transferencia');if(!p.length||p.some(function(x){return x.indexOf('efect')>=0}))m.push('Efectivo');if(TASA>0)m.push('USD');if(!m.length)m.push('Transferencia');return m}
+function val(m,b){return m==='Transferencia'?b*2:m==='USD'?(TASA>0?b/TASA:0):b}
+function txt(m,b){return m==='USD'?fmt(val(m,b),2)+' USD':fmt(val(m,b))+' CUP'}
+function usdRef(b){return TASA>0?'≈ '+fmt(b/TASA,2)+' USD':''}
+function sub(m,b){var o=[],ms=metodos(),tr=ms.indexOf('Transferencia')>=0,ef=ms.indexOf('Efectivo')>=0;
+  if(m==='Transferencia'){if(ef)o.push('Efectivo: '+fmt(b)+' CUP');if(TASA>0)o.push(usdRef(b)+' en efectivo')}
+  else if(m==='Efectivo'){if(TASA>0)o.push(usdRef(b));if(tr)o.push('Transferencia: '+fmt(b*2)+' CUP')}
+  else{if(ef)o.push('Efectivo: '+fmt(b)+' CUP');if(tr)o.push('Transferencia: '+fmt(b*2)+' CUP')}
+  return o}
+/* ---- cabecera ---- */
+function pintaCab(){
+  var c=INFO.color||'#0a7c86';document.documentElement.style.setProperty('--c',c);
+  var l=parseInt(c.slice(1),16),r=(l>>16)&255,g=(l>>8)&255,b=l&255;document.documentElement.style.setProperty('--on',(r*299+g*587+b*114)/1000>165?'#10202a':'#fff');
+  var nm=INFO.nombre||'Catálogo';document.title=nm;$('nom').textContent=nm;$('lema').textContent=INFO.frase||'';
+  $('cv').innerHTML=INFO.portada?'<img src="/tienda/portada?v='+INFO.mt+'" onerror="this.remove()" alt="">':'';
+  $('logo').innerHTML=(INFO.logo?'<img src="/tienda/logo?v='+INFO.mt+'" onerror="this.remove()" alt="">':'')||esc(nm.trim().charAt(0).toUpperCase());
+  var e=estado(),ch='';if(e)ch+='<span class="pill '+(e.ok?'open':'closed')+'">'+(e.ok?'● ':'')+esc(e.t)+'</span>';
+  if(INFO.dir)ch+='<span class="pill">📍 '+esc(INFO.dir)+'</span>';$('chips').innerHTML=ch;
+  var bt='';
+  if(INFO.lat&&INFO.lng)bt+='<a class="bt" target="_blank" rel="noopener" href="https://www.google.com/maps?q='+encodeURIComponent(INFO.lat+','+INFO.lng)+'">Cómo llegar</a>';
+  bt+='<button class="bt" id="binfo">Horario e info</button>';$('btns').innerHTML=bt;$('binfo').onclick=muestraInfo;
+  pintaPago();
+}
+function pintaPago(){
+  var ms=metodos();if(ms.indexOf(METODO)<0){var d=INFO.metodoDefecto;METODO=ms.indexOf(d)>=0?d:(ms.indexOf('Transferencia')>=0?'Transferencia':ms[0])}
+  $('pago').hidden=false;$('av').textContent=INFO.aviso||'';$('av').style.display=INFO.aviso?'':'none';
+  $('seg').innerHTML=ms.map(function(m){var ic={Transferencia:'🏦',Efectivo:'💵',USD:'💲'}[m],cp={Transferencia:'Por transferencia',Efectivo:'En efectivo',USD:'En dólares'}[m];return'<button data-m="'+m+'" class="'+(m===METODO?'on':'')+'"><span class="ic">'+ic+'</span>'+(m==='USD'?'USD':m)+'<small>'+cp+'</small></button>'}).join('');
+}
+$('seg').addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return;METODO=b.dataset.m;try{sessionStorage.setItem('tt_metodo',METODO)}catch(x){}pintaPago();pinta();if($('sh').classList.contains('on')&&$('nm'))abreCarrito()});
+function muestraInfo(){
+  var e=estado(),hoy=ahoraOff(0).dow,h='<button class="x" id="xx">×</button><div class="pd"><h2>'+esc(INFO.nombre||'')+'</h2>';
+  if(e)h+='<span class="pill '+(e.ok?'open':'closed')+'">'+esc(e.t)+'</span>';
+  if(INFO.sobre)h+='<p style="color:var(--mut);white-space:pre-line">'+esc(INFO.sobre)+'</p>';
+  if(INFO.dir)h+='<div class="k">Dirección</div><div>'+esc(INFO.dir)+'</div>';
+  if(A(INFO.hor).length){h+='<div class="k">Horario</div>';[1,2,3,4,5,6,0].forEach(function(d){var x=INFO.hor[d]||{c:true};h+='<div class="hr'+(d===hoy?' hoy':'')+'"><span>'+DIAS[d]+'</span><span>'+(x.c?'Cerrado':hmT(x.a)+' – '+hmT(x.z))+'</span></div>'})}
+  if(A(INFO.pagos).length)h+='<div class="k">Formas de pago</div><div>'+A(INFO.pagos).map(esc).join(' · ')+'</div>';
+  h+='</div>';$('pan').innerHTML=h;$('sh').classList.add('on');$('pan').onclick=function(ev){if(ev.target.id==='xx')cierra()};
+}
+/* ---- lista ---- */
+function lista(){var q=norm(Q),o=[];LISTA.forEach(function(p){if(q&&norm(p.n).indexOf(q)<0)return;o.push(p)});return o}
 function pinta(){
-  var L=lista(),usadas={};L.forEach(function(p){usadas[p.c]=1});
-  var cs='<button class="chip'+(CAT?'':' on')+'" data-c="">Todo</button>';
-  D.cats.forEach(function(c){if(usadas[c.id])cs+='<button class="chip'+(CAT===c.id?' on':'')+'" data-c="'+esc(c.id)+'">'+esc(c.n)+'</button>'});
-  $('chips').innerHTML=D.cats.length?cs:'';
-  var q=norm(Q),h='';
-  L.forEach(function(p){
-    if(CAT&&p.c!==CAT)return;if(q&&norm(p.n).indexOf(q)<0)return;
-    var n=CART[p.s]||0;
-    h+='<div class="card"><div class="ph"><div class="ini">'+esc(p.n.trim().charAt(0).toUpperCase())+'</div>'+(p.f?'<img loading="lazy" src="/foto/'+encodeURIComponent(p.s)+'.jpg" onerror="this.remove()" alt="">':'')+(p.antes?'<span class="tag">OFERTA</span>':'')+(p.st<=3?'<span class="few">Quedan '+fmt(p.st)+'</span>':'')+'</div><div class="cb"><h3>'+esc(p.n)+'</h3><div class="pr">'+esc(D.cur)+' '+fmt(p.pr)+(p.antes?'<span class="old">'+fmt(p.antes)+'</span>':'')+'</div>'+(n?'<div class="qty"><button data-m="'+esc(p.s)+'">−</button><b>'+n+'</b><button data-p="'+esc(p.s)+'">+</button></div>':'<button class="add" data-p="'+esc(p.s)+'">Agregar</button>')+'</div></div>';
-  });
-  $('grid').innerHTML=h||'<div class="empty" style="grid-column:1/-1">'+(CARGADO?(L.length?'No hay productos con ese nombre.':'Por ahora no hay productos disponibles.'):'Cargando…')+'</div>';
-  barra();
+  var h='';lista().forEach(function(p){var n=CART[p.s]||0;
+    h+='<div class="card"><div class="ph" data-z="'+esc(p.s)+'"><div class="ini">'+esc(p.n.trim().charAt(0).toUpperCase())+'</div>'+(FOTOS[p.s]?'<img loading="lazy" src="/foto/'+encodeURIComponent(p.s)+'.jpg" onerror="this.remove()" alt="">':'')+(p.st<=3?'<span class="few">Quedan '+fmt(p.st)+'</span>':'')+'</div><div class="cb"><h3 data-z="'+esc(p.s)+'">'+esc(p.n)+'</h3><div class="pr">'+esc(txt(METODO,p.b))+'</div>'+
+    '<div style="margin-top:8px">'+(n?'<div class="qty"><button data-m="'+esc(p.s)+'">−</button><b>'+n+'</b><button data-p="'+esc(p.s)+'">+</button></div>':'<div class="row" style="margin:0;justify-content:flex-end"><button class="pl" data-p="'+esc(p.s)+'">+</button></div>')+'</div></div></div>'});
+  $('grid').innerHTML=h||'<div class="empty" style="grid-column:1/-1">'+(CARGADO?(LISTA.length?'No hay productos con ese nombre.':'Por ahora no hay productos disponibles.'):'Cargando…')+'</div>';barra();
 }
-function totales(){var t=0,n=0,L=lista();L.forEach(function(p){var c=CART[p.s]||0;if(c){t+=c*p.pr;n+=c}});return{t:t,n:n,L:L}}
-function barra(){var T=totales();$('cb').hidden=!T.n;$('cn').textContent='Ver pedido · '+T.n+(T.n===1?' producto':' productos');$('ct').textContent=D.cur+' '+fmt(T.t)}
+function totales(){var t=0,n=0;LISTA.forEach(function(p){var c=CART[p.s]||0;if(c){t+=c*p.b;n+=c}});return{t:t,n:n}}
+function barra(){var T=totales();$('cb').hidden=!T.n;$('cn').textContent='Ver pedido · '+T.n+(T.n===1?' producto':' productos');$('ct').textContent=txt(METODO,T.t)}
 function stockDe(s){var l=LIVE[s];return l?l.stock:0}
-function mas(s){var c=(CART[s]||0)+1;if(c>stockDe(s)){alert('No hay más unidades disponibles de este producto.');return}CART[s]=c;guardaCart();pinta()}
-function menos(s){var c=(CART[s]||0)-1;if(c<=0)delete CART[s];else CART[s]=c;guardaCart();pinta();if($('sh').classList.contains('on'))abre()}
-$('grid').addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return;if(b.dataset.p)mas(b.dataset.p);else if(b.dataset.m)menos(b.dataset.m)});
-$('chips').addEventListener('click',function(e){var b=e.target.closest('.chip');if(!b)return;CAT=b.dataset.c;pinta()});
+function mas(s){var c=(CART[s]||0)+1;if(c>stockDe(s)){alert('No hay más unidades disponibles de este producto.');return false}CART[s]=c;guardaCart();return true}
+function menos(s){var c=(CART[s]||0)-1;if(c<=0)delete CART[s];else CART[s]=c;guardaCart()}
+function repinta(){pinta();var d=$('pan').dataset.vista;if($('sh').classList.contains('on')){if(d==='c')abreCarrito();else if(d==='p')abreProd($('pan').dataset.sku,true)}}
+$('grid').addEventListener('click',function(e){var b=e.target.closest('button');if(b&&b.dataset.p){mas(b.dataset.p);pinta();return}if(b&&b.dataset.m){menos(b.dataset.m);pinta();return}var z=e.target.closest('[data-z]');if(z)abreProd(z.dataset.z)});
 $('q').addEventListener('input',function(){Q=this.value;pinta()});
-$('vc').addEventListener('click',abre);
+$('vc').addEventListener('click',abreCarrito);
 $('sh').addEventListener('click',function(e){if(e.target===this)cierra()});
-function cierra(){$('sh').classList.remove('on')}
+function cierra(){$('sh').classList.remove('on');$('pan').dataset.vista='';pinta()}
+/* ---- producto en grande ---- */
+var PQ=1;
+function abreProd(s,mant){
+  var p=LISTA.filter(function(x){return x.s===s})[0];if(!p)return;if(!mant)PQ=Math.max(1,CART[s]||1);
+  var h='<button class="x" id="xx">×</button>'+(FOTOS[s]?'<img class="big" src="/foto/grande/'+encodeURIComponent(s)+'.jpg" onerror="this.onerror=null;this.src=\'/foto/'+encodeURIComponent(s)+'.jpg\'" alt="">':'<div class="big" style="display:flex;align-items:center;justify-content:center;font-size:80px;font-weight:800;color:var(--mut)">'+esc(p.n.trim().charAt(0).toUpperCase())+'</div>')+
+   '<div class="pd"><h2>'+esc(p.n)+'</h2><div class="pr" style="font-size:26px">'+esc(txt(METODO,p.b))+'</div>'+sub(METODO,p.b).map(function(x){return'<div class="s2" style="font-size:14px">'+esc(x)+'</div>'}).join('')+(p.st<=3?'<div class="s2" style="color:#b45309">Quedan '+fmt(p.st)+'</div>':'')+
+   '<div style="display:flex;gap:10px;margin-top:16px;align-items:center"><div class="qty" style="min-width:130px"><button id="pm">−</button><b id="pq">'+PQ+'</b><button id="pp">+</button></div><button class="go" id="pa" style="margin:0;flex:1">Agregar al pedido</button></div></div>';
+  var pan=$('pan');pan.innerHTML=h;pan.dataset.vista='p';pan.dataset.sku=s;$('sh').classList.add('on');
+  pan.onclick=function(e){var id=e.target.id;if(id==='xx')cierra();else if(id==='pm'){PQ=Math.max(1,PQ-1);$('pq').textContent=PQ}else if(id==='pp'){if(PQ<stockDe(s)){PQ++;$('pq').textContent=PQ}}else if(id==='pa'){var c=(CART[s]||0)+PQ;if(c>stockDe(s))c=stockDe(s);CART[s]=c;guardaCart();cierra()}};
+}
+/* ---- carrito ---- */
 var NOMBRE='';try{NOMBRE=localStorage.getItem('tt_nombre')||''}catch(e){}
-function abre(msg){
-  var T=totales();
-  if(!T.n){cierra();return}
-  var h='<h2>Tu pedido</h2>';
-  T.L.forEach(function(p){var c=CART[p.s]||0;if(!c)return;h+='<div class="ln"><span>'+esc(p.n)+'<br><small style="color:var(--mut)">'+esc(D.cur)+' '+fmt(p.pr)+' c/u</small></span><div class="qty" style="margin:0;min-width:116px"><button data-m="'+esc(p.s)+'">−</button><b>'+c+'</b><button data-p="'+esc(p.s)+'">+</button></div></div>'});
-  h+='<div class="tot"><span>Total</span><span>'+esc(D.cur)+' '+fmt(T.t)+'</span></div>';
-  h+='<label class="lbl" for="nm">Tu nombre</label><input class="in" id="nm" value="'+esc(NOMBRE)+'" maxlength="30" autocomplete="name" placeholder="Escribe tu nombre">';
-  h+='<div id="mm"></div><button class="go" id="go">Enviar pedido</button><button class="sec" id="sg">Seguir viendo</button>';
-  $('pan').innerHTML=h;$('sh').classList.add('on');
-  $('pan').onclick=function(e){var b=e.target.closest('button');if(!b)return;if(b.dataset.p)mas(b.dataset.p),abre();else if(b.dataset.m)menos(b.dataset.m);else if(b.id==='sg')cierra();else if(b.id==='go')envia()};
+function abreCarrito(){
+  var T=totales();if(!T.n){cierra();return}
+  var h='<button class="x" id="xx">×</button><div class="pd"><h2>Tu pedido</h2><div class="seg" id="seg2" style="margin-bottom:6px">'+metodos().map(function(m){return'<button data-m="'+m+'" class="'+(m===METODO?'on':'')+'">'+(m==='USD'?'USD':m)+'</button>'}).join('')+'</div>';
+  LISTA.forEach(function(p){var c=CART[p.s]||0;if(!c)return;h+='<div class="ln"><span>'+esc(p.n)+'<br><small style="color:var(--mut)">'+esc(txt(METODO,p.b))+' c/u</small></span><div class="qty" style="min-width:116px"><button data-m2="'+esc(p.s)+'">−</button><b>'+c+'</b><button data-p2="'+esc(p.s)+'">+</button></div></div>'});
+  h+='<div class="tot"><span>Total</span><span>'+esc(txt(METODO,T.t))+'</span></div>';
+  h+='<label class="lbl" for="nm">Tu nombre</label><input class="in" id="nm" value="'+esc(NOMBRE)+'" maxlength="30" autocomplete="name" placeholder="Escribe tu nombre"><div id="mm"></div><button class="go" id="go">Enviar pedido</button><button class="sec" id="sg">Seguir viendo</button></div>';
+  var pan=$('pan');pan.innerHTML=h;pan.dataset.vista='c';$('sh').classList.add('on');
+  pan.onclick=function(e){var b=e.target.closest('button');if(!b)return;
+    if(b.id==='xx'||b.id==='sg')cierra();else if(b.id==='go')envia();
+    else if(b.dataset.p2){mas(b.dataset.p2);abreCarrito()}else if(b.dataset.m2){menos(b.dataset.m2);abreCarrito()}
+    else if(b.dataset.m&&b.parentNode.id==='seg2'){METODO=b.dataset.m;pintaPago();abreCarrito()}};
 }
 async function envia(){
-  if(ENVIANDO)return;
-  var nm=($('nm').value||'').trim(),mm=$('mm');
+  if(ENVIANDO)return;var nm=($('nm').value||'').trim(),mm=$('mm');
   if(!nm){mm.innerHTML='<div class="msg bad">Escribe tu nombre para enviar el pedido.</div>';$('nm').focus();return}
   var T=totales(),items=[];
-  T.L.forEach(function(p){var c=CART[p.s]||0;if(c)items.push({sku:p.s,nombre:p.n,precio:p.pr,precioLista:p.pr,cantidad:c,stock:p.st})});
-  if(!items.length)return;
-  NOMBRE=nm;try{localStorage.setItem('tt_nombre',nm)}catch(e){}
+  LISTA.forEach(function(p){var c=CART[p.s]||0;if(c)items.push({sku:p.s,nombre:p.n,precio:p.b,precioLista:p.b,cantidad:c,stock:p.st})});
+  if(!items.length)return;NOMBRE=nm;try{localStorage.setItem('tt_nombre',nm)}catch(e){}
   ENVIANDO=true;var go=$('go');go.disabled=true;go.textContent='Enviando…';
-  var id='c'+Date.now()+'_'+Math.random().toString(36).slice(2,10);
-  var url='/api/pedidos',body={clienteId:id,vendedor:nm,pin:'',autoservicio:true,items:items,estado:'pendiente',metodoPago:'Efectivo',montoRecibido:null,totalCobrado:Number(T.t.toFixed(2)),cambio:null,pagoEfectivo:null,pagoTransferencia:null,nota:'',clienteNombre:''};
+  var id='c'+Date.now()+'_'+Math.random().toString(36).slice(2,10),tc=Number((METODO==='Transferencia'?T.t*2:T.t).toFixed(2));
+  var nota=METODO==='USD'?('Paga en dólares: ≈ '+fmt(val('USD',T.t),2)+' USD'):'';
+  var url='/api/pedidos',body={clienteId:id,vendedor:nm,pin:'',autoservicio:true,items:items,estado:'pendiente',metodoPago:METODO,montoRecibido:null,totalCobrado:tc,cambio:null,pagoEfectivo:null,pagoTransferencia:null,nota:nota,clienteNombre:''};
   if(DEST==='vendedor'){url='/api/pedidos/asignar';body={todos:true,items:items,cliente:nm,claveEnvio:id}}
   try{
-    var r=await fetch(url,{method:'POST',body:JSON.stringify(body)});var j=await r.json().catch(function(){return null});
+    var r=await fetch(url,{method:'POST',body:JSON.stringify(body)}),j=await r.json().catch(function(){return null});
     if(!r.ok||(j&&j.ok===false)){mm.innerHTML='<div class="msg bad">'+esc((j&&j.error)||'No se pudo enviar el pedido.')+'</div>';go.disabled=false;go.textContent='Enviar pedido';ENVIANDO=false;carga();return}
-    CART={};guardaCart();ENVIANDO=false;
-    $('pan').innerHTML='<div class="ok-big"><div class="e">✅</div><h2>¡Pedido enviado!</h2><p>Gracias, '+esc(nm)+'. En un momento te atienden.</p><button class="go" id="ce">Listo</button></div>';
-    $('pan').onclick=function(e){if(e.target.id==='ce')cierra()};pinta();carga();
+    CART={};guardaCart();ENVIANDO=false;var pan=$('pan');pan.dataset.vista='';
+    pan.innerHTML='<div class="pd ok-big"><div class="e">✅</div><h2>¡Pedido enviado!</h2><p>Gracias, '+esc(nm)+'. En un momento te atienden.</p><button class="go" id="ce">Listo</button></div>';
+    pan.onclick=function(e){if(e.target.id==='ce')cierra()};pinta();carga();
   }catch(e){mm.innerHTML='<div class="msg bad">Sin conexión con el servidor. Revisa que estés en la misma WiFi e inténtalo otra vez.</div>';go.disabled=false;go.textContent='Enviar pedido';ENVIANDO=false}
 }
 async function carga(){
   try{
-    var rs=await Promise.all([fetch('/api/catalogo',{cache:'no-store'}),fetch('/api/fotos/skus',{cache:'no-store'}).catch(function(){return null}),fetch('/api/config',{cache:'no-store'}).catch(function(){return null})]);
+    var rs=await Promise.all([fetch('/api/catalogo',{cache:'no-store'}),fetch('/api/fotos/skus',{cache:'no-store'}).catch(function(){return null}),fetch('/api/config',{cache:'no-store'}).catch(function(){return null}),fetch('/api/tienda/info',{cache:'no-store'}).catch(function(){return null})]);
     var cat=await rs[0].json();if(!Array.isArray(cat))throw 0;
-    var L={},P=[];cat.forEach(function(p){var s=String(p.sku);L[s]={stock:(p.stock===null||p.stock===undefined)?0:Number(p.stock),precio:Number(p.precio)||0};P.push({s:s,n:String(p.nombre||s),c:'',p:Number(p.precio)||0,o:0,d:0})});LIVE=L;D.prods=P;
+    var L={},P=[];cat.forEach(function(p){var s=String(p.sku),st=(p.stock===null||p.stock===undefined)?0:Number(p.stock),pr=Number(p.precio)||0;L[s]={stock:st};if(st>0&&pr>0)P.push({s:s,n:String(p.nombre||s),b:pr,st:st})});
+    P.sort(function(a,b){return a.n.localeCompare(b.n,'es')});LIVE=L;LISTA=P;
     if(rs[1]&&rs[1].ok){var f=await rs[1].json();FOTOS={};(f||[]).forEach(function(s){FOTOS[s]=1})}
-    if(rs[2]&&rs[2].ok){var c=await rs[2].json();if(c.nombreNegocio||c.negocioNombre){D.nombre=c.nombreNegocio||c.negocioNombre;pintaCab()}DEST=c.autoservicioDestino==='vendedor'?'vendedor':'pc'}
-    CARGADO=true;
-    var ab=$('sh').classList.contains('on')&&$('nm');if(!ab)pinta();else barra();
-  }catch(e){if(!CARGADO){$('grid').innerHTML='<div class="empty" style="grid-column:1/-1">No se pudo cargar el catálogo. Revisa tu conexión WiFi.</div>'}}
+    if(rs[2]&&rs[2].ok){var c=await rs[2].json();DEST=c.autoservicioDestino==='vendedor'?'vendedor':'pc';TASA=Number(c.tasaDolar)||0}
+    if(rs[3]&&rs[3].ok){INFO=await rs[3].json()||{};if(INFO.tasaDolar>0)TASA=Number(INFO.tasaDolar)}
+    CARGADO=true;try{var sm=sessionStorage.getItem('tt_metodo');if(sm&&!METODO)METODO=sm}catch(e){}
+    try{localStorage.setItem('tt_cache',JSON.stringify({l:LISTA,f:FOTOS,i:INFO,t:TASA,d:DEST}))}catch(e){}
+    pintaCab();var ab=$('sh').classList.contains('on');if(!ab)pinta();else barra();
+  }catch(e){if(!CARGADO)$('grid').innerHTML='<div class="empty" style="grid-column:1/-1">No se pudo cargar el catálogo. Revisa tu conexión WiFi.</div>'}
 }
-pinta();carga();setInterval(function(){if(!document.hidden&&!ENVIANDO)carga()},45000);
-document.addEventListener('visibilitychange',function(){if(!document.hidden)carga()});
+try{var ch=JSON.parse(localStorage.getItem('tt_cache')||'null');if(ch&&ch.l){LISTA=ch.l;FOTOS=ch.f||{};INFO=ch.i||{};TASA=ch.t||0;DEST=ch.d||'pc';LIVE={};LISTA.forEach(function(p){LIVE[p.s]={stock:p.st}});CARGADO=true;pintaCab()}}catch(e){}
+pinta();carga();setInterval(function(){if(!document.hidden&&!ENVIANDO&&!$('sh').classList.contains('on'))carga()},45000);
+document.addEventListener('visibilitychange',function(){if(!document.hidden&&!$('sh').classList.contains('on'))carga()});
 </script></body></html>
 '@
 $htmlVendedor = @'
@@ -22819,6 +22930,52 @@ while ($listener.IsListening) {
         } elseif ($method -eq "GET" -and ($path -eq "/" -or $path -eq "/pc")) {
             Enviar-Respuesta -Context $context -Body (Inyectar-Extras (Inyectar-Admin (Inyectar-Guardian $htmlPC)) 'pc')
 
+        } elseif ($method -eq "GET" -and ($path -eq "/tienda/logo" -or $path -eq "/tienda/portada")) {
+            $rutaImgT = Tienda-ImgNombre ($path.Substring(8))
+            if (Test-Path -LiteralPath $rutaImgT) {
+                try {
+                    $bytesT = [System.IO.File]::ReadAllBytes($rutaImgT)
+                    $ctT = "image/jpeg"
+                    if ($bytesT.Length -gt 12) {
+                        if ($bytesT[0] -eq 0x89 -and $bytesT[1] -eq 0x50) { $ctT = "image/png" }
+                        elseif ($bytesT[0] -eq 0x52 -and $bytesT[1] -eq 0x49 -and $bytesT[8] -eq 0x57) { $ctT = "image/webp" }
+                    }
+                    $context.Response.StatusCode = 200
+                    $context.Response.ContentType = $ctT
+                    $context.Response.Headers.Add("Cache-Control", "public, max-age=3600")
+                    $context.Response.ContentLength64 = $bytesT.Length
+                    $context.Response.OutputStream.Write($bytesT, 0, $bytesT.Length)
+                    $context.Response.OutputStream.Close()
+                } catch { $context.Response.StatusCode = 404; $context.Response.OutputStream.Close() }
+            } else { $context.Response.StatusCode = 404; $context.Response.OutputStream.Close() }
+
+        } elseif ($method -eq "GET" -and $path -eq "/api/tienda/info") {
+            $hT = Tienda-InfoLeer
+            if (-not $hT["nombre"]) { try { $hT["nombre"] = ([string]$global:reciboCfg.nombre).Trim() } catch {} }
+            $hT["logo"] = (Test-Path -LiteralPath (Tienda-ImgNombre "logo"))
+            $hT["portada"] = (Test-Path -LiteralPath (Tienda-ImgNombre "portada"))
+            try { $hT["tasaDolar"] = [double]$global:configApp.tasaDolar } catch { $hT["tasaDolar"] = 0 }
+            if (-not $hT["mt"]) { $hT["mt"] = "0" }
+            Enviar-Json $context $hT 200 8
+
+        } elseif ($method -eq "POST" -and $path -eq "/api/tienda/info") {
+            try {
+                $cuerpoT = (Leer-CuerpoTexto $request) | ConvertFrom-Json
+                $hT = Tienda-InfoLeer
+                if ($cuerpoT.info) { foreach ($pr in $cuerpoT.info.PSObject.Properties) { $hT[$pr.Name] = $pr.Value } }
+                foreach ($qT in @("logo", "portada")) {
+                    $dT = [string]$cuerpoT.$qT
+                    if ($dT -match "^data:[^;]+;base64,(.+)$") {
+                        [System.IO.File]::WriteAllBytes((Tienda-ImgNombre $qT), [Convert]::FromBase64String($matches[1]))
+                        $hT[$qT] = $true
+                    }
+                }
+                Tienda-InfoGuardar $hT
+                Enviar-Json $context @{ ok = $true } 200
+            } catch {
+                Enviar-Json $context @{ ok = $false; error = "$_" } 400
+            }
+
         } elseif ($method -eq "GET" -and $path -eq "/tienda") {
             # Catalogo para clientes generado por el propio servidor: solo productos con cantidad, el cliente pone solo su nombre.
             Enviar-Respuesta -Context $context -Body $htmlTienda
@@ -23017,6 +23174,12 @@ while ($listener.IsListening) {
 
         } elseif ($method -eq "GET" -and $path -eq "/manifest-vendedor.json") {
             Enviar-Respuesta -Context $context -Body $global:manifestVendedor -ContentType "application/manifest+json; charset=utf-8"
+
+        } elseif ($method -eq "GET" -and $path -eq "/manifest-tienda.json") {
+            $nomMan = "Catalogo"
+            try { $hMan = Tienda-InfoLeer; if ($hMan["nombre"]) { $nomMan = [string]$hMan["nombre"] } elseif ($global:reciboCfg.nombre) { $nomMan = [string]$global:reciboCfg.nombre } } catch {}
+            $manT = @{ name = $nomMan; short_name = $(if ($nomMan.Length -gt 12) { $nomMan.Substring(0, 12) } else { $nomMan }); start_url = "/tienda"; scope = "/"; display = "standalone"; background_color = "#f3f6f6"; theme_color = "#0a7c86"; icons = @(@{ src = "/icon-192.png"; sizes = "192x192"; type = "image/png" }, @{ src = "/icon-512.png"; sizes = "512x512"; type = "image/png" }) }
+            Enviar-Respuesta -Context $context -Body ($manT | ConvertTo-Json -Depth 5) -ContentType "application/manifest+json; charset=utf-8"
 
         } elseif ($method -eq "GET" -and $path -eq "/manifest-pc.json") {
             Enviar-Respuesta -Context $context -Body $global:manifestPC -ContentType "application/manifest+json; charset=utf-8"
