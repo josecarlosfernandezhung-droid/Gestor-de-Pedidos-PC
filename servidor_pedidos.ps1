@@ -12830,6 +12830,7 @@ document.addEventListener('change',function(e){var el=e.target;if(!el)return;
   if(el.dataset&&el.dataset.qi){var s2=el.dataset.qi,raw=el.value.replace(/\D/g,''),n2=raw===''?(CART[s2]||0):Math.min(stockDe(s2),parseInt(raw,10));if(n2<=0)delete CART[s2];else CART[s2]=n2;guardaCart();var cart=$('sh').classList.contains('on')&&$('pan').dataset.vista==='c';pinta();if(cart)abreCarrito()}
 });
 document.addEventListener('keydown',function(e){if(e.key==='Enter'&&e.target&&e.target.classList&&e.target.classList.contains('qi'))e.target.blur()});
+document.addEventListener('focusin', function (e) { var t = e.target; if (t && t.classList && t.classList.contains('qi')) { var sel = function () { try { t.select(); } catch (x) { } }; setTimeout(sel, 0); setTimeout(sel, 80); } });
 function cierra(){$('sh').classList.remove('on');$('pan').dataset.vista='';pinta()}
 /* ---- producto en grande ---- */
 var PQ=1;
