@@ -5803,8 +5803,9 @@ function Generar-TextoRecibo($p) {
 
     $fecha = [string]$p.hora
     try { $fecha = ([datetime]::ParseExact([string]$p.hora, "yyyy-MM-dd HH:mm:ss", $inv)).ToString("d/M/yyyy HH:mm", $inv) } catch {}
-    if ($rc.mostrarVendedor) { [void]$sb.AppendLine("Vendedor: $($p.vendedor)") }
+    if ($rc.mostrarVendedor -and [string]$p.vendedor) { [void]$sb.AppendLine("Vendedor: $($p.vendedor)") }
     if ([string]$p.clienteNombre) { foreach ($lcn in @(Partir-Texto ("Cliente: " + [string]$p.clienteNombre) $ancho)) { [void]$sb.AppendLine($lcn) } }
+    if ([string]$p.clienteTelefono) { [void]$sb.AppendLine("Telefono: " + [string]$p.clienteTelefono) }
     if ($rc.mostrarFolio) { [void]$sb.AppendLine("Folio: $($p.id)") }
     if ($rc.mostrarFecha) { [void]$sb.AppendLine("Fecha: $fecha") }
     if ([string]$p.estado -ne "cobrado") { [void]$sb.AppendLine("Estado: PENDIENTE DE PAGO") }
@@ -6026,6 +6027,26 @@ function Generar-TextoGasto($r) {
 }
 
 function Generar-TextoFiado($r) {
+    # Cuenta por cobrar (formato de siempre) + comprobante para quien hace el domicilio: ticket de venta normal (mismo formato que un pedido) con cliente, telefono y articulos
+    try {
+        $itsF = New-Object System.Collections.ArrayList
+        foreach ($itf in @($r.items)) { if ($itf) { [void]$itsF.Add(@{ nombre = [string]$itf.nombre; cantidad = [double]$itf.cantidad; precio = [double]$itf.precio }) } }
+        $pagadoF = ([string]$r.estado).ToUpper() -eq "PAGADO"
+        $pf = @{
+            id = "F-" + [string]$r.id; hora = [string]$r.hora; vendedor = ""
+            clienteNombre = [string]$r.cliente; clienteTelefono = [string]$r.telefono
+            estado = $(if ($pagadoF) { "cobrado" } else { "pendiente" }); metodoPago = "Efectivo"
+            items = @($itsF); totalCobrado = [double]$r.monto
+        }
+        # El comprobante del domicilio solo sale cuando en Notas se escribe "domicilio"; si no, solo la cuenta por cobrar de siempre
+        if (([string]$r.notas) -match '(?i)domicilio') {
+            $dom = (Generar-TextoRecibo $pf)
+            return ((Generar-TextoFiadoClasico $r) + $dom)
+        }
+    } catch { }
+    return (Generar-TextoFiadoClasico $r)
+}
+function Generar-TextoFiadoClasico($r) {
     $rc = $global:reciboCfg
     $ancho = [int]$rc.ancho
     if ($ancho -lt 24) { $ancho = 32 }
@@ -11384,6 +11405,15 @@ TT.iniciar('pc');
 
     // ================= Cuentas y gastos (reemplaza post-its flotantes) =================
     // Gastos del negocio y cuentas por cobrar (fiado) con historial e impresion termica.
+    /* Primera letra en mayuscula al escribir en Gastos / Cuentas por cobrar (nombre, articulos, concepto, notas) */
+    document.addEventListener('input', function (e) {
+      const el = e.target; if (!el || e.isComposing || el.tagName !== 'INPUT' || !el.closest || !el.closest('#gcOverlay')) return;
+      const ty = (el.getAttribute('type') || 'text').toLowerCase(); if (ty !== 'text' || el.readOnly || el.id === 'gcTelefono') return;
+      const v = el.value, m = /^(\s*)([a-z\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1\u00fc])/.exec(v); if (!m) return;
+      const a = el.selectionStart, b = el.selectionEnd, i = m[1].length;
+      el.value = v.slice(0, i) + v.charAt(i).toUpperCase() + v.slice(i + 1);
+      try { el.setSelectionRange(a, b); } catch (x) { }
+    }, true);
     let gcRegistros = [];
     let gcTipo = 'gasto';
     let gcItems = [];
