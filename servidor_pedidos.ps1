@@ -20656,6 +20656,10 @@ function hoyLocal(){
   const d = new Date();
   return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
 }
+function aplicarTasaServidor(d){
+  const t = d ? parseFloat(d.tasaDolar) : 0;
+  if(t > 0){ document.getElementById('rate').value = t; update(); }
+}
 function escHtml(t){ return String(t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 function pintarServidor(extra){
   const el = document.getElementById('axis-info');
@@ -20795,6 +20799,7 @@ async function cargarUsuariosAxis(silencioso){
   if(!sel || !axisTieneServidor()) return;
   try{
     const d = await axisFetch('/api/caja-axis?usuarios=1');
+    aplicarTasaServidor(d);
     const guardado = localStorage.getItem('cd_axis_user') || 'todos';
     sel.innerHTML = '<option value="todos">Todos los usuarios</option>' + (d.usuarios||[]).map(u=>'<option value="'+u.id+'">'+escHtml(u.nombre)+'</option>').join('');
     sel.value = Array.from(sel.options).some(o=>o.value===guardado) ? guardado : 'todos';
@@ -20817,10 +20822,11 @@ async function traerDeAxis(){
     document.getElementById('expected').value = d.esperado ? Math.round(d.esperado*100)/100 : '';
     document.getElementById('transfers').value = d.transferencias ? Math.round(d.transferencias*100)/100 : '';
     document.getElementById('withdrawals').value = d.retiros ? Math.round(d.retiros*100)/100 : '';
+    aplicarTasaServidor(d);
     update();
     let txt = '✅ ' + (d.usuarioNombre||'Todos') + ' · ' + fecha + ' · ' + d.cantidadVentas + ' ventas\n' +
       'Ventas: ' + fmt(d.ventas) + ' · Transf.: ' + fmt(d.transferencias) + ' · Devoluciones: ' + fmt(d.devoluciones) +
-      (d.ingresos ? ' · Ingresos: ' + fmt(d.ingresos) : '') + ' · Retiros/gastos: ' + fmt(d.retiros);
+      (d.ingresos ? ' · Ingresos: ' + fmt(d.ingresos) : '') + ' · Retiros/gastos: ' + fmt(d.retiros) + (d.tasaDolar > 0 ? ' · Tasa USD: ' + d.tasaDolar : '');
     if(usuario === 'todos' && (d.porUsuario||[]).length > 1){
       txt += '\n' + d.porUsuario.map(u=>u.nombre+': '+fmt(u.esperado)+(u.transferencias?' (transf. '+fmt(u.transferencias)+')':'')).join('\n');
     }
@@ -22384,7 +22390,9 @@ function Leer-CajaAxis([string]$desde, [string]$hasta, [string]$usuario, [bool]$
             [void]$usuariosLista.Add([pscustomobject]@{ id = $idU; nombre = $nm })
         }
     }
-    if ($soloUsuarios) { return @{ usuarios = @($usuariosLista.ToArray()) } }
+    $tasaUsdCfg = 0.0
+    try { $tasaUsdCfg = [double]$global:configApp.tasaDolar } catch { $tasaUsdCfg = 0.0 }
+    if ($soloUsuarios) { return @{ usuarios = @($usuariosLista.ToArray()); tasaDolar = $tasaUsdCfg } }
 
     $ids = New-Object System.Collections.ArrayList
     foreach ($a in @($c.almacenes)) { $n = 0; if ([int]::TryParse([string]$a, [ref]$n)) { [void]$ids.Add($n) } }
@@ -22427,9 +22435,9 @@ function Leer-CajaAxis([string]$desde, [string]$hasta, [string]$usuario, [bool]$
         elseif (($op -eq 34) -and ($sg -eq -1)) { if ($esT) { $u.devT += $sum } else { $u.devE += $sum } }
         elseif (($op -eq 300) -and ($sg -eq 1)) { $u.ingresos += $sum }
     }
-    # Gastos / retiros de la caja (no incluye devoluciones, que ya se restan arriba).
+    # Gastos / retiros de la caja. Las devoluciones (OperType 34) quedan fuera: AxisPOS ya las descuenta del esperado y de lo de cada vendedor.
     $fechaC = "DATE(IF(c.UserRealtime < '2000-01-01', c.Date, c.UserRealtime))"
-    $sqlC = "SELECT c.UserID, ROUND(SUM(c.Profit), 2) FROM cashbook c WHERE c.Sign = -1 AND c.OperType <> 13 AND c.ObjectID IN ($lista) AND $fechaC BETWEEN '$desde' AND '$hasta' GROUP BY c.UserID"
+    $sqlC = "SELECT c.UserID, ROUND(SUM(c.Profit), 2) FROM cashbook c WHERE c.Sign = -1 AND c.OperType NOT IN (13, 34) AND c.ObjectID IN ($lista) AND $fechaC BETWEEN '$desde' AND '$hasta' GROUP BY c.UserID"
     $tCb = Ejecutar-ConsultaAxis $sqlC
     foreach ($lin in ($tCb -split "`n")) {
         $lin = $lin.TrimEnd("`r")
@@ -22460,6 +22468,7 @@ function Leer-CajaAxis([string]$desde, [string]$hasta, [string]$usuario, [bool]$
     if ($filtrar) { $nombreSel = if ($nomPorId.ContainsKey($usuario)) { [string]$nomPorId[$usuario] } else { "Usuario " + $usuario } }
     return @{
         usuarios = @($usuariosLista.ToArray())
+        tasaDolar = $tasaUsdCfg
         usuario = $(if ($filtrar) { $usuario } else { "todos" })
         usuarioNombre = $nombreSel
         desde = $desde; hasta = $hasta
