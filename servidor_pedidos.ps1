@@ -13592,6 +13592,7 @@ TT.iniciar('vendedor');
     }
 
     let catalogo = [];
+    let catalogoDesdeLocal = false, catalogoLocalT = 0;   // true = lo que se ve es la copia guardada en el telefono
     let carrito = [];
     // QR de pago guardado en la PC (Ajustes). Se copia al telefono para ensenarselo al cliente
     // cuando se cobra por transferencia (y que siga saliendo aunque se caiga la red).
@@ -13992,8 +13993,28 @@ TT.iniciar('vendedor');
     // un nombre que este mismo telefono ya verifico antes contra el servidor
     // (guardado en 'vendedorValidado'); un nombre nuevo nunca entra sin red.
     async function consultarPinVendedor(nombre, pin) {
-      const r = await fetch('/api/pines/verificar', { method: 'POST', body: JSON.stringify({ vendedor: nombre, pin: pin }) });
-      return await r.json();
+      // Con tiempo limite: si la PC no contesta, se pasa enseguida al modo sin conexion (antes se quedaba colgado).
+      const ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+      const t = ctrl ? setTimeout(function () { try { ctrl.abort(); } catch (e) {} }, 3000) : null;
+      try {
+        const r = await fetch('/api/pines/verificar', { method: 'POST', body: JSON.stringify({ vendedor: nombre, pin: pin }), signal: ctrl ? ctrl.signal : undefined });
+        return await r.json();
+      } finally { if (t) clearTimeout(t); }
+    }
+    // PIN verificado por la PC, guardado en este telefono por vendedor: permite entrar sin conexion aunque se haya cerrado la sesion.
+    function pinOfflineGuardar(nombre, pin) {
+      try {
+        if (!nombre || !pin) return;
+        const m = JSON.parse(localStorage.getItem('vendedoresPinOffline') || '{}') || {};
+        m[String(nombre).trim().toLowerCase()] = String(pin);
+        localStorage.setItem('vendedoresPinOffline', JSON.stringify(m));
+      } catch (e) {}
+    }
+    function pinOfflineLeer(nombre) {
+      try {
+        const m = JSON.parse(localStorage.getItem('vendedoresPinOffline') || '{}') || {};
+        return m[String(nombre || '').trim().toLowerCase()] || '';
+      } catch (e) { return ''; }
     }
     // ---- Bloqueo por ausencia: el PIN solo se vuelve a pedir si el vendedor estuvo 2 horas (o mas) fuera de la app ----
     // Mientras trabaja en la app no se pide nunca (aunque pasen horas). Si sale y vuelve antes de 2 horas, entra directo.
@@ -14029,7 +14050,7 @@ TT.iniciar('vendedor');
       try { d = await consultarPinVendedor(nombre, miPin()); }
       catch (e) {
         // Sin conexion con la PC: si estuvo 2 horas o mas fuera de la app y tiene PIN guardado en este telefono, lo pide igual.
-        if (ausenciaExcedida() && miPin()) {
+        if (ausenciaExcedida() && (miPin() || pinOfflineLeer(nombre))) {
           loginPinLargo = parseInt(localStorage.getItem('vendedorPinLargo') || '6', 10) || 6;
           abrirLogin(nombre);
           return false;
@@ -14130,6 +14151,7 @@ TT.iniciar('vendedor');
       if (loginPin.length === loginPinLargo) loginEntrar();
     }
     function entrarComoVendedor(nombre, pin) {
+      pinOfflineGuardar(nombre, pin);
       nombreInput.value = nombre;
       localStorage.setItem('vendedorNombre', nombre);
       localStorage.setItem('vendedorValidado', nombre.trim().toLowerCase());
@@ -14176,6 +14198,12 @@ TT.iniciar('vendedor');
         const validado = (localStorage.getItem('vendedorValidado') || '').trim().toLowerCase();
         if (validado === nombre.toLowerCase() && miPin()) {
           entrarComoVendedor(nombre, miPin());
+        } else if (pinOfflineLeer(nombre)) {
+          // Ya entro antes en este telefono: se le pide el PIN y se valida con la copia guardada.
+          loginPinLargo = parseInt(localStorage.getItem('vendedorPinLargo') || '6', 10) || 6;
+          if (pinOfflineLeer(nombre).length) loginPinLargo = pinOfflineLeer(nombre).length;
+          loginNombre = nombre; loginPin = '';
+          mostrarPasoPin();
         } else {
           setLoginError('Sin conexion con la PC: no se puede verificar ese usuario todavia.');
         }
@@ -14198,7 +14226,8 @@ TT.iniciar('vendedor');
       loginOcupado = false;
       if (!d) {
         const validado = (localStorage.getItem('vendedorValidado') || '').trim().toLowerCase();
-        if (validado === loginNombre.toLowerCase() && miPin() && miPin() === loginPin) { entrarComoVendedor(loginNombre, loginPin); return; }
+        const pinCopia = pinOfflineLeer(loginNombre);
+        if ((validado === loginNombre.toLowerCase() && miPin() && miPin() === loginPin) || (pinCopia && pinCopia === loginPin)) { entrarComoVendedor(loginNombre, loginPin); return; }
         loginPin = ''; pintarPuntosPin();
         setLoginError('Sin conexion con la PC. Revisa la Wi-Fi e intenta otra vez.');
         return;
@@ -14277,6 +14306,8 @@ TT.iniciar('vendedor');
         const datosCat = await res.json();
         if (!res.ok || !Array.isArray(datosCat)) throw new Error('catalogo');
         catalogo = datosCat;
+        catalogoDesdeLocal = false;
+        try { delete info.dataset.sinpc; } catch (e) {}
         try {
           const resCfg = await fetchConTiempo('/api/config', 4000);
           if (resCfg.ok) {
@@ -14310,10 +14341,20 @@ TT.iniciar('vendedor');
       } catch(e) {
         info.classList.add('error');
         document.getElementById('btnMenu').classList.add('alerta');   // punto rojo: hay un problema en Ajustes
-        // MODO SIN PC: se usa el ultimo catalogo guardado en este telefono
+        // MODO SIN PC: se usa el ultimo catalogo guardado en este telefono.
+        // Si ya esta cargado, no se vuelve a leer ni a redibujar cada 15 s (eso trababa el buscador y los Ajustes).
+        if (catalogoDesdeLocal && catalogo.length && !autoservicioActivo) {
+          if (!info.dataset.sinpc) {
+            info.dataset.sinpc = '1';
+            const f0 = new Date(catalogoLocalT);
+            info.textContent = 'SIN PC: usando el catalogo guardado el ' + f0.toLocaleDateString() + ' ' + f0.toLocaleTimeString().slice(0, 5) + ' (' + catalogo.length + ' productos). Los pedidos se guardan y se envian solos al volver.';
+          }
+          return;
+        }
         const guardado = leerCatalogoLocal();
         if (guardado) {
           catalogo = guardado.catalogo;
+          catalogoDesdeLocal = true; catalogoLocalT = guardado.t;
           ocultarSinStock = !!guardado.ocultarSinStock;
           tasaDolarActual = guardado.tasaDolarActual || 0;
           umbralStockBajoActual = guardado.umbralStockBajoActual || 0;
@@ -14353,6 +14394,21 @@ TT.iniciar('vendedor');
         catalogo.forEach(p => { if (usado[p.sku] && p.stock !== null && p.stock !== undefined) p.stock = Math.max(0, p.stock - usado[p.sku]); });
       } catch (e) {}
     }
+    // Al abrir: se muestra enseguida la copia guardada en el telefono (el buscador responde al instante, sin esperar a la PC).
+    (function () {
+      try {
+        const g = leerCatalogoLocal();
+        if (g && !catalogo.length) {
+          catalogo = g.catalogo; catalogoDesdeLocal = true; catalogoLocalT = g.t;
+          ocultarSinStock = !!g.ocultarSinStock;
+          tasaDolarActual = g.tasaDolarActual || 0;
+          umbralStockBajoActual = g.umbralStockBajoActual || 0;
+          permitirDescuentosActual = !!g.permitirDescuentosActual;
+          permitirBorradoresActual = !!g.permitirBorradoresActual;
+          aplicarColaAlStock();   // (el buscador ya usa el catalogo guardado desde la primera tecla)
+        }
+      } catch (e) {}
+    })();
     cargarCatalogo();
     setInterval(cargarCatalogo, 15000);
     // Aviso rapido de cambios: pregunta una firma muy liviana cada 3 s y solo baja el catalogo cuando cambia (stock al instante).
@@ -20826,7 +20882,7 @@ async function traerDeAxis(){
     update();
     let txt = '✅ ' + (d.usuarioNombre||'Todos') + ' · ' + fecha + ' · ' + d.cantidadVentas + ' ventas\n' +
       'Ventas: ' + fmt(d.ventas) + ' · Transf.: ' + fmt(d.transferencias) + ' · Devoluciones: ' + fmt(d.devoluciones) +
-      (d.ingresos ? ' · Ingresos: ' + fmt(d.ingresos) : '') + ' · Retiros/gastos: ' + fmt(d.retiros) + (d.tasaDolar > 0 ? ' · Tasa USD: ' + d.tasaDolar : '');
+      (d.ingresos ? ' · Ingresos: ' + fmt(d.ingresos) : '') + ' · Retiros/gastos: ' + fmt(d.retiros) + (d.tasaDolar > 0 ? ' · Tasa USD: ' + d.tasaDolar : ' · Tasa USD: sin configurar en el servidor');
     if(usuario === 'todos' && (d.porUsuario||[]).length > 1){
       txt += '\n' + d.porUsuario.map(u=>u.nombre+': '+fmt(u.esperado)+(u.transferencias?' (transf. '+fmt(u.transferencias)+')':'')).join('\n');
     }
@@ -22437,17 +22493,29 @@ function Leer-CajaAxis([string]$desde, [string]$hasta, [string]$usuario, [bool]$
     }
     # Gastos / retiros de la caja. Las devoluciones (OperType 34) quedan fuera: AxisPOS ya las descuenta del esperado y de lo de cada vendedor.
     $fechaC = "DATE(IF(c.UserRealtime < '2000-01-01', c.Date, c.UserRealtime))"
-    $sqlC = "SELECT c.UserID, ROUND(SUM(c.Profit), 2) FROM cashbook c WHERE c.Sign = -1 AND c.OperType NOT IN (13, 34) AND c.ObjectID IN ($lista) AND $fechaC BETWEEN '$desde' AND '$hasta' GROUP BY c.UserID"
+    $sqlC = "SELECT c.UserID, c.OperType, ROUND(SUM(c.Profit), 2) FROM cashbook c WHERE c.Sign = -1 AND c.OperType <> 13 AND c.ObjectID IN ($lista) AND $fechaC BETWEEN '$desde' AND '$hasta' GROUP BY c.UserID, c.OperType"
     $tCb = Ejecutar-ConsultaAxis $sqlC
+    $cbTotal = @{}; $cbTiene34 = @{}
     foreach ($lin in ($tCb -split "`n")) {
         $lin = $lin.TrimEnd("`r")
         if ([string]::IsNullOrWhiteSpace($lin)) { continue }
         $f = $lin -split "`t"
-        if ($f.Count -lt 2) { continue }
+        if ($f.Count -lt 3) { continue }
         $uid = ([string]$f[0]).Trim()
-        $sum = 0.0; [void][double]::TryParse(([string]$f[1]).Trim(), $estilo, $inv, [ref]$sum)
+        $opC = 0; [void][int]::TryParse(([string]$f[1]).Trim(), [ref]$opC)
+        $sum = 0.0; [void][double]::TryParse(([string]$f[2]).Trim(), $estilo, $inv, [ref]$sum)
         if (-not $acum.ContainsKey($uid)) { $acum[$uid] = & $nuevo }
-        $acum[$uid].retiros += $sum
+        if ($opC -eq 34) { $cbTiene34[$uid] = $true; continue }   # devolucion registrada como tipo 34: ya esta restada en el esperado
+        if (-not $cbTotal.ContainsKey($uid)) { $cbTotal[$uid] = 0.0 }
+        $cbTotal[$uid] += $sum
+    }
+    # Las devoluciones en efectivo tambien salen de la caja registradora; si AxisPOS no las marca como tipo 34, se quitan aqui
+    # (ya estan restadas en el esperado) para que no aparezcan como gasto/retiro.
+    foreach ($uid in @($acum.Keys)) {
+        $r = 0.0
+        if ($cbTotal.ContainsKey($uid)) { $r = [double]$cbTotal[$uid] }
+        if ((-not $cbTiene34.ContainsKey($uid)) -and ($acum[$uid].devE -gt 0)) { $r = [math]::Max(0.0, $r - [double]$acum[$uid].devE) }
+        $acum[$uid].retiros = [math]::Round($r, 2)
     }
 
     $tot = & $nuevo
