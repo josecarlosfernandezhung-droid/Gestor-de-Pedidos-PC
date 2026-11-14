@@ -14108,10 +14108,21 @@ TT.iniciar('vendedor');
       box.style.display = 'none';
       loginContinuar();      // un solo toque: pasa directo a pedir el PIN
     });
+    // La pantalla de login empieza debajo de la barra superior: asi el boton Ajustes sigue tocable
+    // y se puede cambiar la IP del servidor aunque el login no deje entrar (por ejemplo, PC nueva u otra IP).
+    function ajustarLoginBajoBarra() {
+      try {
+        const h = document.querySelector('body > header');
+        const b = h ? Math.round(h.getBoundingClientRect().bottom) : 0;
+        loginEl.style.top = (b > 0 && b < window.innerHeight * 0.4) ? (b + 'px') : '0';
+      } catch (e) {}
+    }
+    window.addEventListener('resize', function () { if (loginVisible()) ajustarLoginBajoBarra(); });
     function abrirLogin(nombre) {
       loginPin = '';
       loginOcupado = false;
       loginEl.style.display = 'flex';
+      ajustarLoginBajoBarra();
       document.getElementById('loginOlvido').style.display = 'none';
       if (autoservicioActivo) { prepararLoginCliente(); mostrarPasoNombre(); return; }
       cargarListaUsuariosLogin();
