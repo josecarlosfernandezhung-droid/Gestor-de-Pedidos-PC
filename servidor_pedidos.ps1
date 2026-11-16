@@ -4784,6 +4784,80 @@ function Cargar-GastosCuentas {
 }
 Cargar-GastosCuentas
 
+# ---- Pedidos que llegan desde el panel del catalogo (Cuentas y gastos > Pedidos) ----
+function Pedido-Panel-Buscar([string]$ref) {
+    foreach ($rx in @($global:gastosCuentas.registros)) { if ($rx -and [string]$rx.tipo -eq "pedido" -and [string]$rx.ref -eq $ref) { return $rx } }
+    return $null
+}
+function Pedido-Panel-Recibir($cuerpo) {
+    $cambios = $false
+    foreach ($a in @($cuerpo.ack)) {
+        $refA = ([string]$a).Trim(); if (-not $refA) { continue }
+        $rA = Pedido-Panel-Buscar $refA
+        if ($rA -and [bool]$rA.cambiadoPC) { $rA.cambiadoPC = $false; $cambios = $true }
+    }
+    foreach ($pd in @($cuerpo.pedidos)) {
+        if (-not $pd) { continue }
+        $ref = ([string]$pd.ref).Trim(); if (-not $ref) { continue }
+        $est = ([string]$pd.estado).Trim().ToUpperInvariant(); if (-not $est) { $est = "NUEVO" }
+        if ($est -notin @('NUEVO','CONFIRMADO','ENTREGADO','CANCELADO')) { continue }
+        $r = Pedido-Panel-Buscar $ref
+        if ($r) {
+            if ((-not [bool]$r.cambiadoPC) -and ([string]$r.estado -ne $est)) { $r.estado = $est; $cambios = $true }
+            # Pedidos guardados antes de que se enviara el SKU: se completan con el SKU que manda el panel
+            $sinSku = $false; foreach ($itR in @($r.items)) { if ($itR -and -not [string]$itR.sku) { $sinSku = $true } }
+            $conSku = $false; foreach ($itN in @($pd.items)) { if ($itN -and [string]$itN.s) { $conSku = $true } }
+            if ($sinSku -and $conSku) {
+                $itemsN = New-Object System.Collections.ArrayList
+                foreach ($itN in @($pd.items)) {
+                    if (-not $itN) { continue }
+                    $qN = 1.0; try { $qN = [double]$itN.q } catch { $qN = 1 }; if ($qN -le 0) { $qN = 1 }
+                    $prN = 0.0; try { $prN = [double]$itN.p } catch { $prN = 0 }
+                    $pcN = $prN; try { if ($null -ne $itN.pc) { $pcN = [double]$itN.pc } } catch { $pcN = $prN }
+                    [void]$itemsN.Add([pscustomobject]@{ sku = ([string]$itN.s).Trim(); nombre = [string]$itN.n; cantidad = $qN; precio = [math]::Round($prN, 2); precioCup = [math]::Round($pcN, 2) })
+                }
+                $r.items = @($itemsN); $cambios = $true
+            }
+        } else {
+            $items = New-Object System.Collections.ArrayList
+            foreach ($it in @($pd.items)) {
+                if (-not $it) { continue }
+                $q = 1.0; try { $q = [double]$it.q } catch { $q = 1 }; if ($q -le 0) { $q = 1 }
+                $pr = 0.0; try { $pr = [double]$it.p } catch { $pr = 0 }
+                $pc = $pr; try { if ($null -ne $it.pc) { $pc = [double]$it.pc } } catch { $pc = $pr }
+                [void]$items.Add([pscustomobject]@{ sku = ([string]$it.s).Trim(); nombre = [string]$it.n; cantidad = $q; precio = [math]::Round($pr, 2); precioCup = [math]::Round($pc, 2) })
+            }
+            $hora = [string]$pd.hora; if (-not $hora) { $hora = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss") }
+            $idG = [int]$global:gastosCuentas.siguienteId
+            $global:gastosCuentas.siguienteId = $idG + 1
+            $nuevo = [pscustomobject]@{
+                id = $idG; tipo = "pedido"; ref = $ref; hora = $hora; estado = $est; cambiadoPC = $false
+                cliente = ([string]$pd.cliente).Trim(); telefono = ([string]$pd.tel).Trim(); direccion = ([string]$pd.dir).Trim()
+                entrega = ([string]$pd.entrega).Trim(); pago = ([string]$pd.pago).Trim(); nota = ([string]$pd.nota).Trim()
+                moneda = ([string]$pd.moneda).Trim(); totalTxt = ([string]$pd.total).Trim()
+                items = @($items); monto = 0
+            }
+            [void]$global:gastosCuentas.registros.Add($nuevo)
+            $cambios = $true
+        }
+    }
+    # Limpieza: eliminados ya avisados al panel y pedidos cerrados de hace mas de 60 dias
+    $quitar = New-Object System.Collections.ArrayList
+    $limite = (Get-Date).AddDays(-60)
+    foreach ($rg in @($global:gastosCuentas.registros)) {
+        if (-not $rg -or [string]$rg.tipo -ne "pedido" -or [bool]$rg.cambiadoPC) { continue }
+        $viejo = $false; try { $viejo = ([datetime]::ParseExact([string]$rg.hora, "yyyy-MM-dd HH:mm:ss", $null) -lt $limite) } catch {}
+        if ([string]$rg.estado -eq "ELIMINADO" -or ($viejo -and [string]$rg.estado -ne "NUEVO")) { [void]$quitar.Add($rg) }
+    }
+    foreach ($q in $quitar) { [void]$global:gastosCuentas.registros.Remove($q); $cambios = $true }
+    if ($cambios) { Guardar-GastosCuentas }
+    $estados = @{}
+    foreach ($rg in @($global:gastosCuentas.registros)) {
+        if ($rg -and [string]$rg.tipo -eq "pedido" -and [bool]$rg.cambiadoPC) { $estados[[string]$rg.ref] = ([string]$rg.estado).ToLowerInvariant() }
+    }
+    return $estados
+}
+
 function Limpiar-TextoPostit($t) {
     $s = [regex]::Replace([string]$t, '[\x00-\x08\x0B\x0C\x0E-\x1F]', '')
     $s = $s.Trim()
@@ -5806,6 +5880,8 @@ function Generar-TextoRecibo($p) {
     if ($rc.mostrarVendedor -and [string]$p.vendedor) { [void]$sb.AppendLine("Vendedor: $($p.vendedor)") }
     if ([string]$p.clienteNombre) { foreach ($lcn in @(Partir-Texto ("Cliente: " + [string]$p.clienteNombre) $ancho)) { [void]$sb.AppendLine($lcn) } }
     if ([string]$p.clienteTelefono) { [void]$sb.AppendLine("Telefono: " + [string]$p.clienteTelefono) }
+    if ([string]$p.entregaPedido) { foreach ($len in @(Partir-Texto ("Entrega: " + [string]$p.entregaPedido) $ancho)) { [void]$sb.AppendLine($len) } }
+    if ([string]$p.notaPedido) { foreach ($lnp in @(Partir-Texto ("Nota: " + [string]$p.notaPedido) $ancho)) { [void]$sb.AppendLine($lnp) } }
     if ($rc.mostrarFolio) { [void]$sb.AppendLine("Folio: $($p.id)") }
     if ($rc.mostrarFecha) { [void]$sb.AppendLine("Fecha: $fecha") }
     if ([string]$p.estado -ne "cobrado") { [void]$sb.AppendLine("Estado: PENDIENTE DE PAGO") }
@@ -5815,7 +5891,7 @@ function Generar-TextoRecibo($p) {
     # Si se paga por transferencia, el recibo muestra directamente el precio
     # por transferencia de cada producto (nunca el precio base).
     $metodo = [string]$p.metodoPago
-    $factor = if ($metodo -eq "Transferencia") { 2 } else { 1 }
+    $factor = if ($metodo -eq "Transferencia" -and -not [string]$p.sinFactor) { 2 } else { 1 }
     $subtotal = 0.0
     $hayItems = $false
     foreach ($it in @($p.items)) {
@@ -5860,6 +5936,7 @@ function Generar-TextoRecibo($p) {
         "Otro"          { "Otra forma de pago" }
         default         { "Pago en efectivo" }
     }
+    if ([string]$p.etiquetaPago) { $textoMetodo = "Pago: " + [string]$p.etiquetaPago }
     [void]$sb.AppendLine((Linea-LR $textoMetodo (Formato-Monto $total) $ancho))
 
     $recibido = 0.0
@@ -5981,6 +6058,28 @@ function Clave-EnvioBuscar([string]$clave) {
 function Clave-EnvioGuardar([string]$clave, [string]$resp) {
     if ([string]::IsNullOrWhiteSpace($clave)) { return }
     $global:clavesEnvio[$clave] = @{ t = (Get-Date); resp = $resp }
+}
+
+# Ticket de un pedido que llego del panel del catalogo: mismo formato del recibo de un pedido normal, con el nombre del cliente
+function Generar-TextoPedidoPanel($r) {
+    $items = New-Object System.Collections.ArrayList
+    $tot = 0.0
+    foreach ($it in @($r.items)) {
+        if (-not $it) { continue }
+        $pu = 0.0; try { $pu = [double]$it.precioCup } catch { $pu = 0 }
+        $cn = 1.0; try { $cn = [double]$it.cantidad } catch { $cn = 1 }
+        $tot += $pu * $cn
+        [void]$items.Add([pscustomobject]@{ nombre = [string]$it.nombre; cantidad = $cn; precio = $pu; series = @() })
+    }
+    $pago = [string]$r.pago
+    $met = "Efectivo"
+    if ($pago -match "(?i)usd|dolar") { $met = "USD" } elseif ($pago -match "(?i)transfer") { $met = "Transferencia" } elseif ($pago -and $pago -notmatch "(?i)efectivo") { $met = "Otro" }
+    $p = [pscustomobject]@{
+        hora = [string]$r.hora; vendedor = ""; clienteNombre = [string]$r.cliente; clienteTelefono = [string]$r.telefono
+        id = [string]$r.ref; estado = "pendiente"; metodoPago = $met; items = @($items); totalCobrado = [math]::Round($tot, 2); montoRecibido = 0
+        sinFactor = $true; etiquetaPago = $pago; entregaPedido = [string]$r.entrega; notaPedido = [string]$r.nota
+    }
+    return (Generar-TextoRecibo $p)
 }
 
 function Generar-TextoGasto($r) {
@@ -11474,6 +11573,7 @@ TT.iniciar('pc');
           '<div class="gc-tabs">' +
             '<button type="button" class="gc-tab activo" id="gcTabNuevo" onclick="gcTab(\'nuevo\')">Nuevo</button>' +
             '<button type="button" class="gc-tab" id="gcTabHist" onclick="gcTab(\'hist\')">Historial</button>' +
+            '<button type="button" class="gc-tab" id="gcTabPed" onclick="gcTab(\'ped\')">Pedidos</button>' +
           '</div>' +
           '<div id="gcVistaNuevo">' +
             '<div class="gc-tipo">' +
@@ -11506,6 +11606,10 @@ TT.iniciar('pc');
               '<button type="button" class="btn" style="flex:1;background:#b45309;" onclick="gcGuardar(true)">Guardar e imprimir</button>' +
             '</div>' +
           '</div>' +
+          '<div id="gcVistaPed" style="display:none;">' +
+            '<div id="gcListaPed"></div>' +
+            '<div class="gc-msg" id="gcMsgPed"></div>' +
+          '</div>' +
           '<div id="gcVistaHist" style="display:none;">' +
             '<div id="gcListaHist"></div>' +
             '<div class="gc-msg" id="gcMsgHist"></div>' +
@@ -11525,6 +11629,7 @@ TT.iniciar('pc');
       if (!gcItems.length) gcAddItem();
       document.getElementById('gcMsg').textContent = '';
       gcCargarCatalogo();
+      gcCargarPed(true);
     }
     function gcCerrar() {
       const o = document.getElementById('gcOverlay');
@@ -11535,7 +11640,10 @@ TT.iniciar('pc');
       document.getElementById('gcTabHist').classList.toggle('activo', t === 'hist');
       document.getElementById('gcVistaNuevo').style.display = t === 'nuevo' ? '' : 'none';
       document.getElementById('gcVistaHist').style.display = t === 'hist' ? '' : 'none';
+      document.getElementById('gcTabPed').classList.toggle('activo', t === 'ped');
+      document.getElementById('gcVistaPed').style.display = t === 'ped' ? '' : 'none';
       if (t === 'hist') gcCargarHist();
+      if (t === 'ped') gcCargarPed(false);
     }
     function gcSetTipo(t) {
       gcTipo = t;
@@ -11720,7 +11828,7 @@ TT.iniciar('pc');
         const r = await fetch('/api/gastos-cuentas');
         const d = await r.json();
         if (!d || !d.ok) { box.innerHTML = ''; msg.textContent = 'No se pudo cargar.'; return; }
-        gcRegistros = d.registros || [];
+        gcRegistros = (d.registros || []).filter(function (x) { return x.tipo !== 'pedido'; });
         const totG = (typeof d.totalGastos === 'number') ? d.totalGastos : gcRegistros.filter(function (x) { return x.tipo === 'gasto'; }).reduce(function (s, x) { return s + (parseFloat(x.monto) || 0); }, 0);
         const totF = (typeof d.totalFiadosPendientes === 'number') ? d.totalFiadosPendientes : 0;
         if (!gcRegistros.length) {
@@ -11850,6 +11958,71 @@ TT.iniciar('pc');
       } catch (e) {
         box.innerHTML = '';
         msg.textContent = 'Error de red.';
+      }
+    }
+    function gcEscP(x) { return String(x == null ? '' : x).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+    async function gcPedOp(op, id, estado) {
+      const msg = document.getElementById('gcMsgPed');
+      msg.style.color = '#94a3b8'; msg.textContent = op === 'imprimir' ? 'Imprimiendo...' : 'Guardando...';
+      try {
+        const r = await fetch('/api/gastos-cuentas', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ op: op, id: id, estado: estado }) });
+        const d = await r.json().catch(function () { return null; });
+        if (!r.ok || !d || !d.ok) { msg.style.color = '#fca5a5'; msg.textContent = (d && d.error) || 'No se pudo completar.'; return; }
+        msg.style.color = '#86efac'; msg.textContent = op === 'imprimir' ? 'Impreso.' : 'Listo.';
+        if (op !== 'imprimir') gcCargarPed(false);
+      } catch (e) { msg.style.color = '#fca5a5'; msg.textContent = 'Error de red.'; }
+    }
+    async function gcCargarPed(soloContar) {
+      const box = document.getElementById('gcListaPed');
+      const msg = document.getElementById('gcMsgPed');
+      if (!box) return;
+      if (!soloContar) { box.innerHTML = 'Cargando...'; msg.textContent = ''; }
+      try {
+        const r = await fetch('/api/gastos-cuentas');
+        const d = await r.json();
+        if (!d || !d.ok) { if (!soloContar) { box.innerHTML = ''; msg.textContent = 'No se pudo cargar.'; } return; }
+        const L = (d.registros || []).filter(function (x) { return x.tipo === 'pedido' && x.estado !== 'ELIMINADO'; });
+        const nn = L.filter(function (x) { return x.estado === 'NUEVO'; }).length;
+        document.getElementById('gcTabPed').textContent = nn ? 'Pedidos (' + nn + ')' : 'Pedidos';
+        if (soloContar) return;
+        if (!L.length) { box.innerHTML = '<div style="color:#94a3b8;font-size:13px;">Todavia no hay pedidos. Llegan al sincronizar el panel del catalogo con este servidor.</div>'; return; }
+        box.innerHTML = '';
+        L.forEach(function (reg) {
+          const div = document.createElement('div');
+          div.className = 'gc-hist-item';
+          const est = String(reg.estado || 'NUEVO').toUpperCase();
+          const cls = est === 'NUEVO' ? 'fiado' : (est === 'CANCELADO' ? 'gasto' : 'pagado');
+          const arts = (reg.items || []).map(function (it) { return (it.sku ? '<span style="color:#94a3b8;">[' + gcEscP(it.sku) + ']</span> ' : '') + gcEscP((it.cantidad || 1) + ' x ' + it.nombre); }).join('<br>');
+          let h =
+            '<div style="display:flex;justify-content:space-between;gap:8px;margin-bottom:4px;">' +
+              '<span><span class="gc-badge ' + cls + '">' + est + '</span></span>' +
+              '<span style="font-size:11px;color:#94a3b8;">' + gcEscP(reg.hora || '') + ' · #' + gcEscP(reg.ref || '') + '</span>' +
+            '</div>' +
+            '<div style="margin-bottom:4px;"><b>' + gcEscP(reg.cliente || 'Sin nombre') + '</b>' + (reg.telefono ? ' · ' + gcEscP(reg.telefono) : '') + '</div>' +
+            '<div style="margin-bottom:4px;">' + arts + '</div>' +
+            (reg.entrega ? '<div style="color:#94a3b8;">' + gcEscP(reg.entrega) + (reg.direccion ? ' · ' + gcEscP(reg.direccion) : '') + '</div>' : '') +
+            (reg.pago ? '<div style="color:#94a3b8;">Pago: ' + gcEscP(reg.pago) + '</div>' : '') +
+            (reg.nota ? '<div style="color:#94a3b8;">Nota: ' + gcEscP(reg.nota) + '</div>' : '') +
+            '<div style="margin:4px 0 6px;font-weight:700;color:#fbbf24;">Total: ' + gcEscP(reg.totalTxt || '') + '</div>' +
+            '<div style="display:flex;gap:6px;flex-wrap:wrap;">';
+          if (est === 'NUEVO') h += '<button type="button" class="btn-toggle" style="padding:4px 8px;font-size:12px;background:#15803d;color:#fff;" data-pop="pedido_estado" data-id="' + reg.id + '" data-es="CONFIRMADO">Confirmar</button>';
+          if (est === 'NUEVO' || est === 'CONFIRMADO') h += '<button type="button" class="btn-toggle" style="padding:4px 8px;font-size:12px;background:#b45309;color:#fff;" data-pop="pedido_estado" data-id="' + reg.id + '" data-es="CANCELADO">Cancelar</button>';
+          h += '<button type="button" class="btn-toggle" style="padding:4px 8px;font-size:12px;" data-pop="imprimir" data-id="' + reg.id + '">Imprimir</button>';
+          h += '<button type="button" class="btn-toggle" style="padding:4px 8px;font-size:12px;background:#7f1d1d;color:#fecaca;" data-pop="pedido_estado" data-id="' + reg.id + '" data-es="ELIMINADO">Eliminar</button>';
+          h += '</div>';
+          div.innerHTML = h;
+          box.appendChild(div);
+        });
+        box.querySelectorAll('[data-pop]').forEach(function (b) {
+          b.onclick = function () {
+            const op = b.getAttribute('data-pop'), es = b.getAttribute('data-es');
+            if (es === 'ELIMINADO' && !confirm('¿Eliminar este pedido? Tambien se quitara del panel del catalogo al sincronizar.')) return;
+            if (es === 'CANCELADO' && !confirm('¿Cancelar este pedido?')) return;
+            gcPedOp(op, parseInt(b.getAttribute('data-id'), 10), es);
+          };
+        });
+      } catch (e) {
+        if (!soloContar) { box.innerHTML = ''; msg.textContent = 'Error de red.'; }
       }
     }
     function iniciarGastosCuentas() {
@@ -24556,6 +24729,16 @@ while ($listener.IsListening) {
                 Enviar-Json $context @{ ok = $false; error = "Operacion no valida." } 400
             }
 
+        } elseif ($method -eq "POST" -and $path -eq "/api/tienda/pedidos") {
+            # Pedidos del panel del catalogo (misma WiFi): quedan en Cuentas y gastos > Pedidos. Devuelve lo que la PC confirmo, cancelo o elimino.
+            try {
+                $cuerpoPd = (Leer-CuerpoTexto $request) | ConvertFrom-Json
+                $estadosPd = Pedido-Panel-Recibir $cuerpoPd
+                Enviar-Json $context @{ ok = $true; estados = $estadosPd } 200 4
+            } catch {
+                Enviar-Json $context @{ ok = $false; error = [string]$_.Exception.Message } 500
+            }
+
         } elseif ($method -eq "GET" -and $path -eq "/api/gastos-cuentas") {
             if (-not (Es-PeticionPC $request)) {
                 Enviar-Json $context @{ ok = $false; error = "Solo desde la PC." } 403
@@ -24680,6 +24863,17 @@ while ($listener.IsListening) {
                             Enviar-Json $context @{ ok = $true; registro = $regG; impreso = $impresoP; errorImpresion = $errImpP } 200 4
                         }
                     }
+                } elseif ($opG -eq "pedido_estado") {
+                    $regG = $global:gastosCuentas.registros | Where-Object { [int]$_.id -eq [int]$dataG.id -and [string]$_.tipo -eq "pedido" } | Select-Object -First 1
+                    $nuevoEst = ([string]$dataG.estado).Trim().ToUpperInvariant()
+                    if (-not $regG) { Enviar-Json $context @{ ok = $false; error = "No existe ese pedido." } 404 }
+                    elseif ($nuevoEst -notin @('NUEVO','CONFIRMADO','ENTREGADO','CANCELADO','ELIMINADO')) { Enviar-Json $context @{ ok = $false; error = "Estado no valido." } 400 }
+                    else {
+                        $regG.estado = $nuevoEst
+                        $regG.cambiadoPC = $true
+                        Guardar-GastosCuentas
+                        Enviar-Json $context @{ ok = $true }
+                    }
                 } elseif ($opG -eq "imprimir") {
                     $regG = $global:gastosCuentas.registros | Where-Object { [int]$_.id -eq [int]$dataG.id } | Select-Object -First 1
                     if (-not $regG) { Enviar-Json $context @{ ok = $false; error = "No existe ese registro." } 404 }
@@ -24687,6 +24881,7 @@ while ($listener.IsListening) {
                         try {
                             $okI = $false
                             if ([string]$regG.tipo -eq "gasto") { $okI = [bool](Imprimir-Texto (Generar-TextoGasto $regG)) }
+                            elseif ([string]$regG.tipo -eq "pedido") { $okI = [bool](Imprimir-Texto (Generar-TextoPedidoPanel $regG)) }
                             else { $okI = [bool](Imprimir-Texto (Generar-TextoFiado $regG)) }
                             if ($okI) { Enviar-Json $context @{ ok = $true } }
                             else { Enviar-Json $context @{ ok = $false; error = "Windows no confirmo la impresion." } 500 }
